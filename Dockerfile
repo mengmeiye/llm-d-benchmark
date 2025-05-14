@@ -48,13 +48,18 @@ RUN /opt/miniconda/bin/conda install -y python=3.9 \
     && pip install --no-cache-dir urllib3 kubernetes pandas
 
 # Step 4: Clone the correct GitHub repository and branch for fmperf
-ARG FM_PERF_REPO=https://github.com/wangchen615/fmperf.git
-ARG FM_PERF_BRANCH=dev-llm-d
+ARG FM_PERF_REPO=https://github.com/fmperf-project/fmperf.git
+ARG FM_PERF_BRANCH=main
 RUN git clone --branch ${FM_PERF_BRANCH} ${FM_PERF_REPO}
 
 # Step 5: Copy local fmperf files and environment variable files
-ADD ./hack/deploy /workspace/llm-d-benchmark/hack/deploy
+ADD ./scenarios /workspace/llm-d-benchmark/scenarios
+ADD ./setup /workspace/llm-d-benchmark/setup
 ADD ./workload /workspace/llm-d-benchmark/workload
+RUN cd /workspace/llm-d-benchmark/; ln -s setup/run.sh run.sh
+
+RUN mkdir /root/.kube
+RUN touch /root/.llmdbench_dependencies_checked
 
 # Step 6: Set the environment variable for the experiment environment (standalone, p2p, etc.)
 ARG SCENARIO=none

@@ -80,9 +80,9 @@ if __name__ == "__main__":
     # Create stack spec for the existing vllm-d deployment
     stack_spec = StackSpec(
         name=experiment_id,
-        stack_type="vllm-d",  # This will automatically set endpoint to vllm-router-service
+        stack_type=os.environ.get("LLMDBENCH_FMPERF_STACK_TYPE"),
         refresh_interval=300,  # Refresh model list every 5 minutes
-        endpoint_url="http://inference-gateway"  # Service name
+        endpoint_url=f"http://{os.environ.get('LLMDBENCH_FMPERF_SERVICE_URL')}"  # Service name
     )
 
     # USER Entry: Experiment variables
