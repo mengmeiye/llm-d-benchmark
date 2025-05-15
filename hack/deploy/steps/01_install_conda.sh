@@ -20,7 +20,7 @@ else
   ANACONDA_PATH='export PATH="/opt/miniconda/bin/conda:$PATH"'
 fi
 
-if ! grep -Fxq "$ANACONDA_PATH" ~/.${LLMDBENCH_CONTROL_DEPLOY_HOST_SHELL}rc && ${LLMDBENCH_CONTROL_DRY_RUN} -eq 0 ; then
+if ! grep -Fxq "$ANACONDA_PATH" ~/.${LLMDBENCH_CONTROL_DEPLOY_HOST_SHELL}rc && [[ "${LLMDBENCH_CONTROL_DRY_RUN}" -eq 0 ]]; then
   announce "$ANACONDA_PATH" >> ~/.${LLMDBENCH_CONTROL_DEPLOY_HOST_SHELL}rc
   announce "✅ Anaconda path added to ~/.${LLMDBENCH_CONTROL_DEPLOY_HOST_SHELL}rc"
 else
