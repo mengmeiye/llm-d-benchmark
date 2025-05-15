@@ -90,13 +90,16 @@ announce "Running experiment (harness=$LLMDBENCH_FMPERF_EXPERIMENT_HARNESS, prof
 pushd ${LLMDBENCH_FMPERF_DIR}/fmperf &>/dev/null
 
 # Hardcode Conda init from known working path
-if [ -f "/opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh" ]; then
+
+if [ "$LLMDBENCH_CONTROL_DEPLOY_HOST_OS" = "mac" ] && [ -f "/opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh" ]; then
   llmdbench_execute_cmd "source \"/opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-  llmdbench_execute_cmd "conda activate \"$LLMDBENCH_FMPERF_CONDA_ENV_NAME\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+elif [ "$LLMDBENCH_CONTROL_DEPLOY_HOST_OS" = "linux" ] && [ -f "/opt/miniconda/etc/profile.d/conda.sh" ]; then
+  llmdbench_execute_cmd "source \"/opt/miniconda/etc/profile.d/conda.sh\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 else
-  echo "❌ Could not find conda.sh. Please verify your Anaconda installation."
+  echo "❌ Could not find conda.sh for $LLMDBENCH_CONTROL_DEPLOY_HOST_OS. Please verify your Anaconda installation."
   exit 1
 fi
+llmdbench_execute_cmd "conda activate \"$LLMDBENCH_FMPERF_CONDA_ENV_NAME\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 
 if [[ ${LLMDBENCH_CONTROL_DRY_RUN} -eq 0 ]]; then
 # Confirm we're using the correct Python environment
