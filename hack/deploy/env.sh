@@ -128,15 +128,21 @@ if [[ ! -z $LLMDBENCH_DEPLOY_SCENARIO ]]; then
   fi
 fi
 
-overridevarlist=$(env | grep _CLIOVERRIDE_ | cut -d '=' -f 1)
-if [[ ! -z $overridevarlist ]]; then
+overridevarlist=$(env | grep _CLIOVERRIDE_ | cut -d '=' -f 1 || true)
+
+if [[ -n "$overridevarlist" ]]; then
   for overridevar in $overridevarlist; do
-    actualvar=$(echo $overridevar | $LLMDBENCH_CONTROL_SCMD 's^_CLIOVERRIDE^^g')
-    if [[ $LLMDBENCH_CONTROL_VERBOSE -eq 1 && $LLMDBENCH_CONTROL_OVERRIDE_COMMAND_DISPLAYED -eq 0 ]]; then
-      echo "Environment variable $actualvar was overriden by command line options"
+    actualvar=$(echo "$overridevar" | sed 's/_CLIOVERRIDE_//g')
+    
+    if [[ -n "${!overridevar:-}" ]]; then
+      export "$actualvar=${!overridevar}"
+
+      if [[ "${LLMDBENCH_CONTROL_VERBOSE:-0}" -eq 1 && "${LLMDBENCH_CONTROL_OVERRIDE_COMMAND_DISPLAYED:-0}" -eq 0 ]]; then
+        echo "Environment variable $actualvar was overridden by command line options"
+      fi
     fi
-    export $actualvar=${!overridevar}
   done
+
   export LLMDBENCH_CONTROL_OVERRIDE_COMMAND_DISPLAYED=1
 fi
 
