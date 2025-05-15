@@ -218,7 +218,7 @@ else
   fi
 fi
 
-for mt in standalone p2p; do
+for mt in standalone p2p deployer; do
   is_env=$(echo $LLMDBENCH_DEPLOY_METHODS | grep $mt || true)
   if [[ -z $is_env ]]; then
     export LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_$(echo $mt | tr '[:lower:]' '[:upper:]')_ACTIVE=0
@@ -285,7 +285,8 @@ function llmdbench_execute_cmd {
   local actual_cmd=$1
   local dry_run=${2:-1}
   local verbose=${3:-0}
-  local attempts=${4:-1}
+  local silent=${4:-1}
+  local attempts=${5:-1}
   local counter=1
   local delay=10
 
@@ -299,8 +300,11 @@ function llmdbench_execute_cmd {
     _msg="---> will execute the command \"${actual_cmd}\""
     echo ${_msg} > ${LLMDBENCH_CONTROL_WORK_DIR}/setup/commands/$(date +%s%N)_command.log
     while [[ "${counter}" -le "${attempts}" ]]; do
-      if [[ ${verbose} -eq 0 ]]; then
+      if [[ ${verbose} -eq 0 && ${silent} -eq 1 ]]; then
         eval ${actual_cmd} &>/dev/null
+        local ecode=$?
+      elif [[ ${verbose} -eq 0 && ${silent} -eq 0 ]]; then
+        eval ${actual_cmd}
         local ecode=$?
       else
         echo ${_msg}

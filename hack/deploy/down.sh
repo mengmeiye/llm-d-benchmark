@@ -110,7 +110,7 @@ if [[ $LLMDBENCH_CONTROL_DEEP_CLEANING -eq 0 ]]; then
   fi
 
   if [[ ${LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_STANDALONE_ACTIVE} -eq 0 && ${LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_P2P_ACTIVE} -eq 1 ]]; then
-    tgtres=$(echo "$tgtres" | grep -E "p2p|inference-gateway|llm-route|base-model|endpoint-picker|inference-route|inference-gateway-secret|inference-gateway-params|inference-gateway")
+    tgtres=$(echo "$tgtres" | grep -E "p2p|inference-gateway|inferencepool|llm-route|base-model|endpoint-picker|inference-route|inference-gateway-secret|inference-gateway-params|inference-gateway")
   fi
 
   for delres in $tgtres; do
@@ -147,7 +147,7 @@ if [[ $LLMDBENCH_CONTROL_DEEP_CLEANING -eq 1 ]]; then
 # Optional: delete cloned repos if they exist
   announce "🧼 Cleaning up local Git clones..."
   sleep 10
-  llmdbench_execute_cmd "rm -rf ${LLMDBENCH_KVCM_DIR}/llm-d-kv-cache-manager ${LLMDBENCH_GAIE_DIR}/gateway-api-inference-extension ${LLMDBENCH_FMPERF_DIR}/fmperf" ${LLMDBENCH_CONTROL_DRY_RUN}
+  #llmdbench_execute_cmd "rm -rf ${LLMDBENCH_KVCM_DIR}/llm-d-kv-cache-manager ${LLMDBENCH_GAIE_DIR}/gateway-api-inference-extension ${LLMDBENCH_FMPERF_DIR}/fmperf" ${LLMDBENCH_CONTROL_DRY_RUN}
 fi
 
 announce "✅ Cleanup complete. Namespace '$LLMDBENCH_CLUSTER_NAMESPACE' is now cleared (except shared cluster-scoped resources like kgateway)."

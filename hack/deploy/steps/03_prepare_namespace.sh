@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 source ${LLMDBENCH_CONTROL_DIR}/env.sh
 
-if [[ $LLMDBENCH_CONTROL_DEPLOY_IS_OPENSHIFT -eq 1 ]]
-then
+if [[ $LLMDBENCH_CONTROL_DEPLOY_IS_OPENSHIFT -eq 1 ]]; then
   llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} \
 adm \
 policy \
@@ -20,9 +19,7 @@ privileged \
 -n $LLMDBENCH_CLUSTER_NAMESPACE" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 fi
 
-is_env_type=$(echo $LLMDBENCH_DEPLOY_METHODS | grep standalone || true)
-if [[ ! -z ${is_env_type} ]]
-then
+if [[ $LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_STANDALONE_ACTIVE -eq 1 || $LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_P2P_ACTIVE -eq 1  ]]; then
   announce "Preparing OpenShift namespace ${LLMDBENCH_CLUSTER_NAMESPACE}..."
 
   for model in ${LLMDBENCH_DEPLOY_MODEL_LIST//,/ }; do
