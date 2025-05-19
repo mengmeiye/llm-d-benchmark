@@ -107,7 +107,9 @@ export LLMDBENCH_CONTROL_PCMD=${LLMDBENCH_CONTROL_PCMD:-python3}
 
 if [[ $LLMDBENCH_CONTROL_DEPENDENCIES_CHECKED -eq 0 && ! -f ~/.llmdbench_dependencies_checked ]]
 then
-  for req in $LLMDBENCH_CONTROL_SCMD $LLMDBENCH_CONTROL_PCMD $LLMDBENCH_CONTROL_KCMD $LLMDBENCH_CONTROL_HCMD kubectl kustomize; do
+  deplist="$LLMDBENCH_CONTROL_SCMD $LLMDBENCH_CONTROL_PCMD $LLMDBENCH_CONTROL_KCMD $LLMDBENCH_CONTROL_HCMD kubectl kustomize"
+  echo "Checking dependencies \"$deplist\""
+  for req in $deplist kubectl kustomize; do
     echo -n "Checking dependency \"${req}\"..."
     is_req=$(which ${req} || true)
     if [[ -z ${is_req} ]]; then
