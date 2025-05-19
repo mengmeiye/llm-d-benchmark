@@ -1,15 +1,44 @@
 # Benchmark deploy, execution, data collection, analysis and teardown
 
-## Goal: provide automation for repeatable and reproducible experiments and performance evaluation on llm-d
+## `llm-d`-benchmark
 
-## Main concepts (identified by specific directories)
+This repository provides an automated workflow for benchmarking LLM inference using the llm-d stack. It includes tools for deployment, experiment execution, data collection, and teardown across multiple environments and deployment styles.
 
-### scenarios: composed of pieces of information identifying the particular cluster, GPU model, llm model and llm-d parameters (environment file, and optionally a "values.yaml" file for llm-d-deployer)
-### harness: the load generator (python code), written using software facilites available at https://github.com/fmperf-project/fmperf (will be expanded with additional load generators in the future)
-### workload: an FMPerf workload specification, with load profile and load levels (to be also expanded with specifications to other load generators)
+### Goal
 
-### The triple <scenario>,<harness>,<workload>, combine with the standup/teardown capabilities provided by llm-d-deployer (https://github.com/llm-d/llm-d-deployer) should provide enough information to allow an experiment to be reproduced,
+To provide a single source of automation for repeatable and reproducible experiments and performance evaluation on llm-d
 
+### Architecture
+
+The benchmarking system drives synthetic or trace-based traffic into an llm-d-powered inference stack, orchestrated via Kubernetes. Requests are routed through a scalable load generator, with results collected and visualized for latency, throughput, and cache effectiveness.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)">
+    <img alt="llm-d Logo" src="./docs/images/llm-d-benchmarking.jpg" width=85%>
+  </picture>
+</p>
+
+
+### Main concepts (identified by specific directories)
+
+#### Scenarios
+
+Pieces of information identifying a particular cluster, GPU model, llm model and llm-d parameters (an environment file, and optionally a "values.yaml" file for llm-d-deployer)
+
+#### Harness
+
+Load Generator (python code), written using software facilites available at https://github.com/fmperf-project/fmperf. IMPORTANT: it will be expanded with additional load generators in the future)
+
+#### Workload:
+
+FMPerf workload specification, with load profile (e.g., `share-gpt` vs `long-input`) and load levels (e.g., QPS values). IMPORTANT: these definitions will be expanded with specifications to other load generators
+
+#### The triple <scenario>,<harness>,<workload>, combined with the standup/teardown capabilities provided by llm-d-deployer (https://github.com/llm-d/llm-d-deployer) should provide enough information to allow an experiment to be reproduced,
+
+### Dependecies:
+- llm-d-deployer (https://github.com/llm-d/llm-d-deployer)
+- fm-perf: https://github.com/fmperf-project/fmperf
 
 ## Quickstart
 
