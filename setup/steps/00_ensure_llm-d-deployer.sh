@@ -13,4 +13,5 @@ else
   popd &>/dev/null
 fi
 popd &>/dev/null
+
 announce "✅ llm-d-deployer is present at \"${LLMDBENCH_DEPLOYER_DIR}\""

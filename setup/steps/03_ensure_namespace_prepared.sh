@@ -2,21 +2,8 @@
 source ${LLMDBENCH_CONTROL_DIR}/env.sh
 
 announce "🔍 Checking if \"${LLMDBENCH_CLUSTER_NAMESPACE}\" is prepared."
-call_prepare=0
-is_ns=$(${LLMDBENCH_CONTROL_KCMD} get namespace | grep ${LLMDBENCH_CLUSTER_NAMESPACE} || true)
-if [[ -z ${is_ns} ]]; then
-  call_prepare=1
-fi
 
-is_secret=$(${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} get --no-headers secret ${LLMDBENCH_VLLM_COMMON_HF_TOKEN_NAME} --ignore-not-found=true)
-if [[ -z ${is_secret} ]]; then
-  call_prepare=1
-fi
-
-is_pvc=$(${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} get --no-headers pvc $LLMDBENCH_VLLM_COMMON_PVC_NAME --ignore-not-found=true)
-if [[ -z ${is_pvc} ]]; then
-  call_prepare=1
-fi
+llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} delete job download-model --ignore-not-found" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 
 for model in ${LLMDBENCH_DEPLOY_MODEL_LIST//,/ }; do
   cat << EOF > $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/${LLMDBENCH_CURRENT_STEP}_prepare_namespace_${model}.yaml
@@ -30,7 +17,9 @@ EOF
 
 llmd_opts="--skip-infra --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} --storage-class ${LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS} --storage-size ${LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE} --values-file $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/${LLMDBENCH_CURRENT_STEP}_prepare_namespace_${model}.yaml"
 announce "🚀 Calling llm-d-deployer with options \"${llmd_opts}\"..."
+pushd $LLMDBENCH_DEPLOYER_DIR/llm-d-deployer/quickstart &>/dev/null
 llmdbench_execute_cmd "cd $LLMDBENCH_DEPLOYER_DIR/llm-d-deployer/quickstart; export KUBECONFIG=$LLMDBENCH_CONTROL_WORK_DIR/environment/context.ctx; export HF_TOKEN=$LLMDBENCH_HF_TOKEN; export PREPARE_ONLY=true; ./llmd-installer.sh --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} $llmd_opts" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0
+popd &>/dev/null
 announce "✅ llm-d-deployer prepared namespace"
 done
 
