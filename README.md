@@ -13,7 +13,7 @@ The benchmarking system drives synthetic or trace-based traffic into an llm-d-po
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)">
-    <img alt="llm-d Logo" src="./docs/images/llm-d-benchmarking.jpg" width=85%>
+    <img alt="llm-d Logo" src="./docs/images/llm-d-benchmarking.jpg" width=100%>
   </picture>
 </p>
 
