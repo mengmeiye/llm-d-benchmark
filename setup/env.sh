@@ -192,7 +192,7 @@ elif [[ -z $LLMDBENCH_CLUSTER_URL || $LLMDBENCH_CLUSTER_URL == "auto" ]]; then
   export LLMDBENCH_CONTROL_CLUSTER_NAME=$(echo $current_context | cut -d '/' -f 2 | cut -d '-' -f 2)
   if [[ $LLMDBENCH_CONTROL_WARNING_DISPLAYED -eq 0 ]]; then
     echo "WARNING: environment variable LLMDBENCH_CLUSTER_URL=$LLMDBENCH_CLUSTER_URL. Will attempt to use current context \"${current_context}\"."
-    LLMDBENCH_CONTROL_WARNING_DISPLAYED=1
+    export LLMDBENCH_CONTROL_WARNING_DISPLAYED=1
     sleep 5
   fi
   ${LLMDBENCH_CONTROL_KCMD} config view --minify --flatten --raw --context=${current_context} > $LLMDBENCH_CONTROL_WORK_DIR/environment/context.ctx
