@@ -6,7 +6,7 @@ image: "lmcache/lmcache-benchmark:main"  # Container image to use
 service_account: "REPLACE_ENV_LLMDBENCH_CLUSTER_SERVICE_ACCOUNT"  # Service account to use for the job
 num_users_warmup: "REPLACE_NUM_USERS_DURING_WARMUP"
 num_users: "REPLACE_NUM_USERS_FOR_SYNTHETIC_PREFIX_REUSE"
-num_rounds: ""REPLACE_NUM_OF_ROUNDS_OF_USER_PREFIX_REUSE"
+num_rounds: "REPLACE_NUM_OF_ROUNDS_OF_USER_PREFIX_REUSE"
 system_prompt: "REPLACE_SYSTEM_PROMPT_LENGTH"
 chat_history: "REPLACE_CHAT_HISTORY_LENGTH"
 answer_len: "REPLACE_ANSWER_LENGTH"
