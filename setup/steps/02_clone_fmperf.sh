@@ -7,7 +7,7 @@ if [[ ! -d fmperf ]]; then
   llmdbench_execute_cmd "cd ${LLMDBENCH_FMPERF_DIR}; git clone \"${LLMDBENCH_FMPERF_GIT_REPO}\" -b \"${LLMDBENCH_FMPERF_GIT_BRANCH}\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 else
   pushd fmperf &>/dev/null
-  llmdbench_execute_cmd "cd ${LLMDBENCH_FMPERF_DIR}/fmperf; git checkout ${LLMDBENCH_FMPERF_GIT_BRANCH}; git pull" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+  llmdbench_execute_cmd "cd ${LLMDBENCH_FMPERF_DIR}/fmperf; git checkout ${LLMDBENCH_FMPERF_GIT_BRANCH}" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
   popd &>/dev/null
 fi
 pushd fmperf &>/dev/null

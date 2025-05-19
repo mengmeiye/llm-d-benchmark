@@ -186,9 +186,9 @@ else
   fi
   announce "✅ Actual execution completed successfully"
 
-  llmdbench_execute_cmd "mv $(pwd)/pod_log_response.txt ${LLMDBENCH_CONTROL_WORK_DIR}/results/pod_log_response.txt" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+  llmdbench_execute_cmd "touch $(pwd)/pod_log_response.txt; mv -f $(pwd)/pod_log_response.txt ${LLMDBENCH_CONTROL_WORK_DIR}/results/pod_log_response.txt" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 
-  popd ${LLMDBENCH_FMPERF_DIR} &>/dev/null
+  popd &>/dev/null
 fi
 
 announce "🏗️ Collecting results ..."
