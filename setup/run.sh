@@ -126,7 +126,7 @@ if [[ $LLMDBENCH_FMPERF_REMOTE_EXECUTION -eq 1 ]]; then
     llmdbench_run_cli_opts=$llmdbench_run_cli_opts" -z"
   fi
   announce "⏳ Waiting for pod \"fmperfrunpod\" to complete its execution..."
-  llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace $LLMDBENCH_CLUSTER_NAMESPACE run fmperfrunpod ${env_vars_cmd_cli_opts} -i --image-pull-policy Always --attach --pod-running-timeout 900s --restart=Never --rm --image=icr.io/vopo/llm-d-benchmark:latest --command -- bash -c \"./llm-d-benchmark/run.sh $llmdbench_run_cli_opts -n\""  ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0
+  llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace $LLMDBENCH_CLUSTER_NAMESPACE run fmperfrunpod ${env_vars_cmd_cli_opts} -i --image-pull-policy Always --attach --pod-running-timeout ${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --restart=Never --rm --image=icr.io/vopo/llm-d-benchmark:latest --command -- bash -c \"./llm-d-benchmark/run.sh $llmdbench_run_cli_opts -n\""  ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0
   announce "✅ Experiment completed successfully"
 
 else
@@ -186,10 +186,13 @@ else
   fi
   announce "✅ Actual execution completed successfully"
 
-  announce "🏗️ Collecting results ..."
-  llmdbench_execute_cmd "cp -f $(pwd)/pod_log_response.txt ${LLMDBENCH_CONTROL_WORK_DIR}/results/pod_log_response.txt" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+  llmdbench_execute_cmd "mv $(pwd)/pod_log_response.txt ${LLMDBENCH_CONTROL_WORK_DIR}/results/pod_log_response.txt" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 
-  PN=$(echo $LLMDBENCH_EXPERIMENT_ID | $LLMDBENCH_CONTROL_SCMD 's^_^-^g' | tr '[:upper:]' '[:lower:]')
+  popd ${LLMDBENCH_FMPERF_DIR} &>/dev/null
+fi
+
+announce "🏗️ Collecting results ..."
+PN=$(echo $LLMDBENCH_EXPERIMENT_ID | $LLMDBENCH_CONTROL_SCMD 's^_^-^g' | tr '[:upper:]' '[:lower:]')
 
   cat <<EOF > $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/run_access_to_pvc.yaml
 apiVersion: v1
@@ -211,11 +214,8 @@ spec:
       claimName: $LLMDBENCH_FMPERF_PVC_NAME
 EOF
 
-  llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} apply -f $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/run_access_to_pvc.yaml" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-  llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=condition=Ready=True pod/$PN" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-  llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} cp $PN:/requests/${LLMDBENCH_EXPERIMENT_ID}/ ${LLMDBENCH_CONTROL_WORK_DIR}/results/" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-  llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} delete pod $PN" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-  announce "✅ All results collected successfully"
-
-  popd ${LLMDBENCH_FMPERF_DIR} &>/dev/null
-fi
+llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} apply -f $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/run_access_to_pvc.yaml" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=condition=Ready=True pod/$PN" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} cp $PN:/requests/${LLMDBENCH_EXPERIMENT_ID}/ ${LLMDBENCH_CONTROL_WORK_DIR}/results/" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} delete pod $PN" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+announce "✅ All results collected successfully"
