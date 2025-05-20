@@ -105,7 +105,11 @@ else
 fi
 
 export LLMDBENCH_CONTROL_PCMD=${LLMDBENCH_CONTROL_PCMD:-python3}
-
+export LLMDBENCH_CONTROL_CCMD=${LLMDBENCH_CONTROL_CCMD:-podman}
+is_docker=$(which docker || true)
+if [[ ! -z ${is_docker} ]]; then
+  export LLMDBENCH_CONTROL_CCMD=docker
+fi
 if [[ $LLMDBENCH_CONTROL_DEPENDENCIES_CHECKED -eq 0 && ! -f ~/.llmdbench_dependencies_checked ]]
 then
   deplist="$LLMDBENCH_CONTROL_SCMD $LLMDBENCH_CONTROL_PCMD $LLMDBENCH_CONTROL_KCMD $LLMDBENCH_CONTROL_HCMD kubectl kustomize"

@@ -22,7 +22,7 @@ else
   pip install -r requirements.txt
   pip install -e .
 
-  docker build -t fmperf .
+  ${LLMDBENCH_CONTROL_CCMD} build -t fmperf .
   mkdir -p requests && chmod o+w requests
   cp .env.example .env
 fi
