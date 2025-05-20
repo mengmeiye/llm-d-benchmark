@@ -119,13 +119,6 @@ then
     fi
     echo "done"
   done
-  echo -n "Checking if your current bash (version $(printf "%s\n" $BASH_VERSION) support arrays..."
-  is_invalid=$(declare -A test | grep -i "invalid option" || true)
-  if [[ ! -z ${is_invalid} ]]; then
-    echo "❌ Your bash version is too old! This code requires a version that can use Associative Arrays (i.e., \"declare -A test\" returns without error)"
-    exit 1
-  fi
-  echo done
   touch ~/.llmdbench_dependencies_checked
   export LLMDBENCH_CONTROL_DEPENDENCIES_CHECKED=1
 fi
@@ -275,17 +268,30 @@ function model_attribute {
   local model=$1
   local attribute=$2
 
-  declare -A LLMDBENCH_MODEL_ALIAS_TO_NAME
+  # Do not use associative arrays. Not supported by MacOS with older bash versions
+#  declare -A LLMDBENCH_MODEL_ALIAS_TO_NAME
+#  LLMDBENCH_MODEL_ALIAS_TO_NAME["llama-3b"]="meta-llama/Llama-3.2-3B-Instruct"
+#  LLMDBENCH_MODEL_ALIAS_TO_NAME["llama-8b"]="meta-llama/Llama-3.1-8B-Instruct"
+#  LLMDBENCH_MODEL_ALIAS_TO_NAME["llama-70b"]="meta-llama/Llama-3.1-70B-Instruct"
+#  LLMDBENCH_MODEL_ALIAS_TO_NAME["llama-17b"]="RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic" #pragma: allowlist secret
+#  is_alias=$(echo ${LLMDBENCH_MODEL_ALIAS_TO_NAME[${model}]} || true)
+#  if [[ ! -z ${is_alias} ]]; then
+#    local model=$is_alias
+#  fi
 
-  LLMDBENCH_MODEL_ALIAS_TO_NAME["llama-3b"]="meta-llama/Llama-3.2-3B-Instruct"
-  LLMDBENCH_MODEL_ALIAS_TO_NAME["llama-8b"]="meta-llama/Llama-3.1-8B-Instruct"
-  LLMDBENCH_MODEL_ALIAS_TO_NAME["llama-70b"]="meta-llama/Llama-3.1-70B-Instruct"
-  LLMDBENCH_MODEL_ALIAS_TO_NAME["llama-17b"]="RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic" #pragma: allowlist secret
+  case "$model" in
+    "llama-3b")
+      local model=meta-llama/Llama-3.2-3B-Instruct ;;
+    "llama-8b")
+      local model=meta-llama/Llama-3.1-8B-Instruct ;;
+    "llama-70b")
+      local model=meta-llama/Llama-3.1-70B-Instruct ;;
+    "llama-17b")
+      local model=RedHatAI/Llama-4-Scout-17B-16E-Instruct-FP8-dynamic ;;
+    *)
+      true ;;
+  esac
 
-  is_alias=$(echo ${LLMDBENCH_MODEL_ALIAS_TO_NAME[${model}]} || true)
-  if [[ ! -z ${is_alias} ]]; then
-    local model=$is_alias
-  fi
   local modelcomponents=$(echo $model | cut -d '/' -f 2 | $LLMDBENCH_CONTROL_SCMD 's^-^\n^g' )
   local type=$(echo "${modelcomponents}" | grep -Ei "nstruct|hf")
   local parameters=$(echo "${modelcomponents}" | grep -Ei "^[0-9].*b")
