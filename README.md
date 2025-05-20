@@ -26,7 +26,7 @@ Pieces of information identifying a particular cluster, GPU model, llm model and
 
 #### Harness
 
-Load Generator (python code), written using software facilites available at https://github.com/fmperf-project/fmperf. 
+Load Generator (python code), written using software facilites available at https://github.com/fmperf-project/fmperf.
 
 > [!NOTE]
 > This will be expanded with additional load generators in the future.
@@ -58,6 +58,9 @@ export LLMDBENCH_CLUSTER_NAMESPACE="..."
 ```
 > [!NOTE]
 > In case you want to simply use the current context, just set `export LLMDBENCH_CLUSTER_HOST=auto`
+
+> [!NOTE]
+> The `namespace` (environment variable `LLMDBENCH_CLUSTER_NAMESPACE`) will be automatically created.
 
 A complete list of available variables (and its default values) can be found by running
  `cat setup/env.sh | grep "^export LLMDBENCH_" | sort`
