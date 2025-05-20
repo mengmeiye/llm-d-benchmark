@@ -102,15 +102,28 @@ if [[ $LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_DEPLOYER_ACTIVE -eq 1 ]]; then
     hclist=$(echo "${hclist}" | awk '{ print $1 }')
     for hc in ${hclist}; do
       announce "🗑️  Deleting Helm release \"${hc}\"..."
-      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_HCMD} uninstall ${hc} --namespace $LLMDBENCH_CLUSTER_NAMESPACE" ${LLMDBENCH_CONTROL_DRY_RUN}
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_HCMD} uninstall ${hc} --namespace $LLMDBENCH_CLUSTER_NAMESPACE" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
       announce "✅ Helm release \"${hc}\" fully deleted."
     done
-    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $LLMDBENCH_CLUSTER_NAMESPACE --ignore-not-found=true job download-model" ${LLMDBENCH_CONTROL_DRY_RUN}
+    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $LLMDBENCH_CLUSTER_NAMESPACE --ignore-not-found=true job download-model" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    for cr in llm-d-modelservice-endpoint-picker llm-d-modelservice-manager llm-d-modelservice-metrics-auth llm-d-modelservice-admin llm-d-modelservice-editor llm-d-modelservice-viewer; do
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --ignore-not-found=true ClusterRole $cr" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    done
   else
-    llmd_opts="--skip-infra --uninstall --values-file $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/${LLMDBENCH_CURRENT_STEP}_deployer_values.yaml"
-    announce "🚀 Calling llm-d-deployer with options \"${llmd_opts}\"..."
-    llmdbench_execute_cmd "cd $LLMDBENCH_DEPLOYER_DIR/llm-d-deployer/quickstart; export KUBECONFIG=$LLMDBENCH_CONTROL_WORK_DIR/environment/context.ctx; ./llmd-installer.sh --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} --hf-token $LLMDBENCH_HF_TOKEN --storage-class ${LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS} --storage-size ${LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE} $llmd_opts" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-    announce "✅ llm-d-deployer completed uninstall"
+    for model in ${LLMDBENCH_DEPLOY_MODEL_LIST//,/ }; do
+      cat << EOF > $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/teardown.yaml
+sampleApplication:
+  enabled: true
+  baseConfigMapRefName: basic-gpu-with-nixl-and-redis-lookup-preset
+  model:
+    modelArtifactURI: pvc://$LLMDBENCH_VLLM_COMMON_PVC_NAME/models/$(model_attribute $model model)
+    modelName: "$(model_attribute $model model)"
+EOF
+      llmd_opts="--skip-infra --uninstall --values-file $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/teardown.yaml"
+      announce "🚀 Calling llm-d-deployer with options \"${llmd_opts}\"..."
+      llmdbench_execute_cmd "cd $LLMDBENCH_DEPLOYER_DIR/llm-d-deployer/quickstart; export KUBECONFIG=$LLMDBENCH_CONTROL_WORK_DIR/environment/context.ctx; export HF_TOKEN=$LLMDBENCH_HF_TOKEN; ./llmd-installer.sh --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} --storage-class ${LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS} --storage-size ${LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE} $llmd_opts" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      announce "✅ llm-d-deployer completed uninstall"
+    done
   fi
 else
 
@@ -127,7 +140,7 @@ else
     fi
 
     for delres in $tgtres; do
-      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $LLMDBENCH_CLUSTER_NAMESPACE --ignore-not-found=true $delres" ${LLMDBENCH_CONTROL_DRY_RUN}
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $LLMDBENCH_CLUSTER_NAMESPACE --ignore-not-found=true $delres" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
     done
   else
     RESOURCE_KINDS=(
@@ -150,7 +163,7 @@ else
 
     for kind in "${RESOURCE_KINDS[@]}"; do
       announce "🗑️ Deleting all $kind in namespace $LLMDBENCH_CLUSTER_NAMESPACE..."
-      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete "$kind" --all -n "$LLMDBENCH_CLUSTER_NAMESPACE" --ignore-not-found=true || true" ${LLMDBENCH_CONTROL_DRY_RUN}
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete "$kind" --all -n "$LLMDBENCH_CLUSTER_NAMESPACE" --ignore-not-found=true || true" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
     done
   fi
 fi
@@ -159,7 +172,7 @@ if [[ $LLMDBENCH_CONTROL_DEEP_CLEANING -eq 1 ]]; then
 # Optional: delete cloned repos if they exist
   announce "🧼 Cleaning up local Git clones..."
   sleep 10
-  #llmdbench_execute_cmd "rm -rf ${LLMDBENCH_DEPLOYER_DIR}/llm-d-deployer ${LLMDBENCH_FMPERF_DIR}/fmperf" ${LLMDBENCH_CONTROL_DRY_RUN}
+  llmdbench_execute_cmd "rm -rf ${LLMDBENCH_DEPLOYER_DIR}/llm-d-deployer ${LLMDBENCH_FMPERF_DIR}/fmperf" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 fi
 
 announce "✅ Cleanup complete. Namespace '$LLMDBENCH_CLUSTER_NAMESPACE' is now cleared (except shared cluster-scoped resources like Gateway Provider)."
