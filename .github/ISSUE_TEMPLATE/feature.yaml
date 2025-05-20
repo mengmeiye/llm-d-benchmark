@@ -28,7 +28,7 @@ body:
     attributes:
       label: Desired use case or feature
       description: Is your feature request related to a problem? Please describe
-      placeholder: A clear and concise description of what the problem is. Ex. I have the following use-case [...]. For this use-case, I would like the `llm-d-deployer` to [...]
+      placeholder: A clear and concise description of what the problem is. Ex. I have the following use-case [...]. For this use-case, I would like the `llm-d-benchmark` to [...]
     validations:
       required: true
   - type: textarea
