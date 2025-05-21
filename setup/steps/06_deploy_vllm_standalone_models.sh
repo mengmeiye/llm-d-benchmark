@@ -106,7 +106,7 @@ spec:
   ports:
   - name: http
     port: 80
-    targetPort: 80
+    targetPort: ${LLMDBENCH_VLLM_COMMON_INFERENCE_PORT}
   selector:
     app: vllm-standalone-$(model_attribute $model parameters)-vllm-$(model_attribute $model label)-$(model_attribute $model type)
   type: ClusterIP
@@ -114,7 +114,9 @@ EOF
 
     llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} apply -f $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/${LLMDBENCH_CURRENT_STEP}_b_service_${model}.yaml" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 
+    srl=deployment,service,route,pods,secrets
     if [[ ${LLMDBENCH_VLLM_STANDALONE_HTTPROUTE} -eq 1 ]]; then
+      srl=deployment,service,httproute,route,pods,secrets
       cat << EOF > $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/${LLMDBENCH_CURRENT_STEP}_c_httproute_${model}.yaml
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
@@ -156,7 +158,7 @@ EOF
       if [[ -z $is_route ]]
       then
         announce "📜 Exposing pods serving model ${model} as service..."
-        llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} expose service/vllm-standalone-$(model_attribute $model label) --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} --name=vllm-standalone-$(model_attribute $model label)-route" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+        llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} expose service/vllm-standalone-$(model_attribute $model label) --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} --target-port=${LLMDBENCH_VLLM_COMMON_INFERENCE_PORT} --name=vllm-standalone-$(model_attribute $model label)-route" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
         announce "✅ Service for pods service model ${model} created"
       fi
       announce "✅ Model \"${model}\" and associated service deployed."
@@ -165,7 +167,7 @@ EOF
 
   announce "ℹ️ A snapshot of the relevant (model-specific) resources on namespace \"${LLMDBENCH_CLUSTER_NAMESPACE}\":"
   if [[ $LLMDBENCH_CONTROL_DRY_RUN -eq 0 ]]; then
-    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} get --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} deployment,service,httproute,route,pods,secrets" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0
+    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} get --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} $srl" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0
   fi
 else
   announce "⏭️  Environment types are \"${LLMDBENCH_DEPLOY_METHODS}\". Skipping this step."

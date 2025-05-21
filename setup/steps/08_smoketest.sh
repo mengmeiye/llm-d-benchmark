@@ -4,9 +4,11 @@ source ${LLMDBENCH_CONTROL_DIR}/env.sh
 announce "🔍 Checking if current deployment was successfull..."
 if [[ $LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_STANDALONE_ACTIVE -eq 1 ]]; then
   pod_string=standalone
+  route_string=standalone
   service_ip=$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_CLUSTER_NAMESPACE" get service --no-headers | grep ${pod_string} | awk '{print $3}' || true)
 else
   pod_string=decode
+  route_string=llm-d-inference-gateway
   service_ip=$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_CLUSTER_NAMESPACE" get gateway --no-headers | tail -n1 | awk '{print $3}')
 fi
 
@@ -38,7 +40,7 @@ for model in ${LLMDBENCH_DEPLOY_MODEL_LIST//,/ }; do
   llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} run testinference-gateway -n ${LLMDBENCH_CLUSTER_NAMESPACE} --attach --restart=Never --rm --image=ubi9/ubi --quiet --command -- bash -c \"curl --no-progress-meter http://${service_ip}:80/v1/models\" | jq ." ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 1 2
   announce "✅ Service responds successfully"
 
-  route_url=$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_CLUSTER_NAMESPACE" get route --no-headers --ignore-not-found | grep ${pod_string} | awk '{print $2}'  || true)
+  route_url=$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_CLUSTER_NAMESPACE" get route --no-headers --ignore-not-found | grep ${route_string} | awk '{print $2}'  || true)
   if [[ ! -z $route_url ]]; then
     announce "🚀 Testing external route \"${route_url}\"..."
     llmdbench_execute_cmd "curl --no-progress-meter http://${route_url}:80/v1/models | jq ." ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 1 2

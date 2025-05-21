@@ -143,6 +143,16 @@ EOF
     llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=condition=Ready=True pod -l llm-d.ai/model=$(model_attribute $model model | tr '[:upper:]' '[:lower:]') -l llm-d.ai/role=decode" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
     announce "🚀 (decode) pods serving model ${model} ready"
 
+    if [[ $LLMDBENCH_VLLM_DEPLOYER_ROUTE -ne 0 ]]; then
+      is_route=$(${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} get route --ignore-not-found | grep vllm-standalone-$(model_attribute $model label)-route || true)
+      if [[ -z $is_route ]]
+      then
+        announce "📜 Exposing pods serving model ${model} as service..."
+        llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} expose service/llm-d-inference-gateway --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} --target-port=${LLMDBENCH_VLLM_COMMON_INFERENCE_PORT} --name=llm-d-inference-gateway-route" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+        announce "✅ Service for pods service model ${model} created"
+      fi
+      announce "✅ Model \"${model}\" and associated service deployed."
+    fi
 
     announce "✅ llm-d-deployer completed model deployment"
   done
