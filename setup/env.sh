@@ -3,10 +3,13 @@
 # Cluster access
 export LLMDBENCH_CLUSTER_URL="${LLMDBENCH_CLUSTER_URL:-auto}"
 export LLMDBENCH_CLUSTER_TOKEN="${LLMDBENCH_CLUSTER_TOKEN:-sha256~sVYh-xxx}"
-export LLMDBENCH_CLUSTER_NAMESPACE="${LLMDBENCH_CLUSTER_NAMESPACE:-}"
-export LLMDBENCH_CLUSTER_SERVICE_ACCOUNT="${LLMDBENCH_CLUSTER_SERVICE_ACCOUNT:-default}"
 
 export LLMDBENCH_HF_TOKEN="${LLMDBENCH_HF_TOKEN:-}"
+
+# Image
+export LLMDBENCH_IMAGE_REGISTRY=${LLMDBENCH_IMAGE_REGISTRY:-ghcr.io}
+export LLMDBENCH_IMAGE_REPO=${LLMDBENCH_IMAGE_REPO:-llm-d/llm-d-benchmark}
+export LLMDBENCH_IMAGE_TAG=${LLMDBENCH_IMAGE_TAG:-0.0.8}
 
 # External repositories
 export LLMDBENCH_DEPLOYER_GIT_REPO="${LLMDBENCH_DEPLOYER_GIT_REPO:-https://github.com/llm-d/llm-d-deployer.git}"
@@ -17,6 +20,9 @@ export LLMDBENCH_FMPERF_DIR="${LLMDBENCH_FMPERF_DIR:-/tmp}"
 export LLMDBENCH_FMPERF_GIT_BRANCH="${LLMDBENCH_FMPERF_GIT_BRANCH:-main}"
 
 # Applicable to both standalone and deployer
+export LLMDBENCH_VLLM_COMMON_NAMESPACE="${LLMDBENCH_VLLM_COMMON_NAMESPACE:-llmdbench}"
+export LLMDBENCH_VLLM_COMMON_SERVICE_ACCOUNT="${LLMDBENCH_VLLM_COMMON_SERVICE_ACCOUNT:-default}"
+
 export LLMDBENCH_VLLM_COMMON_AFFINITY=${LLMDBENCH_VLLM_COMMON_AFFINITY:-nvidia.com/gpu.product:NVIDIA-H100-80GB-HBM3}
 export LLMDBENCH_VLLM_COMMON_REPLICAS=${LLMDBENCH_VLLM_COMMON_REPLICAS:-1}
 export LLMDBENCH_VLLM_COMMON_PERSISTENCE_ENABLED=${LLMDBENCH_VLLM_COMMON_PERSISTENCE_ENABLED:-true}
@@ -33,7 +39,7 @@ export LLMDBENCH_VLLM_COMMON_HF_TOKEN_NAME=${LLMDBENCH_VLLM_COMMON_HF_TOKEN_NAME
 export LLMDBENCH_VLLM_COMMON_INFERENCE_PORT=${LLMDBENCH_VLLM_COMMON_INFERENCE_PORT:-"8000"}
 
 # Standalone-specific parameters
-export LLMDBENCH_VLLM_STANDALONE_PVC_MOUNTPOINT=${LLMDBENCH_VLLM_STANDALONE_PVC_MOUNTPOINT:-/data}
+export LLMDBENCH_VLLM_STANDALONE_PVC_MOUNTPOINT=${LLMDBENCH_VLLM_STANDALONE_PVC_MOUNTPOINT:-/models}
 export LLMDBENCH_VLLM_STANDALONE_IMAGE=${LLMDBENCH_VLLM_STANDALONE_IMAGE:-"vllm/vllm-openai:latest"}
 export LLMDBENCH_VLLM_STANDALONE_ROUTE=${LLMDBENCH_VLLM_STANDALONE_ROUTE:-1}
 export LLMDBENCH_VLLM_STANDALONE_HTTPROUTE=${LLMDBENCH_VLLM_STANDALONE_HTTPROUTE:-0}
@@ -67,12 +73,14 @@ export LLMDBENCH_VLLM_DEPLOYER_EPP_PREFILL_SESSION_AWARE_SCORER_WEIGHT=${LLMDBEN
 
 # Experiments
 export LLMDBENCH_FMPERF_CONDA_ENV_NAME="${LLMDBENCH_FMPERF_CONDA_ENV_NAME:-fmperf-env}"
+export LLMDBENCH_FMPERF_NAMESPACE=${LLMDBENCH_FMPERF_NAMESPACE:-fmperf}
+export LLMDBENCH_FMPERF_SERVICE_ACCOUNT=${LLMDBENCH_FMPERF_SERVICE_ACCOUNT:-fmperf-runner}
 export LLMDBENCH_FMPERF_EXPERIMENT_HARNESS="${LLMDBENCH_FMPERF_EXPERIMENT_HARNESS:-llm-d-benchmark.py}"
 export LLMDBENCH_FMPERF_EXPERIMENT_PROFILE="${LLMDBENCH_FMPERF_EXPERIMENT_PROFILE:-sanity_short-input.yaml}"
 export LLMDBENCH_FMPERF_PVC_NAME="${LLMDBENCH_FMPERF_PVC_NAME:-"workload-pvc"}"
 export LLMDBENCH_FMPERF_PVC_SIZE="${LLMDBENCH_FMPERF_PVC_SIZE:-20Gi}"
 export LLMDBENCH_FMPERF_CONTAINER_IMAGE=${LLMDBENCH_FMPERF_CONTAINER_IMAGE:-lmcache/lmcache-benchmark:main}
-export LLMDBENCH_FMPERF_REMOTE_EXECUTION=${LLMDBENCH_FMPERF_REMOTE_EXECUTION:-0}
+export LLMDBENCH_FMPERF_EXPERIMENT_SKIP=${LLMDBENCH_FMPERF_EXPERIMENT_SKIP:-}
 
 # LLM-D-Benchmark deployment specific variables
 export LLMDBENCH_DEPLOY_MODEL_LIST=${LLMDBENCH_DEPLOY_MODEL_LIST:-"llama-3b"}
@@ -165,7 +173,7 @@ if [[ -n "$overridevarlist" ]]; then
   export LLMDBENCH_CONTROL_OVERRIDE_COMMAND_DISPLAYED=1
 fi
 
-required_vars=("LLMDBENCH_CLUSTER_NAMESPACE" "LLMDBENCH_HF_TOKEN")
+required_vars=("LLMDBENCH_HF_TOKEN")
 for var in "${required_vars[@]}"; do
   if [ -z "${!var:-}" ]; then
     echo "❌ Environment variable '$var' is not set."
@@ -212,10 +220,10 @@ else
     ${LLMDBENCH_CONTROL_KCMD} login --token="${LLMDBENCH_CLUSTER_TOKEN}" --server="${LLMDBENCH_CLUSTER_URL}:6443"
   fi
 
-  if [[ $current_namespace != $LLMDBENCH_CLUSTER_NAMESPACE ]]; then
-    namespace_exists=$(${LLMDBENCH_CONTROL_KCMD} get namespaces | grep $LLMDBENCH_CLUSTER_NAMESPACE || true)
+  if [[ $current_namespace != $LLMDBENCH_VLLM_COMMON_NAMESPACE ]]; then
+    namespace_exists=$(${LLMDBENCH_CONTROL_KCMD} get namespaces | grep $LLMDBENCH_VLLM_COMMON_NAMESPACE || true)
     if [[ ! -z $namespace_exists ]]; then
-      ${LLMDBENCH_CONTROL_KCMD} project $LLMDBENCH_CLUSTER_NAMESPACE
+      ${LLMDBENCH_CONTROL_KCMD} project $LLMDBENCH_VLLM_COMMON_NAMESPACE
     fi
   fi
   export LLMDBENCH_CONTROL_REMOTE_KUBECONFIG_FILENAME=config
@@ -234,9 +242,9 @@ not_admin=$($LLMDBENCH_CONTROL_KCMD get crds 2>&1 | grep -i Forbidden || true)
 if [[ ! -z ${not_admin} ]]; then
   export LLMDBENCH_USER_IS_ADMIN=0
 else
-  is_ns=$($LLMDBENCH_CONTROL_KCMD get namespace | grep ${LLMDBENCH_CLUSTER_NAMESPACE} || true)
+  is_ns=$($LLMDBENCH_CONTROL_KCMD get namespace | grep ${LLMDBENCH_VLLM_COMMON_NAMESPACE} || true)
   if [[ ! -z ${is_ns} ]]; then
-    export LLMDBENCH_CONTROL_PROXY_UID=$($LLMDBENCH_CONTROL_KCMD get namespace ${LLMDBENCH_CLUSTER_NAMESPACE} -o json | jq -e -r '.metadata.annotations["openshift.io/sa.scc.uid-range"]' | perl -F'/' -lane 'print $F[0]+1');
+    export LLMDBENCH_CONTROL_PROXY_UID=$($LLMDBENCH_CONTROL_KCMD get namespace ${LLMDBENCH_VLLM_COMMON_NAMESPACE} -o json | jq -e -r '.metadata.annotations["openshift.io/sa.scc.uid-range"]' | perl -F'/' -lane 'print $F[0]+1');
   fi
 fi
 
@@ -251,14 +259,14 @@ done
 
 if [[ $LLMDBENCH_CONTROL_PERMISSIONS_CHECKED -eq 0 && ${LLMDBENCH_CONTROL_CHECK_CLUSTER_AUTHORIZATIONS} -ne 0 ]]; then
   for resource in namespace ${LLMDBENCH_CONTROL_RESOURCE_LIST//,/ }; do
-    ra=$($LLMDBENCH_CONTROL_KCMD --namespace $LLMDBENCH_CLUSTER_NAMESPACE auth can-i '*' $resource 2>&1 | grep yes || true)
+    ra=$($LLMDBENCH_CONTROL_KCMD --namespace $LLMDBENCH_VLLM_COMMON_NAMESPACE auth can-i '*' $resource 2>&1 | grep yes || true)
     if [[ -z ${ra} ]]
     then
       echo "ERROR: the current user cannot operate over the resource \"${resource}\""
       exit 1
     fi
 
-    ra=$($LLMDBENCH_CONTROL_KCMD --namespace $LLMDBENCH_CLUSTER_NAMESPACE auth can-i patch serviceaccount 2>&1 | grep yes || true)
+    ra=$($LLMDBENCH_CONTROL_KCMD --namespace $LLMDBENCH_VLLM_COMMON_NAMESPACE auth can-i patch serviceaccount 2>&1 | grep yes || true)
     if [[ -z ${ra} ]]
     then
       echo "ERROR: the current user cannot operate patch serviceaccount\""

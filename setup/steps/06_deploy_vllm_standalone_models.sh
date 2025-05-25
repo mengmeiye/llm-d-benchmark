@@ -13,7 +13,7 @@ metadata:
   name: vllm-standalone-$(model_attribute $model parameters)-vllm-$(model_attribute $model label)-$(model_attribute $model type)
   labels:
     app: vllm-standalone-$(model_attribute $model parameters)-vllm-$(model_attribute $model label)-$(model_attribute $model type)
-  namespace: ${LLMDBENCH_CLUSTER_NAMESPACE}
+  namespace: ${LLMDBENCH_VLLM_COMMON_NAMESPACE}
 spec:
   replicas: ${LLMDBENCH_VLLM_COMMON_REPLICAS}
   selector:
@@ -101,7 +101,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: vllm-standalone-$(model_attribute $model label)
-  namespace: ${LLMDBENCH_CLUSTER_NAMESPACE}
+  namespace: ${LLMDBENCH_VLLM_COMMON_NAMESPACE}
 spec:
   ports:
   - name: http
@@ -122,13 +122,13 @@ apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
   name: vllm-standalone-$(model_attribute $model label)
-  namespace: ${LLMDBENCH_CLUSTER_NAMESPACE}
+  namespace: ${LLMDBENCH_VLLM_COMMON_NAMESPACE}
 spec:
   parentRefs:
   - name: openshift-gateway
     namespace: openshift-gateway
   hostnames:
-  - "${model}.${LLMDBENCH_CLUSTER_NAMESPACE}.apps.${LLMDBENCH_CLUSTER_URL#https://api.}"
+  - "${model}.${LLMDBENCH_VLLM_COMMON_NAMESPACE}.apps.${LLMDBENCH_CLUSTER_URL#https://api.}"
   rules:
   - matches:
     - path:
@@ -146,28 +146,28 @@ EOF
 
   for model in ${LLMDBENCH_DEPLOY_MODEL_LIST//,/ }; do
     announce "⏳ Waiting for (standalone) pods serving model ${model} to be in \"Running\" state (timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s)..."
-    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=jsonpath='{.status.phase}'=Running pod -l app=vllm-standalone-$(model_attribute $model parameters)-vllm-$(model_attribute $model label)-$(model_attribute $model type)" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_VLLM_COMMON_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=jsonpath='{.status.phase}'=Running pod -l app=vllm-standalone-$(model_attribute $model parameters)-vllm-$(model_attribute $model label)-$(model_attribute $model type)" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
     announce "🚀 (standalone) pods serving model ${model} running"
 
     announce "⏳ Waiting for (standalone) pods serving ${model} to be Ready (timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s)..."
-    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=condition=Ready=True pod -l app=vllm-standalone-$(model_attribute $model parameters)-vllm-$(model_attribute $model label)-$(model_attribute $model type)" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_VLLM_COMMON_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=condition=Ready=True pod -l app=vllm-standalone-$(model_attribute $model parameters)-vllm-$(model_attribute $model label)-$(model_attribute $model type)" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
     announce "🚀 (standalone) pods serving model ${model} ready"
 
     if [[ $LLMDBENCH_VLLM_STANDALONE_ROUTE -ne 0 ]]; then
-      is_route=$(${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} get route --ignore-not-found | grep vllm-standalone-$(model_attribute $model label)-route || true)
+      is_route=$(${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_VLLM_COMMON_NAMESPACE} get route --ignore-not-found | grep vllm-standalone-$(model_attribute $model label)-route || true)
       if [[ -z $is_route ]]
       then
         announce "📜 Exposing pods serving model ${model} as service..."
-        llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} expose service/vllm-standalone-$(model_attribute $model label) --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} --target-port=${LLMDBENCH_VLLM_COMMON_INFERENCE_PORT} --name=vllm-standalone-$(model_attribute $model label)-route" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+        llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_VLLM_COMMON_NAMESPACE} expose service/vllm-standalone-$(model_attribute $model label) --namespace ${LLMDBENCH_VLLM_COMMON_NAMESPACE} --target-port=${LLMDBENCH_VLLM_COMMON_INFERENCE_PORT} --name=vllm-standalone-$(model_attribute $model label)-route" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
         announce "✅ Service for pods service model ${model} created"
       fi
       announce "✅ Model \"${model}\" and associated service deployed."
     fi
   done
 
-  announce "ℹ️ A snapshot of the relevant (model-specific) resources on namespace \"${LLMDBENCH_CLUSTER_NAMESPACE}\":"
+  announce "ℹ️ A snapshot of the relevant (model-specific) resources on namespace \"${LLMDBENCH_VLLM_COMMON_NAMESPACE}\":"
   if [[ $LLMDBENCH_CONTROL_DRY_RUN -eq 0 ]]; then
-    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} get --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} $srl" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0
+    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} get --namespace ${LLMDBENCH_VLLM_COMMON_NAMESPACE} $srl" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0
   fi
 else
   announce "⏭️  Environment types are \"${LLMDBENCH_DEPLOY_METHODS}\". Skipping this step."

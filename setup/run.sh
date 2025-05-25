@@ -20,11 +20,6 @@ if [[ $0 != "-bash" ]]; then
     pushd `dirname "$(realpath $0)"` > /dev/null 2>&1
 fi
 
-export LLMDBENCH_BASE64_CONTEXT=${LLMDBENCH_BASE64_CONTEXT:-}
-if [[ ! -z $LLMDBENCH_BASE64_CONTEXT ]]; then
-  echo ${LLMDBENCH_BASE64_CONTEXT} | base64 -d > ~/.kube/$LLMDBENCH_CONTROL_REMOTE_KUBECONFIG_FILENAME
-fi
-
 export LLMDBENCH_ENV_VAR_LIST=$(env | grep ^LLMDBENCH | cut -d '=' -f 1)
 export LLMDBENCH_CONTROL_DIR=$(realpath $(pwd)/)
 
@@ -106,118 +101,132 @@ source ${LLMDBENCH_CONTROL_DIR}/env.sh
 
 export LLMDBENCH_EXPERIMENT_ID=${LLMDBENCH_EXPERIMENT_ID:-"default"}
 
-if [[ $LLMDBENCH_FMPERF_REMOTE_EXECUTION -eq 1 ]]; then
-  announce "🚀 Running experiment (harness=$LLMDBENCH_FMPERF_EXPERIMENT_HARNESS, profile=$LLMDBENCH_FMPERF_EXPERIMENT_PROFILE) remotely ..."
+export LLMDBENCH_BASE64_CONTEXT=$(cat $LLMDBENCH_CONTROL_WORK_DIR/environment/context.ctx | base64)
 
-  export LLMDBENCH_BASE64_CONTEXT=$(cat $LLMDBENCH_CONTROL_WORK_DIR/environment/context.ctx | base64)
-
-  env_vars_cmd_cli_opts="--env LLMDBENCH_FMPERF_REMOTE_EXECUTION=0 --env LLMDBENCH_FMPERF_DIR=/workspace/fmperf"
-  for i in ${LLMDBENCH_ENV_VAR_LIST} LLMDBENCH_BASE64_CONTEXT LLMDBENCH_CONTROL_REMOTE_KUBECONFIG_FILENAME; do
-    if [[ $i != "LLMDBENCH_FMPERF_REMOTE_EXECUTION" ]]; then
-      echo $i
-      env_vars_cmd_cli_opts=" --env=\"$i=${!i}\" $env_vars_cmd_cli_opts"
-    fi
-  done
-
-  llmdbench_run_cli_opts=""
-  if [[ ! -z $LLMDBENCH_DEPLOY_SCENARIO ]]; then
-    llmdbench_run_cli_opts=$llmdbench_run_cli_opts" -c $LLMDBENCH_DEPLOY_SCENARIO"
-  fi
-
-  if [[ $LLMDBENCH_FMPERF_EXPERIMENT_SKIP -ne 0 ]]; then
-    llmdbench_run_cli_opts=$llmdbench_run_cli_opts" -z"
-  fi
-  announce "⏳ Waiting for pod \"fmperfrunpod\" to complete its execution..."
-  llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace $LLMDBENCH_CLUSTER_NAMESPACE run fmperfrunpod ${env_vars_cmd_cli_opts} -i --image-pull-policy Always --attach --pod-running-timeout ${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --restart=Never --rm --image=icr.io/vopo/llm-d-benchmark:latest --command -- bash -c \"./llm-d-benchmark/run.sh $llmdbench_run_cli_opts -n\""  ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0
-  announce "✅ Experiment completed successfully"
-
-else
-
-  announce "🚀 Running experiment (harness=$LLMDBENCH_FMPERF_EXPERIMENT_HARNESS, profile=$LLMDBENCH_FMPERF_EXPERIMENT_PROFILE) locally ..."
-
-  pushd ${LLMDBENCH_FMPERF_DIR}/fmperf &>/dev/null
-
-# Hardcode Conda init from known working path
-
-  if [ "$LLMDBENCH_CONTROL_DEPLOY_HOST_OS" = "mac" ] && [ -f "/opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh" ]; then
-    llmdbench_execute_cmd "source \"/opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-  elif [ "$LLMDBENCH_CONTROL_DEPLOY_HOST_OS" = "linux" ] && [ -f "/opt/miniconda/etc/profile.d/conda.sh" ]; then
-    llmdbench_execute_cmd "source \"/opt/miniconda/etc/profile.d/conda.sh\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-  else
-    echo "❌ Could not find conda.sh for $LLMDBENCH_CONTROL_DEPLOY_HOST_OS. Please verify your Anaconda installation."
-    exit 1
-  fi
-  llmdbench_execute_cmd "conda activate \"$LLMDBENCH_FMPERF_CONDA_ENV_NAME\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-
-  if [[ ${LLMDBENCH_CONTROL_DRY_RUN} -eq 0 ]]; then
-# Confirm we're using the correct Python environment
-    announce "✅ Python: $(which $LLMDBENCH_CONTROL_PCMD)"
-    announce "✅ Env: $(conda info --envs | grep '*' || true)"
-    ${LLMDBENCH_CONTROL_PCMD} -m pip show urllib3 >/dev/null 2>&1 || ${LLMDBENCH_CONTROL_PCMD} -m pip install urllib3
-    ${LLMDBENCH_CONTROL_PCMD} -m pip show kubernetes >/dev/null 2>&1 || ${LLMDBENCH_CONTROL_PCMD} -m pip install kubernetes
-    ${LLMDBENCH_CONTROL_PCMD} -m pip show pandas >/dev/null 2>&1 || ${LLMDBENCH_CONTROL_PCMD} -m pip install pandas
-    pip install -e . >/dev/null 2>&1
-  fi
-
-  llmdbench_execute_cmd "cp -f ${LLMDBENCH_MAIN_DIR}/workload/harnesses/$LLMDBENCH_FMPERF_EXPERIMENT_HARNESS ${LLMDBENCH_CONTROL_WORK_DIR}/workload/harnesses/$LLMDBENCH_FMPERF_EXPERIMENT_HARNESS" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+export LLMDBENCH_FMPERF_LAUNCHER_NAME=llmdbench-fmperf-launcher
+for method in ${LLMDBENCH_DEPLOY_METHODS//,/ }; do
 
   for model in ${LLMDBENCH_DEPLOY_MODEL_LIST//,/ }; do
-    export LLMDBENCH_DEPLOY_CURRENT_MODEL=$model
-    render_template ${LLMDBENCH_MAIN_DIR}/workload/profiles/$LLMDBENCH_FMPERF_EXPERIMENT_PROFILE.in ${LLMDBENCH_CONTROL_WORK_DIR}/workload/profiles/$LLMDBENCH_FMPERF_EXPERIMENT_PROFILE
-    unset LLMDBENCH_DEPLOY_CURRENT_MODEL
-  done
 
-  if [[ $LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_STANDALONE_ACTIVE -eq 1 ]]; then
-    export LLMDBENCH_FMPERF_STACK_TYPE=vllm-prod
-    export LLMDBENCH_FMPERF_SERVICE_URL=$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_CLUSTER_NAMESPACE" get service --no-headers | grep standalone | awk '{print $1}' || true)
-  else
-    export LLMDBENCH_FMPERF_STACK_TYPE=llm-d
-    export LLMDBENCH_FMPERF_SERVICE_URL=$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_CLUSTER_NAMESPACE" get gateway --no-headers | tail -n1 | awk '{print $1}')
-  fi
+    export LLMDBENCH_FMPERF_STACK_NAME=$(echo ${method} | $LLMDBENCH_CONTROL_SCMD 's/deployer/llm-d/g')-$(model_attribute $model parameters)-$(model_attribute $model type)
 
-  ecmd="${LLMDBENCH_CONTROL_PCMD} ${LLMDBENCH_CONTROL_WORK_DIR}/workload/harnesses/$LLMDBENCH_FMPERF_EXPERIMENT_HARNESS"
-  if [[ $LLMDBENCH_FMPERF_EXPERIMENT_SKIP -eq 0 ]]; then
-    announce "⏳ Starting the actual execution ..."
-    if [[ ${LLMDBENCH_CONTROL_DRY_RUN} -eq 0 ]]; then
-      $ecmd
+    export LLMDBENCH_DEPLOY_CURRENT_MODEL=$(model_attribute $model model)
+
+    if [[ $LLMDBENCH_FMPERF_EXPERIMENT_SKIP -eq 1 ]]; then
+      announce "⏭️ Command line option \"-z\--skip\" invoked. Will skip experiment execution (and move straight to analysis"
     else
-      echo "---> would have executed the command \"$ecmd\""
-    fi
-  else
-    announce "⏭️ Skipping experiment execution"
-  fi
-  announce "✅ Actual execution completed successfully"
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_FMPERF_NAMESPACE} delete pod ${LLMDBENCH_FMPERF_LAUNCHER_NAME} --ignore-not-found" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_FMPERF_NAMESPACE} delete job lmbenchmark-evaluate-${LLMDBENCH_FMPERF_STACK_NAME} --ignore-not-found" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 
-  llmdbench_execute_cmd "touch $(pwd)/pod_log_response.txt; mv -f $(pwd)/pod_log_response.txt ${LLMDBENCH_CONTROL_WORK_DIR}/results/pod_log_response.txt" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      render_template ${LLMDBENCH_MAIN_DIR}/workload/profiles/$LLMDBENCH_FMPERF_EXPERIMENT_PROFILE.in ${LLMDBENCH_CONTROL_WORK_DIR}/workload/profiles/$LLMDBENCH_FMPERF_EXPERIMENT_PROFILE
 
-  popd &>/dev/null
-fi
+      export LLMDBENCH_BASE64_FMPERF_WORKLOAD=$(cat ${LLMDBENCH_CONTROL_WORK_DIR}/workload/profiles/$LLMDBENCH_FMPERF_EXPERIMENT_PROFILE | base64)
 
-announce "🏗️ Collecting results ..."
-PN=$(echo $LLMDBENCH_EXPERIMENT_ID | $LLMDBENCH_CONTROL_SCMD 's^_^-^g' | tr '[:upper:]' '[:lower:]')
+      if [[ $LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_STANDALONE_ACTIVE -eq 1 ]]; then
+        export LLMDBENCH_FMPERF_STACK_TYPE=vllm-prod
+        export LLMDBENCH_FMPERF_ENDPOINT_URL="http://"$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_VLLM_COMMON_NAMESPACE" get service --no-headers | grep standalone | awk '{print $1}' || true).${LLMDBENCH_VLLM_COMMON_NAMESPACE}.svc.cluster.local
+      else
+        export LLMDBENCH_FMPERF_STACK_TYPE=llm-d
+        export LLMDBENCH_FMPERF_ENDPOINT_URL="http://"$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_VLLM_COMMON_NAMESPACE" get gateway --no-headers | tail -n1 | awk '{print $1}').${LLMDBENCH_VLLM_COMMON_NAMESPACE}.svc.cluster.local
+      fi
 
-  cat <<EOF > $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/run_access_to_pvc.yaml
+      cat <<EOF > $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/pod_benchmark-launcher.yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: $PN
-  namespace: $LLMDBENCH_CLUSTER_NAMESPACE
+  name: ${LLMDBENCH_FMPERF_LAUNCHER_NAME}
+  namespace: ${LLMDBENCH_FMPERF_NAMESPACE}
+  labels:
+    app: ${LLMDBENCH_FMPERF_LAUNCHER_NAME}
 spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: ${LLMDBENCH_FMPERF_LAUNCHER_NAME}
+spec:
+  serviceAccountName: $LLMDBENCH_FMPERF_SERVICE_ACCOUNT
   containers:
-  - name: rsync
-    image: busybox
-    command: ["sleep", "infinity"]
+  - name: fmperf
+    image: ${LLMDBENCH_IMAGE_REGISTRY}/${LLMDBENCH_IMAGE_REPO}:${LLMDBENCH_IMAGE_TAG}
+    imagePullPolicy: Always
+    securityContext:
+      runAsRoot: true
+#    command: ["sleep", "120"]
+    command: ["llm-d-benchmark.sh"]
+    env:
+    - name: LLMDBENCH_BASE64_CONTEXT
+      value: "$LLMDBENCH_BASE64_CONTEXT"
+    - name: LLMDBENCH_BASE64_FMPERF_WORKLOAD
+      value: "${LLMDBENCH_BASE64_FMPERF_WORKLOAD}"
+    - name: LLMDBENCH_FMPERF_NAMESPACE
+      value: "${LLMDBENCH_FMPERF_NAMESPACE}"
+    - name: LLMDBENCH_FMPERF_STACK_TYPE
+      value: "${LLMDBENCH_FMPERF_STACK_TYPE}"
+    - name: LLMDBENCH_FMPERF_ENDPOINT_URL
+      value: "${LLMDBENCH_FMPERF_ENDPOINT_URL}"
+    - name: LLMDBENCH_FMPERF_STACK_NAME
+      value: "$LLMDBENCH_FMPERF_STACK_NAME"
+    - name: HF_TOKEN_SECRET
+      value: "${LLMDBENCH_VLLM_COMMON_HF_TOKEN_NAME}"
     volumeMounts:
-    - name: requests
+    #- name: workload-config
+    #  mountPath: /app/yamls
+    - name: results
       mountPath: /requests
+    #- name: logs
+    #  mountPath: /app/logs
   volumes:
-  - name: requests
+  #- name: workload-config
+  #  configMap:
+  #    name: fmperf-workload-config
+  - name: results
     persistentVolumeClaim:
       claimName: $LLMDBENCH_FMPERF_PVC_NAME
+  #- name: logs
+  #  emptyDir: {}
+  restartPolicy: Never
 EOF
 
-llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} apply -f $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/run_access_to_pvc.yaml" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=condition=Ready=True pod/$PN" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} cp $PN:/requests/${LLMDBENCH_EXPERIMENT_ID}/ ${LLMDBENCH_CONTROL_WORK_DIR}/results/" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} delete pod $PN" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-announce "✅ All results collected successfully"
+      announce "🚀 Starting pod \"${LLMDBENCH_FMPERF_LAUNCHER_NAME}\" for model \"$model\" ($LLMDBENCH_DEPLOY_CURRENT_MODEL)..."
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} apply -f $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/pod_benchmark-launcher.yaml" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      announce "✅ Pod \"${LLMDBENCH_FMPERF_LAUNCHER_NAME}\" for model \"$model\" started"
+
+      announce "⏳ Waiting for pod \"${LLMDBENCH_FMPERF_LAUNCHER_NAME}\" for model \"$model\" to be Ready (timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s)..."
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_FMPERF_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=jsonpath='{.status.phase}'=Running pod -l app=${LLMDBENCH_FMPERF_LAUNCHER_NAME}" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      announce "✅ Benchmark execution for model \"$model\" effectivelly started"
+
+      announce "ℹ️  You can follow the execution's output with \"${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_FMPERF_NAMESPACE} logs -l app=${LLMDBENCH_FMPERF_LAUNCHER_NAME} -f\"..."
+
+      announce "⏳ Waiting for pod \"${LLMDBENCH_FMPERF_LAUNCHER_NAME}\" for model \"$model\" to be in \"Completed\" state (timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s)..."
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_FMPERF_NAMESPACE} wait --timeout=${LLMDBENCH_CONTROL_WAIT_TIMEOUT}s --for=condition=ready=False pod ${LLMDBENCH_FMPERF_LAUNCHER_NAME}" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      announce "✅ Benchmark execution for model \"$model\" completed"
+
+      announce "🗑️ Deleting pod \"${LLMDBENCH_FMPERF_LAUNCHER_NAME}\" for model \"$model\" ..."
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_FMPERF_NAMESPACE} delete pod ${LLMDBENCH_FMPERF_LAUNCHER_NAME}" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      announce "✅ Pod \"${LLMDBENCH_FMPERF_LAUNCHER_NAME}\" for model \"$model\""
+
+      announce "🏗️  Collecting results for model \"$model\" ($LLMDBENCH_DEPLOY_CURRENT_MODEL) to \"${LLMDBENCH_CONTROL_WORK_DIR}/results/\"..."
+      LLMDBENCH_FMPERF_ACCESS_RESULTS_POD_NAME=$(llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_FMPERF_NAMESPACE} get pod -l app=llm-d-benchmark-fmperf --no-headers -o name" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0 | $LLMDBENCH_CONTROL_SCMD 's|^pod/||g')
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} --namespace ${LLMDBENCH_FMPERF_NAMESPACE} cp $LLMDBENCH_FMPERF_ACCESS_RESULTS_POD_NAME:/requests/${LLMDBENCH_FMPERF_STACK_NAME}/ ${LLMDBENCH_CONTROL_WORK_DIR}/results/" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      announce "✅ Results for model \"$model\" collected successfully"
+    fi
+
+    announce "🔍 Analyzing collected data..."
+    if [ "$LLMDBENCH_CONTROL_DEPLOY_HOST_OS" = "mac" ] && [ -f "/opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh" ]; then
+      llmdbench_execute_cmd "source \"/opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    elif [ "$LLMDBENCH_CONTROL_DEPLOY_HOST_OS" = "linux" ] && [ -f "/opt/miniconda/etc/profile.d/conda.sh" ]; then
+      llmdbench_execute_cmd "source \"/opt/miniconda/etc/profile.d/conda.sh\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    else
+      echo "❌ Could not find conda.sh for $LLMDBENCH_CONTROL_DEPLOY_HOST_OS. Please verify your Anaconda installation."
+      exit 1
+    fi
+
+    llmdbench_execute_cmd "conda activate \"$LLMDBENCH_FMPERF_CONDA_ENV_NAME\"" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_PCMD} $LLMDBENCH_MAIN_DIR/analysis/analyze_results.py" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    announce "✅ Data analysis done."
+
+    unset LLMDBENCH_DEPLOY_CURRENT_MODEL
+
+  done
+done

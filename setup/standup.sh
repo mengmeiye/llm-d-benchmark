@@ -30,7 +30,9 @@ function show_usage {
             -t/--methods [list the methods employed to carry out the deployment (default=$LLMDBENCH_DEPLOY_METHODS) ] \n \
             -n/--dry-run [just print the command which would have been executed (default=$LLMDBENCH_CONTROL_DRY_RUN) ] \n \
             -v/--verbose [print the command being executed, and result (default=$LLMDBENCH_CONTROL_VERBOSE) ] \n \
-            -h/--help (show this help)"
+            -h/--help (show this help)\n \
+
+            * [step list] can take of form of comma-separated single/double digits (e.g. \"-s 0,1,5\") or ranges (e.g. \"-s 1-7\")"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -131,4 +133,5 @@ for step in ${LLMDBENCH_STEP_LIST//,/ }; do
   run_step "$step"
 done
 
+announce "ℹ️ The current work dir is \"${LLMDBENCH_CONTROL_WORK_DIR}\". Run \"export LLMDBENCH_CONTROL_WORK_DIR=$LLMDBENCH_CONTROL_WORK_DIR\" if you wish subsequent executions use the same diretory"
 announce "✅ All steps complete."

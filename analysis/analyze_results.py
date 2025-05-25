@@ -7,6 +7,14 @@ import glob
 import os
 import argparse
 import shutil
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def load_and_combine_csvs(directory):
     """Load all CSV files from the directory and combine them."""
@@ -15,31 +23,31 @@ def load_and_combine_csvs(directory):
     # Look for LMBench CSV files in the directory and its subdirectories
     csv_files = []
     for root, _, files in os.walk(directory):
-        csv_files.extend(glob.glob(os.path.join(root, "LMBench_long_input_output_*.csv")))
+        csv_files.extend(glob.glob(os.path.join(root, "LMBench*.csv")))
 
     if not csv_files:
-        print(f"No LMBench CSV files found in {directory} or its subdirectories")
-        print("Expected files matching pattern: LMBench_long_input_output_*.csv")
-        print("Please ensure the results directory contains the benchmark output files.")
+        logger.error(f"No LMBench CSV files found in {directory} or its subdirectories")
+        logger.error("Expected files matching pattern: LMBench*.csv")
+        logger.error("Please ensure the results directory contains the benchmark output files.")
         return None
 
     for csv_file in csv_files:
         try:
             # Extract QPS from filename
-            qps = float(os.path.basename(csv_file).split('_')[-1].replace('.csv', ''))
+            qps = float(os.path.basename(csv_file).split('_')[-1].replace('.csv', '').replace('qps',''))
             df = pd.read_csv(csv_file)
             df['qps'] = qps
             # Add model name from parent directory
             model_name = os.path.basename(os.path.dirname(csv_file))
             df['model'] = model_name
             all_data.append(df)
-            print(f"Loaded data from: {csv_file}")
+            logger.info(f"Loaded data from: {csv_file}")
         except Exception as e:
-            print(f"Error loading {csv_file}: {str(e)}")
+            logger.error(f"Error loading {csv_file}: {str(e)}")
             continue
 
     if not all_data:
-        print("No data could be loaded from any CSV files.")
+        logger.error("No data could be loaded from any CSV files.")
         return None
 
     return pd.concat(all_data, ignore_index=True)
@@ -52,9 +60,9 @@ def create_plots_readme(plots_dir):
 
     if os.path.exists(template_path):
         shutil.copyfile(template_path, readme_path)
-        print(f"Created README.md at: {readme_path}")
+        logger.info(f"Created README.md at: {readme_path}")
     else:
-        print(f"Warning: Template file not found at {template_path}, using default content")
+        logger.info(f"Warning: Template file not found at {template_path}, using default content")
         readme_content = """# Benchmark Analysis Plots
 
 This directory contains visualization files generated from the benchmark results.
@@ -99,7 +107,7 @@ This plot shows two throughput-related metrics:
 """
         with open(readme_path, 'w') as f:
             f.write(readme_content)
-        print(f"Created README.md at: {readme_path}")
+        logger.info(f"Created README.md at: {readme_path}")
 
 # --- Chart Prettification Settings ---
 def set_pretty_plot_style():
@@ -182,39 +190,49 @@ def analyze_throughput(df, plots_dir):
     plt.savefig(os.path.join(plots_dir, 'throughput_analysis.png'))
     plt.close()
 
-def print_statistics(df):
+def print_statistics(df, data_dir):
     """Print key statistics about the benchmark results."""
-    print("\nBenchmark Statistics:")
-    print("=" * 50)
-    # Overall statistics
-    print("\nOverall Statistics:")
-    print(f"Total number of requests: {len(df)}")
-    print(f"Number of unique users: {df['user_id'].nunique()}")
-    print(f"Number of QPS levels tested: {df['qps'].nunique()}")
-    # Per QPS statistics
-    print("\nPer QPS Statistics:")
+    sep="=" * 50
+
     qps_stats = df.groupby('qps').agg({
         'ttft': ['mean', 'std', 'min', 'max'],
         'generation_time': ['mean', 'std', 'min', 'max'],
         'prompt_tokens': 'mean',
         'generation_tokens': 'mean'
     }).round(4)
-    print(qps_stats)
 
-    # Token statistics
-    print("\nToken Statistics:")
     token_stats = df.agg({
         'prompt_tokens': ['mean', 'std', 'min', 'max'],
         'generation_tokens': ['mean', 'std', 'min', 'max']
     }).round(4)
-    print(token_stats)
+
+    _msg=f"\nBenchmark Statistics:\
+        \n{sep}\
+        \nnOverall Statistics:\
+        \nTotal number of requests: {len(df)}\
+        \nNumber of unique users: {df['user_id'].nunique()}\
+        \nNumber of QPS levels tested: {df['qps'].nunique()}\
+        \nPer QPS Statistics:\
+        \n{qps_stats} \
+        \nToken Statistics:\
+        \n{token_stats}"
+
+    print(_msg)
+
+    with open(f"{data_dir}/stats.txt", 'w') as fp :
+        fp.write(_msg)
 
 def main():
     # Parse command line arguments
+    env_vars = os.environ
+
+    if 'LLMDBENCH_CONTROL_WORK_DIR' in env_vars:
+        default_dir = f"{env_vars['LLMDBENCH_CONTROL_WORK_DIR']}/results"
+
     parser = argparse.ArgumentParser(description='Analyze benchmark results from CSV files.')
     parser.add_argument('--results-dir',
-                      default="./fmperf-results",
-                      help='Directory containing the CSV files (default: ./fmperf-results)')
+                      default=default_dir,
+                      help=f'Directory containing the CSV files (default: {default_dir}')
     args = parser.parse_args()
 
     # Set style
@@ -222,18 +240,20 @@ def main():
     plt.rcParams['figure.figsize'] = [12, 8]
 
     # Create plots directory
-    plots_dir = os.path.join(args.results_dir, 'plots')
+    plots_dir = f"{args.results_dir.replace('/results','')}/analysis/plots"
+    data_dir = f"{args.results_dir.replace('/results','')}/analysis/data"
     os.makedirs(plots_dir, exist_ok=True)
+    os.makedirs(data_dir, exist_ok=True)
 
     # Create README for plots
     create_plots_readme(plots_dir)
 
     # Load data
-    print(f"Loading data from: {args.results_dir}")
+    logger.info(f"Loading data from: {args.results_dir}")
     df = load_and_combine_csvs(args.results_dir)
 
     if df is None:
-        print("Error: Could not load any data. Exiting.")
+        logger.info("Error: Could not load any data. Exiting.")
         return
 
     # Generate visualizations
@@ -241,12 +261,12 @@ def main():
     analyze_throughput(df, plots_dir)
 
     # Print statistics
-    print_statistics(df)
+    print_statistics(df, data_dir)
 
-    print(f"\nAnalysis complete! Check {plots_dir} for visualization files:")
-    print(f"- {os.path.join(plots_dir, 'latency_analysis.png')}")
-    print(f"- {os.path.join(plots_dir, 'throughput_analysis.png')}")
-    print(f"- {os.path.join(plots_dir, 'README.md')}")
+    logger.info(f"\nAnalysis complete! Checl {data_dir} for stats.txt and check {plots_dir} for visualization files:")
+    logger.info(f"- {os.path.join(plots_dir, 'latency_analysis.png')}")
+    logger.info(f"- {os.path.join(plots_dir, 'throughput_analysis.png')}")
+    logger.info(f"- {os.path.join(plots_dir, 'README.md')}")
 
 if __name__ == "__main__":
     main()

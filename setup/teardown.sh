@@ -93,20 +93,20 @@ source ${LLMDBENCH_CONTROL_DIR}/env.sh
 extract_environment
 sleep 5
 
-announce "🧹 Cleaning up namespace: $LLMDBENCH_CLUSTER_NAMESPACE"
+announce "🧹 Cleaning up namespace: $LLMDBENCH_VLLM_COMMON_NAMESPACE"
 
 if [[ $LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_DEPLOYER_ACTIVE -eq 1 ]]; then
 
   if [[ $LLMDBENCH_CONTROL_DEEP_CLEANING -eq 0 ]]; then
-    hclist=$($LLMDBENCH_CONTROL_HCMD --namespace $LLMDBENCH_CLUSTER_NAMESPACE list --no-headers | grep llm-d || true)
+    hclist=$($LLMDBENCH_CONTROL_HCMD --namespace $LLMDBENCH_VLLM_COMMON_NAMESPACE list --no-headers | grep llm-d || true)
     hclist=$(echo "${hclist}" | awk '{ print $1 }')
     for hc in ${hclist}; do
       announce "🗑️  Deleting Helm release \"${hc}\"..."
-      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_HCMD} uninstall ${hc} --namespace $LLMDBENCH_CLUSTER_NAMESPACE" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_HCMD} uninstall ${hc} --namespace $LLMDBENCH_VLLM_COMMON_NAMESPACE" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
       announce "✅ Helm release \"${hc}\" fully deleted."
     done
-    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $LLMDBENCH_CLUSTER_NAMESPACE --ignore-not-found=true route llm-d-inference-gateway-route" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $LLMDBENCH_CLUSTER_NAMESPACE --ignore-not-found=true job download-model" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $LLMDBENCH_VLLM_COMMON_NAMESPACE --ignore-not-found=true route llm-d-inference-gateway-route" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $LLMDBENCH_VLLM_COMMON_NAMESPACE --ignore-not-found=true job download-model" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
     for cr in llm-d-modelservice-endpoint-picker llm-d-modelservice-manager llm-d-modelservice-metrics-auth llm-d-modelservice-admin llm-d-modelservice-editor llm-d-modelservice-viewer; do
       llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --ignore-not-found=true ClusterRole $cr" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
     done
@@ -122,51 +122,53 @@ sampleApplication:
 EOF
       llmd_opts="--skip-infra --uninstall --values-file $LLMDBENCH_CONTROL_WORK_DIR/setup/yamls/teardown.yaml"
       announce "🚀 Calling llm-d-deployer with options \"${llmd_opts}\"..."
-      llmdbench_execute_cmd "cd $LLMDBENCH_DEPLOYER_DIR/llm-d-deployer/quickstart; export KUBECONFIG=$LLMDBENCH_CONTROL_WORK_DIR/environment/context.ctx; export HF_TOKEN=$LLMDBENCH_HF_TOKEN; ./llmd-installer.sh --namespace ${LLMDBENCH_CLUSTER_NAMESPACE} --storage-class ${LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS} --storage-size ${LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE} $llmd_opts" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      llmdbench_execute_cmd "cd $LLMDBENCH_DEPLOYER_DIR/llm-d-deployer/quickstart; export KUBECONFIG=$LLMDBENCH_CONTROL_WORK_DIR/environment/context.ctx; export HF_TOKEN=$LLMDBENCH_HF_TOKEN; ./llmd-installer.sh --namespace ${LLMDBENCH_VLLM_COMMON_NAMESPACE} --storage-class ${LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS} --storage-size ${LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE} $llmd_opts" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
       announce "✅ llm-d-deployer completed uninstall"
     done
   fi
-else
+fi
 
-  if [[ $LLMDBENCH_CONTROL_DEEP_CLEANING -eq 0 ]]; then
-    allres=$(${LLMDBENCH_CONTROL_KCMD} --namespace $LLMDBENCH_CLUSTER_NAMESPACE get ${LLMDBENCH_CONTROL_RESOURCE_LIST} -o name)
-    tgtres=$(echo "$allres" | grep -Ev "configmap/kube-root-ca.crt|configmap/odh-trusted-ca-bundle|configmap/openshift-service-ca.crt|secret/${LLMDBENCH_VLLM_COMMON_HF_TOKEN_NAME}")
+if [[ $LLMDBENCH_CONTROL_DEEP_CLEANING -eq 0 ]]; then
+  for tgtns in ${LLMDBENCH_VLLM_COMMON_NAMESPACE} ${LLMDBENCH_FMPERF_NAMESPACE}; do
+    allres=$(${LLMDBENCH_CONTROL_KCMD} --namespace $tgtns get ${LLMDBENCH_CONTROL_RESOURCE_LIST} -o name)
+    tgtres=$(echo "$allres" | grep -Ev "configmap/kube-root-ca.crt|configmap/odh-trusted-ca-bundle|configmap/openshift-service-ca.crt|secret/${LLMDBENCH_VLLM_COMMON_HF_TOKEN_NAME}" || true)
 
     if [[ ${LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_STANDALONE_ACTIVE} -eq 1 && ${LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_DEPLOYER_ACTIVE} -eq 0 ]]; then
-      tgtres=$(echo "$tgtres" | grep -E "standalone|download-model|testinference")
+      tgtres=$(echo "$tgtres" | grep -E "standalone|download-model|testinference|fmperf|lmbenchmark" || true)
     fi
 
     if [[ ${LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_STANDALONE_ACTIVE} -eq 0 && ${LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_DEPLOYER_ACTIVE} -eq 1 ]]; then
-      tgtres=$(echo "$tgtres" | grep -E "p2p|inference-gateway|inferencepool|llm-route|base-model|endpoint-picker|inference-route|inference-gateway-secret|inference-gateway-params|inference-gateway")
+      tgtres=$(echo "$tgtres" | grep -E "p2p|inference-gateway|inferencepool|llm-route|base-model|endpoint-picker|inference-route|inference-gateway-secret|inference-gateway-params|inference-gateway|fmperf|lmbenchmark" || true)
     fi
 
     for delres in $tgtres; do
-      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $LLMDBENCH_CLUSTER_NAMESPACE --ignore-not-found=true $delres" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete --namespace $tgtns --ignore-not-found=true $delres" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
     done
-  else
-    RESOURCE_KINDS=(
-    deployment
-    service
-    secret
-    pvc
-    gateway
-    httproute
-    route
-    inferencemodel
-    inferencepool
-    configmap
-    job
-    role
-    rolebinding
-    serviceaccount
-    pod
-  )
 
-    for kind in "${RESOURCE_KINDS[@]}"; do
-      announce "🗑️ Deleting all $kind in namespace $LLMDBENCH_CLUSTER_NAMESPACE..."
-      llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete "$kind" --all -n "$LLMDBENCH_CLUSTER_NAMESPACE" --ignore-not-found=true || true" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
-    done
-  fi
+  done
+else
+  RESOURCE_KINDS=(
+  deployment
+  service
+  secret
+  pvc
+  gateway
+  httproute
+  route
+  inferencemodel
+  inferencepool
+  configmap
+  job
+  role
+  rolebinding
+  serviceaccount
+  pod
+)
+
+  for kind in "${RESOURCE_KINDS[@]}"; do
+    announce "🗑️ Deleting all $kind in namespace $LLMDBENCH_VLLM_COMMON_NAMESPACE..."
+    llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} delete "$kind" --all -n "$LLMDBENCH_VLLM_COMMON_NAMESPACE" --ignore-not-found=true || true" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+  done
 fi
 
 if [[ $LLMDBENCH_CONTROL_DEEP_CLEANING -eq 1 ]]; then
@@ -176,4 +178,4 @@ if [[ $LLMDBENCH_CONTROL_DEEP_CLEANING -eq 1 ]]; then
   llmdbench_execute_cmd "rm -rf ${LLMDBENCH_DEPLOYER_DIR}/llm-d-deployer ${LLMDBENCH_FMPERF_DIR}/fmperf" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
 fi
 
-announce "✅ Cleanup complete. Namespace '$LLMDBENCH_CLUSTER_NAMESPACE' is now cleared (except shared cluster-scoped resources like Gateway Provider)."
+announce "✅ Cleanup complete. Namespace '$LLMDBENCH_VLLM_COMMON_NAMESPACE' is now cleared (except shared cluster-scoped resources like Gateway Provider)."
