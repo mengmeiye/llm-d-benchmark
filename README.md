@@ -59,7 +59,7 @@ export LLMDBENCH_CLUSTER_TOKEN="..."
 > You can simply use your current context. **After running kubectl/oc login**, just set `export LLMDBENCH_CLUSTER_HOST=auto` (and leave LLMDBENCH_CLUSTER_TOKEN unconfigured)
 
 > [!IMPORTANT]
-> No matter which method used (i.e., fully specify `LLMDBENCH_CLUSTER_HOST` and `LLMDBENCH_CLUSTER_TOKEN` or simply use the current context, there is an additional variable which will always require definition: `LLMDBENCH_HF_TOKEN`
+> No matter which method used (i.e., fully specify `LLMDBENCH_CLUSTER_HOST` and `LLMDBENCH_CLUSTER_TOKEN` or simply use the current context), there is an additional variable which will always require definition: `LLMDBENCH_HF_TOKEN`
 
 > [!CAUTION]
 > Please make sure the environment variable `LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS` points to a storage class specific to your cluster. The default value will most likely fail.
@@ -79,7 +79,7 @@ Run the command line with the option `-h` in order to produce a list of steps
 ./setup/standup.sh -h
 ```
 > [!NOTE]
-> Each individual "step file" is name in a way that briefly describes each one the multiple steps required for a full deployment.
+> Each individual "step file" is named in a way that briefly describes each one the multiple steps required for a full deployment.
 
 > [!TIP]
 > Steps 0-5 can be considered "preparation" and can be skipped in most deployments.
