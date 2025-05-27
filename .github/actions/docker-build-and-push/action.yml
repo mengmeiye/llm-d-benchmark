@@ -35,5 +35,6 @@ runs:
         docker buildx build \
           --platform linux/amd64 \
           -t ${{ inputs.registry }}/${{ inputs.image-name }}:${{ inputs.tag }} \
+          -f build/Dockerfile \
           --push .
       shell: bash
