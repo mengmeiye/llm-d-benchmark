@@ -22,7 +22,7 @@ The benchmarking system drives synthetic or trace-based traffic into an llm-d-po
 
 #### Scenarios
 
-Pieces of information identifying a particular cluster. This inforation includes, but it is not limited to, GPU model, llm model and llm-d parameters (an environment file, and optionally a "values.yaml" file for llm-d-deployer)
+Pieces of information identifying a particular cluster. This inforation includes, but it is not limited to, GPU model, llm model and llm-d parameters (an environment file, and optionally a `values.yaml` file for llm-d-deployer)
 
 #### Harness
 
@@ -60,6 +60,9 @@ export LLMDBENCH_CLUSTER_TOKEN="..."
 
 > [!IMPORTANT]
 > No matter which method used (i.e., fully specify `LLMDBENCH_CLUSTER_HOST` and `LLMDBENCH_CLUSTER_TOKEN` or simply use the current context, there is an additional variable which will always require definition: `LLMDBENCH_HF_TOKEN`
+
+> [!CAUTION]
+> Please make sure the environment variable `LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS` points to a storage class specific to your cluster. The default value will most likely fail.
 
 A complete list of available variables (and its default values) can be found by running
  `cat setup/env.sh | grep "^export LLMDBENCH_" | sort`
