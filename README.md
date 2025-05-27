@@ -22,7 +22,7 @@ The benchmarking system drives synthetic or trace-based traffic into an llm-d-po
 
 #### Scenarios
 
-Pieces of information identifying a particular cluster. This inforation includes, but it is not limited to, GPU model, llm model and llm-d parameters (an environment file, and optionally a `values.yaml` file for llm-d-deployer)
+Pieces of information identifying a particular cluster. This information includes, but it is not limited to, GPU model, llm model and llm-d parameters (an environment file, and optionally a `values.yaml` file for llm-d-deployer)
 
 #### Harness
 
