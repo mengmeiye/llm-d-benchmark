@@ -6,7 +6,7 @@ on:
       input_dir:
         description: 'Input directory for benchmark results'
         required: false
-        default: './tmp/cicd/analysis'
+        default: '/tmp/cicd/analysis'
       output_dir:
         description: 'Output directory name (S3 prefix and artifact name)'
         required: false
@@ -36,7 +36,7 @@ jobs:
 
       - name: Set input and output directory environment variables
         run: |
-          DEFAULT_INPUT_DIR=./tmp/cicd/analysis
+          DEFAULT_INPUT_DIR=/tmp/cicd/analysis
           INPUT_DIR="${{ github.event.inputs.input_dir }}"
           if [ -z "$INPUT_DIR" ]; then
             INPUT_DIR="$DEFAULT_INPUT_DIR"
