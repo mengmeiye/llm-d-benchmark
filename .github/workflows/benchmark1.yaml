@@ -36,7 +36,12 @@ jobs:
 
       - name: Set input and output directory environment variables
         run: |
-          echo "INPUT_DIR=${{ github.event.inputs.input_dir }}" >> $GITHUB_ENV
+          DEFAULT_INPUT_DIR=./tmp/cicd/analysis
+          INPUT_DIR="${{ github.event.inputs.input_dir }}"
+          if [ -z "$INPUT_DIR" ]; then
+            INPUT_DIR="$DEFAULT_INPUT_DIR"
+          fi
+          echo "INPUT_DIR=$INPUT_DIR" >> $GITHUB_ENV
 
           if [ -z "${{ github.event.inputs.output_dir }}" ]; then
             timestamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -46,7 +51,7 @@ jobs:
             echo "OUTPUT_DIR=${{ github.event.inputs.output_dir }}" >> $GITHUB_ENV
             echo "Using provided output dir: ${{ github.event.inputs.output_dir }}"
           fi
-
+    
       - name: Set up kubeconfig from secret
         run: |
           mkdir -p ~/.kube
