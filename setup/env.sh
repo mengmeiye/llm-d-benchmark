@@ -56,6 +56,7 @@ export LLMDBENCH_VLLM_COMMON_PVC_NAME=${LLMDBENCH_VLLM_COMMON_PVC_NAME:-"model-p
 export LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS="${LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS:-default}"
 export LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE="${LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE:-300Gi}"
 export LLMDBENCH_VLLM_COMMON_PVC_DOWNLOAD_TIMEOUT=${LLMDBENCH_VLLM_COMMON_PVC_DOWNLOAD_TIMEOUT:-"2400"}
+export LLMDBENCH_VLLM_COMMON_HF_TOKEN_KEY="${LLMDBENCH_VLLM_COMMON_HF_TOKEN_KEY:-"HF_TOKEN"}"
 export LLMDBENCH_VLLM_COMMON_HF_TOKEN_NAME=${LLMDBENCH_VLLM_COMMON_HF_TOKEN_NAME:-"llm-d-hf-token"}
 export LLMDBENCH_VLLM_COMMON_INFERENCE_PORT=${LLMDBENCH_VLLM_COMMON_INFERENCE_PORT:-"8000"}
 export LLMDBENCH_VLLM_COMMON_FQDN=${LLMDBENCH_VLLM_COMMON_FQDN:-".svc.cluster.local"}
@@ -474,6 +475,7 @@ function llmdbench_execute_cmd {
   local verbose=${3:-0}
   local silent=${4:-1}
   local attempts=${5:-1}
+  local fatal=${6:-0}
   local counter=1
   local delay=10
 
@@ -522,7 +524,16 @@ function llmdbench_execute_cmd {
   fi
 
   set -euo pipefail
-  return $ecode
+
+  if [[ ${fatal} -eq 1 ]];
+  then
+    if [[ ${ecode} -ne 0 ]]
+    then
+      exit ${ecode}
+    fi
+  fi
+
+  return ${ecode}
 }
 export -f llmdbench_execute_cmd
 
@@ -676,3 +687,202 @@ function announce {
     fi
 }
 export -f announce
+
+require_var() {
+  local var_name="$1"
+  local var_value="$2"
+  if [[ -z "${var_value}" ]]; then
+    announce "❌ Required variable '${var_name}' is empty"
+    exit 1
+  fi
+}
+export -f require_var
+
+create_namespace() {
+  local kcmd="$1"
+  local namespace="$2"
+  require_var "namespace" "${namespace}"
+  announce "📦 Creating namespace ${namespace}..."
+  ${kcmd} create namespace "${namespace}" --dry-run=client -o yaml | ${kcmd} apply -f - &>/dev/null || {
+    announce "❌ Failed to create/apply namespace ${namespace}"
+    exit 1
+  }
+  announce "✅ Namespace ready"
+}
+export -f create_namespace
+
+create_or_update_hf_secret() {
+  local kcmd="$1"
+  local namespace="$2"
+  local secret_name="$3"
+  local secret_key="$4"
+  local hf_token="$5"
+
+  require_var "namespace" "${namespace}"
+  require_var "secret_name" "${secret_name}"
+  require_var "hf_token" "${hf_token}"
+
+  announce "🔐 Creating/updating HF token secret..."
+
+  llmdbench_execute_cmd "${kcmd} delete secret ${secret_name} -n ${namespace} --ignore-not-found" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+  ${kcmd} create secret generic "${secret_name}" \
+    --namespace "${namespace}" \
+    --from-literal="${secret_key}=${hf_token}" \
+    --dry-run=client -o yaml | ${kcmd} apply -n "${namespace}" -f - &>/dev/null || {
+    announce "❌ Failed to create/apply secret ${secret_name}"
+    exit 1
+  }
+  announce "✅ HF token secret created"
+}
+export -f create_or_update_hf_secret
+
+# 
+# vLLM Model Download Utilities
+# 
+
+validate_and_create_pvc() {
+  local kcmd="$1"
+  local namespace="$2"
+  local download_model="$3"
+  local pvc_name="$4"
+  local pvc_size="$5"
+  local pvc_class="$6"
+
+  require_var "download_model" "${download_model}"
+  require_var "pvc_name" "${pvc_name}"
+  require_var "pvc_size" "${pvc_size}"
+  require_var "pvc_class" "${pvc_class}"
+
+  announce "💾 Provisioning model storage…"
+
+  if [[ "${download_model}" != */* ]]; then
+    announce "❌ '${download_model}' is not in Hugging Face format <org>/<repo>"
+    exit 1
+  fi
+
+  announce "🔍 Checking storage class '${pvc_class}'..."
+  if ! ${kcmd} get storageclass "${pvc_class}" &>/dev/null; then
+    announce "❌ StorageClass '${pvc_class}' not found"
+    exit 1
+  fi
+
+  cat << EOF > ${LLMDBENCH_CONTROL_WORK_DIR}/setup/yamls/${LLMDBENCH_CURRENT_STEP}_storage_pvc_setup.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${pvc_name}
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: ${pvc_size}
+  storageClassName: ${pvc_class}
+  volumeMode: Filesystem
+EOF
+
+  llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} apply -n ${namespace} -f ${LLMDBENCH_CONTROL_WORK_DIR}/setup/yamls/${LLMDBENCH_CURRENT_STEP}_storage_pvc_setup.yaml" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 1 1 1
+}
+export -f validate_and_create_pvc
+
+launch_download_job() {
+  local kcmd="$1"
+  local namespace="$2"
+  local secret_name="$3"
+  local download_model="$4"
+  local model_path="$5"
+  local pvc_name="$6"
+
+  require_var "namespace" "${namespace}"
+  require_var "secret_name" "${secret_name}"
+  require_var "download_model" "${download_model}"
+  require_var "model_path" "${model_path}"
+  require_var "pvc_name" "${pvc_name}"
+
+  announce "🚀 Launching model download job..."
+
+cat << EOF > ${LLMDBENCH_CONTROL_WORK_DIR}/setup/yamls/${LLMDBENCH_CURRENT_STEP}_download_pod_job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: download-model
+spec:
+  template:
+    spec:
+      containers:
+        - name: downloader
+          image: python:3.10
+          command: ["/bin/sh", "-c"]
+          args:
+            - mkdir -p "\${MOUNT_PATH}/\${MODEL_PATH}" && \
+              pip install huggingface_hub && \
+              export PATH="\${PATH}:\${HOME}/.local/bin" && \
+              huggingface-cli login --token "\${HF_TOKEN}" && \
+              huggingface-cli download "\${HF_MODEL_ID}" --local-dir "/cache/\${MODEL_PATH}"
+          env:
+            - name: MODEL_PATH
+              value: ${model_path}
+            - name: HF_MODEL_ID
+              value: ${download_model}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${secret_name}
+                  key: HF_TOKEN
+            - name: HF_HOME
+              value: /tmp/huggingface
+            - name: HOME
+              value: /tmp
+            - name: MOUNT_PATH
+              value: /cache
+          volumeMounts:
+            - name: model-cache
+              mountPath: /cache
+      restartPolicy: OnFailure
+      imagePullPolicy: IfNotPresent
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: ${pvc_name}
+EOF
+  llmdbench_execute_cmd "${LLMDBENCH_CONTROL_KCMD} apply -n ${namespace} -f ${LLMDBENCH_CONTROL_WORK_DIR}/setup/yamls/${LLMDBENCH_CURRENT_STEP}_download_pod_job.yaml" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 1 1 1
+}
+export -f launch_download_job
+
+wait_for_download_job() {
+  local kcmd="$1"
+  local namespace="$2"
+  local timeout="$3"
+
+  require_var "namespace" "${namespace}"
+  require_var "timeout" "${timeout}"
+
+  announce "⏳ Waiting for pod to start model download job ..."
+  local pod_name
+  pod_name="$(${kcmd} get pod --selector=job-name=download-model -n "${namespace}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+
+  if [[ -z "${pod_name}" ]]; then
+    announce "🙀 No pod found for the job. Exiting..."
+    llmdbench_execute_cmd "${kcmd} logs job/download-model -n ${namespace}" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 1 1 1
+  fi
+
+  llmdbench_execute_cmd "${kcmd} wait --for=condition=Ready pod/"${pod_name}" --timeout=60s -n ${namespace}" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+  if [[ $? -ne 0 ]]
+  then
+    announce "🙀 Pod did not become Ready"
+    llmdbench_execute_cmd  "${kcmd} logs job/download-model -n ${namespace}" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0 1 0
+    exit 1
+  fi 
+
+  announce "⏳ Waiting up to ${timeout}s for job to complete..."
+  llmdbench_execute_cmd "${kcmd} wait --for=condition=complete --timeout="${timeout}"s job/download-model -n ${namespace}" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE}
+  if [[ $? -ne 0 ]]
+  then
+    announce "🙀 Download job failed or timed out"
+    llmdbench_execute_cmd  "${kcmd} logs job/download-model -n ${namespace}" ${LLMDBENCH_CONTROL_DRY_RUN} ${LLMDBENCH_CONTROL_VERBOSE} 0 1 0
+    exit 1
+  fi
+
+  announce "✅ Model downloaded"
+}
+export -f wait_for_download_job
