@@ -44,11 +44,12 @@ function install_yq_linux {
 
 function install_helmfile_linux {
     set -euo pipefail
-    local version=v0.144.0
-    local binary=helmfile_linux_amd64
-    curl -L https://github.com/roboll/helmfile/releases/download/$version/${binary} -o ${binary}
-    chmod +x ${binary}
-    sudo cp -f ${binary} /usr/local/bin/helmfile
+    local version=1.1.3
+    local pkg=helmfile_${version}_linux_amd64
+
+    curl -L https://github.com/helmfile/helmfile/releases/download/v${version}/${pkg}.tar.gz -o ${pkg}.tar.gz
+    tar xzf ${pkg}.tar.gz
+    sudo cp -f helmfile /usr/local/bin/helmfile
     set +euo pipefail
 }
 
@@ -84,7 +85,7 @@ function install_kustomize_linux {
     sudo mv kustomize /usr/local/bin
     set +euo pipefail
 }
-
+pushd /tmp &>/dev/null
 for tool in $tools; do
     if command -v $tool &> /dev/null; then
         echo "$tool already installed" >> ~/.llmdbench_dependencies_checked
@@ -98,5 +99,12 @@ for tool in $tools; do
     else
         $PKG_MGR $tool || echo "Could not install $tool"
     fi
+    if command -v $tool &> /dev/null; then
+        true
+    else
+        echo "$tool failed to install!"
+        exit 1
+    fi
     echo "---------------------------"
 done
+popd &>/dev/null
