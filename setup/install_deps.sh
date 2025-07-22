@@ -90,6 +90,7 @@ for tool in $tools; do
         echo "$tool already installed" >> ~/.llmdbench_dependencies_checked
         continue
     fi
+    echo "---------------------------"
     echo "Installing $tool..."
     install_func=install_${tool}_$target_os
     if declare -F "$install_func" &>/dev/null; then
@@ -97,4 +98,5 @@ for tool in $tools; do
     else
         $PKG_MGR $tool || echo "Could not install $tool"
     fi
+    echo "---------------------------"
 done
