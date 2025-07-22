@@ -15,13 +15,12 @@ tools="gsed python3 curl git oc kubectl helm helmfile kustomize rsync make skope
 # get package manager
 if command -v apt &> /dev/null; then
     PKG_MGR="sudo apt install -y"
-    tools=$(echo $tools | sed 's/gsed /sed /g')
-
+    tools=$(echo $tools | sed 's/gsed /sed openssl /g')
 elif command -v apt-get &> /dev/null; then
     PKG_MGR="sudo apt-get install -y"
 elif command -v brew &> /dev/null; then
     PKG_MGR="brew install"
-    tools=$(echo $tools | sed 's/ oc / openshift-cli /g')
+    tools=$(echo $tools | sed 's/ oc / openshift-cli openssl /g')
 elif command -v yum &> /dev/null; then
     PKG_MGR="sudo yum install -y"
     tools=$(echo $tools | sed 's/gsed /sed openssl /g')
