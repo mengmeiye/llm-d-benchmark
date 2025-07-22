@@ -46,7 +46,7 @@ function install_helmfile_linux {
     set -euo pipefail
     local version=v0.144.0
     local binary=helmfile_linux_amd64
-    curl -L https://github.com/roboll/helmfile/releases/download/$version/helmfile_darwin_arm64 -o ${binary}
+    curl -L https://github.com/roboll/helmfile/releases/download/$version/${binary} -o ${binary}
     chmod +x ${binary}
     sudo cp -f ${binary} /usr/local/bin/helmfile
     set +euo pipefail
