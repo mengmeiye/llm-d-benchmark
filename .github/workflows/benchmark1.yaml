@@ -27,7 +27,7 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        gateway-provider: ["kgateway", "istio"]
+        gateway-provider: ["istio", "kgateway"]
 
     steps:
       - name: Checkout code
