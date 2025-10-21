@@ -146,7 +146,7 @@ def check_deployment(ev: dict):
     if dry_run:
         route_url = ""
     else:
-        if ev['control_deploy_is_openshift']:
+        if ev['control_deploy_is_openshift'] == "1":
             api_instance = k8s_client.CustomObjectsApi()
             try:
                 route = api_instance.get_namespaced_custom_object(
@@ -160,7 +160,7 @@ def check_deployment(ev: dict):
             except k8s_client.ApiException as e:
                 announce(f"ERROR: unable to fetch route: {e}")
 
-    if route_url:
+    if ev['control_deploy_is_openshift'] == "1" and route_url:
         announce(f"🚀 Testing external route \"{route_url}\"...")
         if is_standalone_deployment(ev):
             received_model_name, curl_command_used = get_model_name_from_pod(ev['vllm_common_namespace'], image_url, route_url, '80')
