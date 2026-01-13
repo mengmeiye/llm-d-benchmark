@@ -244,6 +244,9 @@ decode:
   create: {decode_create}
   replicas: {decode_replicas}
 {add_affinity(ev)}
+  monitoring:
+    podmonitor:
+      enabled: true
   parallelism:
     data: {decode_data_parallelism}
     dataLocal: {decode_data_local_parallelism}
@@ -302,6 +305,9 @@ prefill:
   create: {prefill_create}
   replicas: {prefill_replicas}
 {add_affinity(ev)}
+  monitoring:
+    podmonitor:
+      enabled: true
   parallelism:
     data: {prefill_data_parallelism}
     dataLocal: {prefill_data_local_parallelism}
