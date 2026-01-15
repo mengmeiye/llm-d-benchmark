@@ -8,7 +8,8 @@
 #export LLMDBENCH_DEPLOY_MODEL_LIST=ibm-granite/granite-speech-3.3-8b
 #export LLMDBENCH_DEPLOY_MODEL_LIST=ibm-granite/granite-3.3-2b-instruct
 #export LLMDBENCH_DEPLOY_MODEL_LIST=ibm-granite/granite-3.3-8b-instruct
-export LLMDBENCH_DEPLOY_MODEL_LIST=ibm-ai-platform/micro-g3.3-8b-instruct-1b
+# export LLMDBENCH_DEPLOY_MODEL_LIST=ibm-ai-platform/micro-g3.3-8b-instruct-1b
+export LLMDBENCH_DEPLOY_MODEL_LIST=ibm-granite/granite-3.3-8b-instruct
 #export LLMDBENCH_DEPLOY_MODEL_LIST="facebook/opt-125m"
 #export LLMDBENCH_DEPLOY_MODEL_LIST="meta-llama/Llama-3.1-8B-Instruct"
 #export LLMDBENCH_DEPLOY_MODEL_LIST="meta-llama/Llama-3.1-70B-Instruct"
@@ -26,7 +27,7 @@ export LLMDBENCH_VLLM_COMMON_EXTRA_PVC_NAME=spyre-precompiled-model
 #export LLMDBENCH_DEPLOY_METHODS=modelservice
 
 export LLMDBENCH_VLLM_COMMON_ACCELERATOR_RESOURCE=ibm.com/spyre_pf
-export LLMDBENCH_VLLM_COMMON_TENSOR_PARALLELISM=2
+export LLMDBENCH_VLLM_COMMON_TENSOR_PARALLELISM=4
 export LLMDBENCH_VLLM_COMMON_AFFINITY="ibm.com/spyre.product:IBM_Spyre"
 
 export LLMDBENCH_VLLM_COMMON_MAX_NUM_SEQ=32
@@ -39,15 +40,12 @@ export LLMDBENCH_VLLM_COMMON_REPLICAS=1
 
 export LLMDBENCH_VLLM_COMMON_POD_SCHEDULER=spyre-scheduler
 
-export LLMDBENCH_VLLM_STANDALONE_IMAGE_REGISTRY=icr.io
-export LLMDBENCH_VLLM_STANDALONE_IMAGE_REPO=ibmaiu_internal
-export LLMDBENCH_VLLM_STANDALONE_IMAGE_NAME=vllm
-export LLMDBENCH_VLLM_STANDALONE_IMAGE_TAG=1.0.4-amd64
+export LLMDBENCH_VLLM_COMMON_MAX_NUM_BATCHED_TOKENS=1024
 
-export LLMDBENCH_LLMD_IMAGE_REGISTRY=icr.io
-export LLMDBENCH_LLMD_IMAGE_REPO=ibmaiu_internal
-export LLMDBENCH_LLMD_IMAGE_NAME=vllm
-export LLMDBENCH_LLMD_IMAGE_TAG=1.0.4-amd64
+export LLMDBENCH_VLLM_STANDALONE_IMAGE_REGISTRY=us.icr.io
+export LLMDBENCH_VLLM_STANDALONE_IMAGE_REPO=wxpe-cicd-internal/amd64
+export LLMDBENCH_VLLM_STANDALONE_IMAGE_NAME=aiu-vllm
+export LLMDBENCH_VLLM_STANDALONE_IMAGE_TAG=v1.1.1-rc.3-amd64
 
 export LLMDBENCH_LLMD_IMAGE_REGISTRY=us.icr.io
 export LLMDBENCH_LLMD_IMAGE_REPO=wxpe-cicd-internal/amd64
@@ -64,7 +62,8 @@ cat << EOF > $LLMDBENCH_VLLM_STANDALONE_ARGS
 --block-size REPLACE_ENV_LLMDBENCH_VLLM_COMMON_BLOCK_SIZE \
 --max-num-seqs REPLACE_ENV_LLMDBENCH_VLLM_COMMON_MAX_NUM_SEQ \
 --enable-auto-tool-choice \
---tool-call-parser granite
+--tool-call-parser granite \
+--enable-prefix-caching
 EOF
 
 export LLMDBENCH_VLLM_COMMON_ENVVARS_TO_YAML=$(mktemp)
@@ -102,7 +101,15 @@ cat << EOF > $LLMDBENCH_VLLM_COMMON_ENVVARS_TO_YAML
 - name: VLLM_LOGGING_LEVEL
   value: DEBUG
 - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
-  value: "1"
+  value: '1'
+- name: VLLM_SPYRE_DYNAMO_BACKEND
+  value: 'sendnn'
+- name: VLLM_SPYRE_USE_CB
+  value: '1'
+- name: VLLM_SPYRE_USE_CHUNKED_PREFILL
+  value: '1'
+- name: VLLM_DT_CHUNK_LEN
+  value: '1024'
 EOF
 
 export LLMDBENCH_VLLM_COMMON_EXTRA_VOLUME_MOUNTS=$(mktemp)
@@ -153,8 +160,10 @@ export LLMDBENCH_VLLM_MODELSERVICE_DECODE_ACCELERATOR_RESOURCE=ibm.com/spyre_pf
 
 #export LLMDBENCH_HARNESS_NAME=guidellm
 export LLMDBENCH_HARNESS_NAME=inference-perf # (default is "inference-perf")
+# export LLMDBENCH_HARNESS_NAME=vllm-benchmark # (default is "inference-perf")
 ######export LLMDBENCH_HARNESS_NAME=nop
 #export LLMDBENCH_HARNESS_NAME=vllm-benchmark
 
-#export LLMDBENCH_HARNESS_EXPERIMENT_PROFILE=sanity_random.yaml # (default is "sanity_random.yaml")
+export LLMDBENCH_HARNESS_EXPERIMENT_PROFILE=sanity_random.yaml # (default is "sanity_random.yaml")
+# export LLMDBENCH_HARNESS_EXPERIMENT_PROFILE=fixed_dataset.yaml # (default is "sanity_random.yaml")
 ######export LLMDBENCH_HARNESS_EXPERIMENT_PROFILE=nop.yaml
