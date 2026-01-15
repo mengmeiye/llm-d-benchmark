@@ -150,7 +150,8 @@ cat << EOF > $LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_ARGS
 --tensor-parallel-size REPLACE_ENV_LLMDBENCH_VLLM_MODELSERVICE_DECODE_TENSOR_PARALLELISM \
 --max-num-seqs REPLACE_ENV_LLMDBENCH_VLLM_COMMON_MAX_NUM_SEQ \
 --enable-auto-tool-choice \
---tool-call-parser granite
+--tool-call-parser granite \
+--enable-prefix-caching
 EOF
 
 export LLMDBENCH_VLLM_MODELSERVICE_DECODE_ACCELERATOR_RESOURCE=ibm.com/spyre_pf
