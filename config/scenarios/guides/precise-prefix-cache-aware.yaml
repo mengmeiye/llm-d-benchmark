@@ -25,7 +25,7 @@ scenario:
       path: models/Qwen/Qwen3-32B
       huggingfaceId: Qwen/Qwen3-32B
       size: 1Ti
-      maxModelLen: 16000
+      maxModelLen: 32000
       blockSize: 64
       gpuMemoryUtilization: 0.95
 
@@ -58,6 +58,15 @@ scenario:
       pluginsConfigFile: "precise-prefix-cache-config.yaml"
       sidecar:
         enabled: true
+        env:
+          - name: TOKENIZERS_DIR
+            value: /tokenizers
+          - name: HF_HOME
+            value: /tokenizers
+          - name: VLLM_CPU_KVCACHE_SPACE
+            value: "0"
+          - name: XDG_CACHE_HOME
+            value: /tmp
       flags:
         v: 4  # log verbosity
       pluginsCustomConfig:
@@ -162,11 +171,11 @@ scenario:
       # Resource configuration
       resources:
         limits:
-          memory: 64Gi
-          cpu: "4"
+          memory: 400Gi
+          cpu: "48"
         requests:
-          memory: 64Gi
-          cpu: "4"
+          memory: 400Gi
+          cpu: "48"
 
       vllm:
         # Custom vLLM command -- replaces the auto-generated command.
@@ -186,6 +195,8 @@ scenario:
       extraEnvVars:
         - name: PYTHONHASHSEED
           value: "42"
+        - name: LMCACHE_MAX_LOCAL_CPU_SIZE
+          value: "200.0"
 
       # -----------------------------------------------------------------------
       # Extra Container Configuration
@@ -266,8 +277,11 @@ scenario:
     vllmCommon:
       kvTransfer:
         enabled: true
-        connector: NixlConnector
+        connector: OffloadingConnector
         role: kv_both
+        extraConfig:
+          num_cpu_blocks: 5000
+          cpu_bytes_to_use: 40000000000
 
       kvEvents:
         enabled: true
@@ -279,6 +293,7 @@ scenario:
 
       flags:
         enforceEager: true
+        enablePrefixCaching: true
         disableLogRequests: false
         disableUvicornAccessLog: false
         allowLongMaxModelLen: "1"
