@@ -29,6 +29,11 @@ scenario:
       blockSize: 64
       gpuMemoryUtilization: 0.95
 
+    images:
+      inferenceScheduler:
+        repository: quay.io/rh-ee-mye/llm-d-inference-scheduler
+        tag: v0.8.0-rc.1
+
     # =========================================================================
     # DEPLOYMENT METHOD -- Choose standalone or modelservice
     # =========================================================================
@@ -88,6 +93,7 @@ scenario:
                   speculativeIndexing: true
                   tokenizersPoolConfig:
                     modelName: "${model.name}"
+                    workersCount: 5
                     hf: null
                     uds:
                       socketFile: /tmp/tokenizer/tokenizer-uds.socket
