@@ -32,7 +32,7 @@ scenario:
     images:
       inferenceScheduler:
         repository: quay.io/rh-ee-mye/llm-d-inference-scheduler
-        tag: v0.8.0-rc.1
+        tag: cpu-offloading
 
     # =========================================================================
     # DEPLOYMENT METHOD -- Choose standalone or modelservice
