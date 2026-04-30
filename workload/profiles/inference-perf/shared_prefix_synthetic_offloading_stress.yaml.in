@@ -1,0 +1,33 @@
+load:
+  type: constant
+  stages:
+  - rate: 10
+    duration: 120
+  - rate: 5
+    duration: 60
+api:
+  type: completion
+  streaming: true
+server:
+  type: vllm
+  model_name: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL
+  base_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_TOKENIZER
+data:
+  type: shared_prefix
+  shared_prefix:
+    num_groups: 256
+    num_prompts_per_group: 16
+    system_prompt_len: 4096
+    question_len: 256
+    output_len: 256
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: true
+storage:
+  local_storage:
+    path: /workspace
