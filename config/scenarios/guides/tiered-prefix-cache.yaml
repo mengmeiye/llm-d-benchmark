@@ -1,16 +1,20 @@
-# TIERED PREFIX CACHE / PREFIX CACHE OFFLOADING WELL LIT PATH
-# Based on https://github.com/llm-d/llm-d/tree/main/guides/tiered-prefix-cache/README.md
-# Migrated from bash environment variables to YAML format
+# ============================================================================
+# TIERED PREFIX CACHE / CPU OFFLOADING — HEURISTIC SCORER
+# Based on https://github.com/llm-d/llm-d/tree/main/guides/tiered-prefix-cache/cpu
+#
+# Uses the heuristic `prefix-cache-scorer` (LRU simulation) with two instances:
+#   - gpu-prefix-cache-scorer: LRU sized to GPU block capacity (auto-tuned)
+#   - cpu-prefix-cache-scorer: LRU sized to CPU block capacity (manual)
+# No ZMQ events or precise scorer — the EPP infers cache state from routing
+# history, not from vLLM events.
 #
 # Notes:
 # - Removed pod monitoring; can be added using decode.extraContainerConfig
 # - Removed extra volumes metrics-volume and torch-compile-volume (not needed for this model/hardware)
 # - Use decode.additionalVolumeMounts and decode.additionalVolumes to add them if needed
+# ============================================================================
 
 scenario:
-  # ============================================================================
-  # Tiered Prefix Cache - Llama 3.1 8B Instruct with 2 decode pods (no prefill)
-  # ============================================================================
   - name: "tiered-prefix-cache"
 
     # =========================================================================
@@ -32,10 +36,16 @@ scenario:
       path: models/Qwen/Qwen3-32B
       huggingfaceId: Qwen/Qwen3-32B
       size: 1Ti
-      maxModelLen: 16000
+      maxModelLen: 32000
       blockSize: 64
       gpuMemoryUtilization: 0.95
-      cacheBase: /model-cache
+
+    images:
+      inferenceScheduler:
+        repository: quay.io/rh-ee-mye/llm-d-inference-scheduler
+        tag: cpu-offloading-20260501
+        # tag: v0.8.0-rc.1
+
 
     # =========================================================================
     # MODELSERVICE -- Only applies when modelservice.enabled: true
@@ -48,7 +58,8 @@ scenario:
     # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_INFERENCE_MODEL=true
     # -------------------------------------------------------------------------
     routing:
-      connector: nixlv2
+      proxy:
+        enabled: false
 
     # -------------------------------------------------------------------------
     # Affinity / Node Selection
@@ -84,7 +95,46 @@ scenario:
     # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE="default-plugins.yaml"
     # -------------------------------------------------------------------------
     inferenceExtension:
-      pluginsConfigFile: "default-plugins.yaml"
+      pluginsConfigFile: "tiered-prefix-cache-plugins.yaml"
+      pluginsCustomConfig:
+        tiered-prefix-cache-plugins.yaml: |
+          apiVersion: inference.networking.x-k8s.io/v1alpha1
+          kind: EndpointPickerConfig
+          plugins:
+          - type: queue-scorer
+          - type: kv-cache-utilization-scorer
+          - type: prefix-cache-scorer
+            name: gpu-prefix-cache-scorer
+          - type: prefix-cache-scorer
+            name: cpu-prefix-cache-scorer
+            parameters:
+              autoTune: false
+              lruCapacityPerServer: 20000
+          schedulingProfiles:
+          - name: default
+            plugins:
+            - pluginRef: queue-scorer
+              weight: 2.0
+            - pluginRef: kv-cache-utilization-scorer
+              weight: 2.0
+            - pluginRef: gpu-prefix-cache-scorer
+              weight: 1.0
+            - pluginRef: cpu-prefix-cache-scorer
+              weight: 1.0
+      # InferencePool Provider Configuration
+      inferencePoolProviderConfig:
+        destinationRule:
+          trafficPolicy:
+            connectionPool:
+              http:
+                http1MaxPendingRequests: 256000
+                maxRequestsPerConnection: 256000
+                http2MaxRequests: 256000
+                idleTimeout: "900s"
+              tcp:
+                maxConnections: 256000
+                maxConnectionDuration: "1800s"
+                connectTimeout: "900s"
 
     # =========================================================================
     # COMMON -- Applies to all deployment methods (continued)
@@ -120,8 +170,7 @@ scenario:
     # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_*
     # -------------------------------------------------------------------------
     decode:
-      # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=2
-      replicas: 2
+      replicas: 4
 
       initContainers:
         - name: preprocess
@@ -132,16 +181,12 @@ scenario:
             - name: shared-config
               mountPath: /shared-config
 
-      # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_TENSOR_PARALLELISM=1
       parallelism:
-        tensor: 1
+        tensor: 2
         data: 1
         dataLocal: 1
         workers: 1
 
-      # Resource configuration
-      # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_CPU_NR=48
-      #                 LLMDBENCH_VLLM_MODELSERVICE_DECODE_CPU_MEM=400Gi
       resources:
         limits:
           memory: 400Gi
@@ -150,30 +195,14 @@ scenario:
           memory: 400Gi
           cpu: "48"
 
-      # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_MODEL_COMMAND=custom
-      #                 LLMDBENCH_VLLM_MODELSERVICE_DECODE_PREPROCESS
-      #                 LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_ARGS
       vllm:
-        # Custom vLLM command -- replaces the auto-generated command.
-      # Both decode.vllm.customCommand and prefill.vllm.customCommand are supported.
-        # vllmCommon.flags.* are NOT applied when customCommand is set.
-        # Only --kv-transfer-config and --kv-events-config from vllmCommon
-        # are appended if enabled.
         additionalFlags:
-          - "--max-num-seq 1024"
+          - "--prefix-caching-hash-algo sha256_cbor"
+          - "--max-num-seqs 1024"
 
-      # -----------------------------------------------------------------------
-      # Extra Environment Variables
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_ENVVARS_TO_YAML
-      # Only PYTHONHASHSEED and LMCACHE_MAX_LOCAL_CPU_SIZE are explicitly set;
-      # other vars (UCX_TLS, VLLM_NIXL_*, etc.) are auto-populated by the
-      # preprocess script at pod runtime.
-      # -----------------------------------------------------------------------
       extraEnvVars:
         - name: PYTHONHASHSEED
-          value: "123"
-        - name: LMCACHE_MAX_LOCAL_CPU_SIZE
-          value: "200.0"
+          value: "42"
 
       # -----------------------------------------------------------------------
       # Extra Container Configuration
@@ -261,8 +290,8 @@ scenario:
         connector: OffloadingConnector
         role: kv_both
         extraConfig:
-          num_cpu_blocks: 5000
-          cpu_bytes_to_use: 1000000000
+          num_cpu_blocks: 20000
+          cpu_bytes_to_use: 200000000000
 
       # KV Events not enabled in this scenario
       kvEvents:
@@ -321,4 +350,4 @@ scenario:
 
     harness:
       name: inference-perf
-      experimentProfile: shared_prefix_synthetic.yaml
+      experimentProfile: shared_prefix_synthetic_offloading_highpressure.yaml

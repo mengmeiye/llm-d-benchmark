@@ -32,7 +32,7 @@ scenario:
     images:
       inferenceScheduler:
         repository: quay.io/rh-ee-mye/llm-d-inference-scheduler
-        tag: cpu-offloading
+        tag: cpu-offloading-20260501
         # tag: v0.8.0-rc.1
 
     # =========================================================================
@@ -192,6 +192,7 @@ scenario:
         # are appended if enabled.
         additionalFlags:
           - "--prefix-caching-hash-algo sha256_cbor"
+          - "--max-num-seqs 1024"
 
       # -----------------------------------------------------------------------
       # Extra Environment Variables
@@ -202,8 +203,6 @@ scenario:
       extraEnvVars:
         - name: PYTHONHASHSEED
           value: "42"
-        - name: LMCACHE_MAX_LOCAL_CPU_SIZE
-          value: "200.0"
 
       # -----------------------------------------------------------------------
       # Extra Container Configuration
@@ -287,8 +286,8 @@ scenario:
         connector: OffloadingConnector
         role: kv_both
         extraConfig:
-          num_cpu_blocks: 5000
-          cpu_bytes_to_use: 40000000000
+          num_cpu_blocks: 10000
+          cpu_bytes_to_use: 200000000000
 
       kvEvents:
         enabled: true
@@ -351,4 +350,4 @@ scenario:
 
     harness:
       name: inference-perf
-      experimentProfile: shared_prefix_synthetic_offloading_stress.yaml
+      experimentProfile: shared_prefix_synthetic_offloading_highpressure.yaml
