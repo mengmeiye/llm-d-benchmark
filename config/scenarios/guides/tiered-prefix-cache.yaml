@@ -108,8 +108,8 @@ scenario:
           - type: prefix-cache-scorer
             name: cpu-prefix-cache-scorer
             parameters:
-              autoTune: false
-              lruCapacityPerServer: 20000
+              autoTune: false  # vLLM doesn't have the CPU capacity metric to enable autoTune yet
+              lruCapacityPerServer: 41000  # Allocating ~100GB for Qwen-32B: 41,000 blocks * 2.5MB/block (based on 160KB/token * 16 block size)
           schedulingProfiles:
           - name: default
             plugins:
@@ -290,8 +290,7 @@ scenario:
         connector: OffloadingConnector
         role: kv_both
         extraConfig:
-          num_cpu_blocks: 20000
-          cpu_bytes_to_use: 200000000000
+          cpu_bytes_to_use: 214748364800
 
       # KV Events not enabled in this scenario
       kvEvents:

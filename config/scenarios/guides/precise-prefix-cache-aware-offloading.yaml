@@ -61,7 +61,7 @@ scenario:
     # Routing / GAIE Configuration
     # -------------------------------------------------------------------------
     inferenceExtension:
-      pluginsConfigFile: "precise-prefix-cache-config.yaml"
+      pluginsConfigFile: "precise-prefix-cache-aware-plugins.yaml"
       sidecar:
         enabled: true
         env:
@@ -76,45 +76,47 @@ scenario:
       flags:
         v: 4  # log verbosity
       pluginsCustomConfig:
-        precise-prefix-cache-config.yaml: |
+        precise-prefix-cache-aware-plugins.yaml: |
           apiVersion: inference.networking.x-k8s.io/v1alpha1
           kind: EndpointPickerConfig
           plugins:
-            - type: single-profile-handler
             - type: tokenizer
               parameters:
                 modelName: Qwen/Qwen3-32B
                 udsTokenizerConfig:
                   socketFile: /tmp/tokenizer/tokenizer-uds.socket
+            - type: single-profile-handler
+            - type: decode-filter
             - type: precise-prefix-cache-scorer
               parameters:
                 tokenProcessorConfig:
                   blockSize: 64
+                speculativeIndexing: true
                 indexerConfig:
-                  speculativeIndexing: true
                   tokenizersPoolConfig:
-                    modelName: "${model.name}"
-                    workersCount: 5
-                    hf: null
+                    modelName: Qwen/Qwen3-32B
                     uds:
                       socketFile: /tmp/tokenizer/tokenizer-uds.socket
+                  kvBlockIndexConfig:
+                    enableMetrics: true
                 kvEventsConfig:
                   topicFilter: "kv@"
                   concurrency: 4
                   discoverPods: false
-                  zmqEndpoint: "tcp://*:5557"
+                  zmqEndpoint: "tcp://*:5556"
             - type: kv-cache-utilization-scorer
             - type: queue-scorer
             - type: max-score-picker
           schedulingProfiles:
             - name: default
               plugins:
+                - pluginRef: decode-filter
                 - pluginRef: precise-prefix-cache-scorer
-                  weight: 3.0
+                  weight: 2.0
                 - pluginRef: kv-cache-utilization-scorer
-                  weight: 2.0
+                  weight: 1.0
                 - pluginRef: queue-scorer
-                  weight: 2.0
+                  weight: 1.0
                 - pluginRef: max-score-picker
       # InferencePool Provider Configuration
       inferencePoolProviderConfig:
@@ -210,7 +212,7 @@ scenario:
       # -----------------------------------------------------------------------
       extraContainerConfig:
         ports:
-          - containerPort: 5557  # NIXL side channel port
+          - containerPort: 5556  # ZMQ KV-events port
             protocol: TCP
           - containerPort: 8200  # Metrics port
             name: metrics
@@ -286,13 +288,12 @@ scenario:
         connector: OffloadingConnector
         role: kv_both
         extraConfig:
-          num_cpu_blocks: 10000
-          cpu_bytes_to_use: 200000000000
+          cpu_bytes_to_use: 214748364800
 
       kvEvents:
         enabled: true
         publisher: zmq
-        port: 5557
+        port: 5556
         topicPrefix: kv
         # serviceName defaults to model.shortName if not specified
         # serviceName: custom-service-name
