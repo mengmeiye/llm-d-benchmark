@@ -308,6 +308,119 @@ def plot_replica_status(metrics_dir, output_path):
 
 
 # ---------------------------------------------------------------------------
+# NIXL transfer regression
+# ---------------------------------------------------------------------------
+
+# Minimum data points for a meaningful regression
+_MIN_REGRESSION_POINTS = 3
+
+
+def _linear_regression(xs, ys):
+    """Ordinary least-squares (no numpy). Returns (slope, intercept, r²)."""
+    n = len(xs)
+    if n < _MIN_REGRESSION_POINTS:
+        return None, None, 0.0
+    sum_x = sum(xs)
+    sum_y = sum(ys)
+    sum_xy = sum(x * y for x, y in zip(xs, ys))
+    sum_x2 = sum(x * x for x in xs)
+    denom = n * sum_x2 - sum_x ** 2
+    if denom == 0:
+        return None, None, 0.0
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+    intercept = (sum_y - slope * sum_x) / n
+    y_mean = sum_y / n
+    ss_tot = sum((y - y_mean) ** 2 for y in ys)
+    ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return slope, intercept, r_squared
+
+
+def plot_nixl_transfer_regression(pod_data, output_path):
+    """Scatter plot of per-transfer bytes vs time with linear regression.
+
+    Derives transfer bandwidth (GB/s) from slope and base latency (ms) from
+    intercept.
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        return False
+
+    nixl_metrics = (
+        'vllm:nixl_bytes_transferred_sum',
+        'vllm:nixl_xfer_time_seconds_sum',
+        'vllm:nixl_bytes_transferred_count',
+    )
+
+    all_xs = []
+    all_ys = []
+    pod_points = {}
+
+    for pod_name, metrics in pod_data.items():
+        if not all(m in metrics for m in nixl_metrics):
+            continue
+
+        ts_bytes = {ts: v for ts, v in metrics[nixl_metrics[0]]}
+        ts_time = {ts: v for ts, v in metrics[nixl_metrics[1]]}
+        ts_count = {ts: v for ts, v in metrics[nixl_metrics[2]]}
+
+        common_ts = sorted(set(ts_bytes) & set(ts_time) & set(ts_count))
+        if len(common_ts) < 2:
+            continue
+
+        xs = []
+        ys = []
+        for i in range(1, len(common_ts)):
+            prev, cur = common_ts[i - 1], common_ts[i]
+            db = ts_bytes[cur] - ts_bytes[prev]
+            dt = ts_time[cur] - ts_time[prev]
+            dc = ts_count[cur] - ts_count[prev]
+            if dc > 0 and db > 0 and dt > 0:
+                xs.append(db / dc)
+                ys.append(dt / dc)
+
+        if xs:
+            pod_points[pod_name] = (xs, ys)
+            all_xs.extend(xs)
+            all_ys.extend(ys)
+
+    if not all_xs:
+        return False
+
+    slope, intercept, r_squared = _linear_regression(all_xs, all_ys)
+    if slope is None or slope <= 0:
+        return False
+
+    bandwidth_gbps = 1.0 / slope / 1e9
+    base_latency_ms = intercept * 1000
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    for pod_name, (xs, ys) in pod_points.items():
+        xs_mb = [x / 1e6 for x in xs]
+        ys_ms = [y * 1000 for y in ys]
+        ax.scatter(xs_mb, ys_ms, label=pod_name, alpha=0.6, s=30)
+
+    x_min, x_max = min(all_xs), max(all_xs)
+    x_line = [x_min, x_max]
+    y_line = [slope * x + intercept for x in x_line]
+    ax.plot([x / 1e6 for x in x_line], [y * 1000 for y in y_line],
+            'k--', linewidth=2,
+            label=f'Fit: BW={bandwidth_gbps:.2f} GB/s, '
+                  f'base={base_latency_ms:.3f} ms (R²={r_squared:.3f})')
+
+    ax.set_xlabel('Bytes per Transfer (MB)')
+    ax.set_ylabel('Time per Transfer (ms)')
+    ax.set_title('NIXL KV Transfer: Bandwidth & Base Latency Regression')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    print(f"Saved plot: {output_path}")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Main orchestration
 # ---------------------------------------------------------------------------
 
@@ -367,6 +480,11 @@ def generate_all_visualizations(metrics_dir, output_dir=None, context=None):
                 title, ylabel,
                 show_aggregate=(metric_name in AGGREGATE_METRICS))
             plot_count += 1
+
+    # NIXL transfer regression plot
+    if plot_nixl_transfer_regression(
+            pod_data, os.path.join(output_dir, 'nixl_transfer_regression.png')):
+        plot_count += 1
 
     # Infrastructure plots
     plot_pod_startup_times(

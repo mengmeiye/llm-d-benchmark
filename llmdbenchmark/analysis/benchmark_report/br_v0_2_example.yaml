@@ -523,6 +523,34 @@ results:
             p99: 9.0
             max: 12.0
 
+    # NIXL transfer characteristics (linear regression of per-transfer bytes vs time)
+    # Model: transfer_time = base_latency + bytes / bandwidth
+    nixl_transfer_characteristics:
+      components:
+        - component_id: decode-engine
+          pod: qwen3-0p6b-decode-pod-1
+          role: decode
+          statistics:
+            bandwidth_gbps: 12.5
+            base_latency_ms: 0.82
+            r_squared: 0.97
+            num_data_points: 42
+            graph_path: metrics/graphs/nixl_transfer_regression.png
+        - component_id: decode-engine
+          pod: qwen3-0p6b-decode-pod-2
+          role: decode
+          statistics:
+            bandwidth_gbps: 11.8
+            base_latency_ms: 0.91
+            r_squared: 0.95
+            num_data_points: 38
+            graph_path: metrics/graphs/nixl_transfer_regression.png
+      aggregated:
+        bandwidth_gbps: 12.2
+        base_latency_ms: 0.85
+        r_squared: 0.96
+        num_data_points: 80
+
     # Request drop rate across the system
     drop_rate:
       units: percent

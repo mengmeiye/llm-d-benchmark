@@ -109,6 +109,17 @@ _BYTE_CONVERSIONS = {
 }
 
 
+# NIXL metrics used for transfer characteristics regression
+_NIXL_METRICS = {
+    'vllm:nixl_xfer_time_seconds_sum',
+    'vllm:nixl_xfer_time_seconds_count',
+    'vllm:nixl_bytes_transferred_sum',
+    'vllm:nixl_bytes_transferred_count',
+}
+
+MIN_REGRESSION_POINTS = 3
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -157,6 +168,30 @@ def _compute_stats(values, unit=''):
         'count': len(values),
         'unit': unit,
     }
+
+
+def _linear_regression(xs, ys):
+    """Ordinary least-squares linear regression (no numpy dependency).
+
+    Returns (slope, intercept, r_squared) or (None, None, 0.0) on failure.
+    """
+    n = len(xs)
+    if n < MIN_REGRESSION_POINTS:
+        return None, None, 0.0
+    sum_x = sum(xs)
+    sum_y = sum(ys)
+    sum_xy = sum(x * y for x, y in zip(xs, ys))
+    sum_x2 = sum(x * x for x in xs)
+    denom = n * sum_x2 - sum_x ** 2
+    if denom == 0:
+        return None, None, 0.0
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+    intercept = (sum_y - slope * sum_x) / n
+    y_mean = sum_y / n
+    ss_tot = sum((y - y_mean) ** 2 for y in ys)
+    ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return slope, intercept, r_squared
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +374,166 @@ def aggregate_replica_stats():
           f"mean={statistics.mean(ready_counts):.1f}")
 
 
+def _parse_nixl_time_series():
+    """Re-parse raw files to extract time-ordered NIXL counter values per pod.
+
+    Returns {pod_name: {metric_name: [(timestamp_str, value), ...]}} sorted by time.
+    """
+    pod_ts = defaultdict(lambda: defaultdict(list))
+
+    for file_path in glob.glob(os.path.join(raw_dir, '*_metrics.log')):
+        timestamp = None
+        pod_name = None
+        with open(file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('# Timestamp:'):
+                    timestamp = line.split(':', 1)[1].strip()
+                elif line.startswith('# Pod:'):
+                    pod_name = line.split(':', 1)[1].strip()
+                if line.startswith('#') or not line:
+                    continue
+                match = re.match(
+                    r'([a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[^}]*\})?) ([\d.eE+-]+)',
+                    line)
+                if match and timestamp and pod_name:
+                    base_name = match.group(1).split('{')[0]
+                    if base_name in _NIXL_METRICS:
+                        pod_ts[pod_name][base_name].append(
+                            (timestamp, float(match.group(2))))
+
+    for pod in pod_ts.values():
+        for metric in pod.values():
+            metric.sort(key=lambda x: x[0])
+
+    return dict(pod_ts)
+
+
+def _compute_transfer_characteristics(pod_ts):
+    """Compute per-interval deltas and run linear regression.
+
+    For each interval where transfers occurred, derives:
+      avg_bytes_per_transfer and avg_time_per_transfer
+    then fits: time = base_latency + bytes / bandwidth
+
+    Returns {pod_name: {bandwidth_gbps, base_latency_ms, r_squared, num_data_points}}
+    """
+    results = {}
+
+    for pod_name, metrics in pod_ts.items():
+        bytes_sum = metrics.get('vllm:nixl_bytes_transferred_sum', [])
+        time_sum = metrics.get('vllm:nixl_xfer_time_seconds_sum', [])
+        count_series = metrics.get('vllm:nixl_bytes_transferred_count', [])
+
+        if not bytes_sum or not time_sum or not count_series:
+            continue
+
+        ts_bytes = {ts: v for ts, v in bytes_sum}
+        ts_time = {ts: v for ts, v in time_sum}
+        ts_count = {ts: v for ts, v in count_series}
+
+        common_ts = sorted(set(ts_bytes) & set(ts_time) & set(ts_count))
+        if len(common_ts) < 2:
+            continue
+
+        xs_bytes = []
+        ys_time = []
+        for i in range(1, len(common_ts)):
+            prev, cur = common_ts[i - 1], common_ts[i]
+            delta_bytes = ts_bytes[cur] - ts_bytes[prev]
+            delta_time = ts_time[cur] - ts_time[prev]
+            delta_count = ts_count[cur] - ts_count[prev]
+
+            if delta_count > 0 and delta_bytes > 0 and delta_time > 0:
+                xs_bytes.append(delta_bytes / delta_count)
+                ys_time.append(delta_time / delta_count)
+
+        slope, intercept, r_squared = _linear_regression(xs_bytes, ys_time)
+        if slope is None or slope <= 0:
+            continue
+
+        results[pod_name] = {
+            'bandwidth_gbps': round(1.0 / slope / 1e9, 4),
+            'base_latency_ms': round(intercept * 1000, 4),
+            'r_squared': round(r_squared, 4),
+            'num_data_points': len(xs_bytes),
+        }
+
+    return results
+
+
+def compute_nixl_transfer_characteristics():
+    """Top-level function to derive NIXL transfer bandwidth and base latency."""
+    pod_ts = _parse_nixl_time_series()
+    if not pod_ts:
+        return
+
+    per_pod = _compute_transfer_characteristics(pod_ts)
+    if not per_pod:
+        print("NIXL transfer characteristics: insufficient data for regression")
+        return
+
+    # Aggregate across all pods
+    all_bytes = []
+    all_time = []
+    for pod_name, metrics in pod_ts.items():
+        bytes_sum = metrics.get('vllm:nixl_bytes_transferred_sum', [])
+        time_sum = metrics.get('vllm:nixl_xfer_time_seconds_sum', [])
+        count_series = metrics.get('vllm:nixl_bytes_transferred_count', [])
+        if not bytes_sum or not time_sum or not count_series:
+            continue
+        ts_bytes = {ts: v for ts, v in bytes_sum}
+        ts_time = {ts: v for ts, v in time_sum}
+        ts_count = {ts: v for ts, v in count_series}
+        common_ts = sorted(set(ts_bytes) & set(ts_time) & set(ts_count))
+        for i in range(1, len(common_ts)):
+            prev, cur = common_ts[i - 1], common_ts[i]
+            db = ts_bytes[cur] - ts_bytes[prev]
+            dt = ts_time[cur] - ts_time[prev]
+            dc = ts_count[cur] - ts_count[prev]
+            if dc > 0 and db > 0 and dt > 0:
+                all_bytes.append(db / dc)
+                all_time.append(dt / dc)
+
+    slope, intercept, r_squared = _linear_regression(all_bytes, all_time)
+    aggregated = None
+    if slope and slope > 0:
+        aggregated = {
+            'bandwidth_gbps': round(1.0 / slope / 1e9, 4),
+            'base_latency_ms': round(intercept * 1000, 4),
+            'r_squared': round(r_squared, 4),
+            'num_data_points': len(all_bytes),
+        }
+
+    # Merge into metrics_summary.json
+    summary_file = os.path.join(processed_dir, 'metrics_summary.json')
+    summary = _load_json(summary_file)
+
+    for pod_name, chars in per_pod.items():
+        if pod_name in summary:
+            summary[pod_name].setdefault('metrics', {})[
+                'nixl_transfer_characteristics'] = chars
+
+    if aggregated:
+        summary.setdefault('_aggregated', {}).setdefault('metrics', {})[
+            'nixl_transfer_characteristics'] = aggregated
+
+    _save_json(summary_file, summary)
+
+    for pod_name, chars in per_pod.items():
+        print(f"NIXL transfer [{pod_name}]: "
+              f"bandwidth={chars['bandwidth_gbps']} GB/s, "
+              f"base_latency={chars['base_latency_ms']} ms, "
+              f"R²={chars['r_squared']} ({chars['num_data_points']} points)")
+    if aggregated:
+        print(f"NIXL transfer [aggregated]: "
+              f"bandwidth={aggregated['bandwidth_gbps']} GB/s, "
+              f"base_latency={aggregated['base_latency_ms']} ms, "
+              f"R²={aggregated['r_squared']} ({aggregated['num_data_points']} points)")
+
+
 if __name__ == '__main__':
     aggregate_metrics()
     aggregate_pod_startup_stats()
     aggregate_replica_stats()
+    compute_nixl_transfer_characteristics()

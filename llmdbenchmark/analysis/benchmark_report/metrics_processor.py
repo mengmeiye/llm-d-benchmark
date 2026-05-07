@@ -234,6 +234,56 @@ def _build_epp_entries(
     return entries
 
 
+def _build_nixl_transfer_entries(
+    metrics_summary: dict[str, Any],
+    obs: dict[str, Any],
+) -> None:
+    """Add NIXL transfer bandwidth and base latency to observability section."""
+    if not metrics_summary:
+        return
+
+    graph = _graph_path('nixl_transfer_regression.png')
+    components = []
+
+    for pod_name, pod_data in metrics_summary.items():
+        if pod_name.startswith('_'):
+            continue
+        chars = pod_data.get('metrics', {}).get('nixl_transfer_characteristics')
+        if not chars:
+            continue
+        role = _detect_role(pod_name)
+        components.append({
+            'component_id': _component_id(role),
+            'pod': pod_name,
+            'role': role,
+            'statistics': {
+                'bandwidth_gbps': chars['bandwidth_gbps'],
+                'base_latency_ms': chars['base_latency_ms'],
+                'r_squared': chars['r_squared'],
+                'num_data_points': chars['num_data_points'],
+                'graph_path': graph,
+            },
+        })
+
+    if not components:
+        return
+
+    entry: dict[str, Any] = {'components': components}
+
+    agg_chars = (metrics_summary.get('_aggregated', {})
+                 .get('metrics', {})
+                 .get('nixl_transfer_characteristics'))
+    if agg_chars:
+        entry['aggregated'] = {
+            'bandwidth_gbps': agg_chars['bandwidth_gbps'],
+            'base_latency_ms': agg_chars['base_latency_ms'],
+            'r_squared': agg_chars['r_squared'],
+            'num_data_points': agg_chars['num_data_points'],
+        }
+
+    obs['nixl_transfer_characteristics'] = entry
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -281,5 +331,8 @@ def add_metrics_to_benchmark_report(
     if startup_times.get('pods'):
         startup_times['graph_path'] = _graph_path('pod_startup_times.png')
         obs['pod_startup_times'] = startup_times
+
+    # NIXL transfer characteristics (bandwidth & base latency from regression)
+    _build_nixl_transfer_entries(metrics_summary, obs)
 
     return br_dict
