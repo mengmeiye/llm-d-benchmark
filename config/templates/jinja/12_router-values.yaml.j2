@@ -75,6 +75,17 @@ router:
 {% elif model is defined and model.name is defined and model.name %}
     modelName: {{ model.name }}
 {% endif %}
+{# Passthrough for chart-managed sidecar overrides. The chart accepts
+   env/volumeMounts on the auto-injected vllm-render container; OpenShift
+   needs this to redirect HuggingFace cache to a UID-writable path. #}
+{% if inferenceExtension.sidecar.env is defined and inferenceExtension.sidecar.env %}
+    env:
+{{ inferenceExtension.sidecar.env | toyaml | indent(6, true) }}
+{% endif %}
+{% if inferenceExtension.sidecar.volumeMounts is defined and inferenceExtension.sidecar.volumeMounts %}
+    volumeMounts:
+{{ inferenceExtension.sidecar.volumeMounts | toyaml | indent(6, true) }}
+{% endif %}
 {% endif %}
 {# latencyPredictor (predicted-latency-routing guide). Forwards the
    entire `inferenceExtension.latencyPredictor` subtree to

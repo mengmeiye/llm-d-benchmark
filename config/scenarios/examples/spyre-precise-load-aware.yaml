@@ -1,0 +1,356 @@
+# IBM Spyre Accelerator Scenario -- Precise Prefix Cache + Token Load-Aware +
+# Context-Length-Aware Routing
+#
+# Based on spyre.yaml. Adds:
+#   - Precise prefix cache routing (precise-prefix-cache-scorer + endpoint-notification-source).
+#     Requires vLLM --kv-events-config (ZMQ publish on port 5556) and
+#     --prefix-caching-hash-algo sha256_cbor. Spyre's block size is hardcoded
+#     to 64, which matches the scorer's tokenProcessorConfig.blockSize.
+#   - Token Load-Aware routing via the full load-aware stack:
+#     token-load-scorer + kv-cache-utilization-scorer + queue-scorer +
+#     no-hit-lru-scorer.
+#   - Context-length-aware routing (existing in spyre.yaml): per-pod
+#     contextLengthRanges + vllmVariants + context-length-aware scorer plugin.
+#     Configured as a SOFT preference (enableFiltering: false, weight: 3.0)
+#     so it composes with the cache and load scorers rather than hard-cutting
+#     candidates. In-range pods score 0.3-1.0; out-of-range 0.0-0.3.
+#
+# IMPORTANT NOTE:
+# All parameters not defined here will use the default values from defaults.yaml.
+
+scenario:
+  - name: "spyre-precise-load-aware"
+
+    # =========================================================================
+    # COMMON -- Applies to all deployment methods
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # Model Configuration
+    # blockSize: 64 must match Spyre's hardcoded block size and the
+    # precise-prefix-cache-scorer's tokenProcessorConfig.blockSize below.
+    # -------------------------------------------------------------------------
+    model:
+      name: ibm-granite/granite-3.3-8b-instruct
+      shortName: granite-3-3-8b-instruct
+      path: models/ibm-granite/granite-3.3-8b-instruct
+      huggingfaceId: ibm-granite/granite-3.3-8b-instruct
+      maxModelLen: 32768
+      maxNumSeq: 32
+      maxNumBatchedTokens: 1024
+      blockSize: 64
+
+    # -------------------------------------------------------------------------
+    # Affinity / Node Selection -- IBM Spyre accelerator nodes
+    # -------------------------------------------------------------------------
+    affinity:
+      enabled: true
+      nodeSelector:
+        ibm.com/spyre.product: IBM_Spyre
+
+    # -------------------------------------------------------------------------
+    # Accelerator Configuration -- IBM Spyre VF
+    # -------------------------------------------------------------------------
+    accelerator:
+      type: spyre
+      resource: ibm.com/spyre_pf
+
+    # -------------------------------------------------------------------------
+    # Modelservice image override -- Spyre-specific vLLM image
+    # -------------------------------------------------------------------------
+    images:
+      vllm:
+        repository: icr.io/ibmaiu_internal/amd64/vllm-spyre
+        tag: v1.10.0-aiu1.2.0
+
+    # -------------------------------------------------------------------------
+    # Extra PVC for precompiled Spyre models
+    # -------------------------------------------------------------------------
+    storage:
+      extraPvc:
+        name: spyre-precompiled-model
+
+    # -------------------------------------------------------------------------
+    # vLLM Common Configuration
+    # -------------------------------------------------------------------------
+    schedulerName: spyre-scheduler
+
+    vllmCommon:
+      shmMemory: 64Gi
+
+      preprocessScript: "python3 /setup/preprocess/set_llmdbench_environment.py && source $HOME/llmdbench_env.sh"
+
+      flags:
+        enablePrefixCaching: true
+        enableAutoToolChoice: true
+        toolCallParser: granite
+
+      # Spyre-specific volumes (precompiled model PVC, shm, preprocess
+      # ConfigMap, and llmdbench-context kubeconfig secret for pod
+      # self-labeling required by context-length-aware routing).
+      volumes:
+        - name: spyre-precompiled-model
+          type: persistentVolumeClaim
+          persistentVolumeClaim:
+            claimName: spyre-precompiled-model
+        - name: dshm
+          type: emptyDir
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: preprocesses
+          type: configMap
+          configMap:
+            name: llm-d-benchmark-preprocesses
+            defaultMode: 493  # 0755
+        - name: k8s-llmdbench-context
+          type: secret
+          secret:
+            secretName: llmdbench-context
+
+      volumeMounts:
+        - name: spyre-precompiled-model
+          mountPath: /mnt/spyre-precompiled-model
+        - name: dshm
+          mountPath: /dev/shm
+        - name: preprocesses
+          mountPath: /setup/preprocess
+        - name: k8s-llmdbench-context
+          mountPath: /etc/kubeconfig
+          readOnly: true
+
+    # =========================================================================
+    # DEPLOYMENT METHOD
+    # =========================================================================
+    modelservice:
+      enabled: true
+
+    standalone:
+      enabled: false
+
+    # Required for context-length-aware routing (sequential pod naming via LWS).
+    multinode:
+      enabled: true
+
+    # =========================================================================
+    # MODELSERVICE
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # Prefill Configuration -- disabled (decode-only)
+    # -------------------------------------------------------------------------
+    prefill:
+      enabled: false
+      replicas: 0
+      accelerator:
+        resource: ibm.com/spyre_pf
+      acceleratorType:
+        labelKey: ibm.com/spyre.product
+        labelValue: IBM_Spyre
+
+    # -------------------------------------------------------------------------
+    # Decode Configuration -- 2 decode pods on Spyre, with KV-event publishing
+    # and per-pod context-length-range labels.
+    # -------------------------------------------------------------------------
+    decode:
+      replicas: 2
+
+      # Per-pod context-length labels. List length must match replicas.
+      contextLengthRanges:
+        - "0-8000"
+        - "8000-32768"
+
+      # Per-pod vllm parameter overrides. List length must match replicas.
+      vllmVariants:
+        - maxModelLen: 32768
+          maxNumSeq: 32
+        - maxModelLen: 32768
+          maxNumSeq: 32
+
+      parallelism:
+        tensor: 4
+        data: 1
+        dataLocal: 1
+        workers: 1
+
+      resources:
+        limits:
+          memory: 200Gi
+          cpu: "20"
+        requests:
+          memory: 200Gi
+          cpu: "20"
+
+      accelerator:
+        resource: ibm.com/spyre_pf
+
+      acceleratorType:
+        labelKey: ibm.com/spyre.product
+        labelValue: IBM_Spyre
+
+      # vLLM serve command -- adds:
+      #   --block-size 64                     (matches scorer blockSize)
+      #   --prefix-caching-hash-algo sha256_cbor
+      #   --kv-events-config '{...}'          (ZMQ publisher on port 5556)
+      vllm:
+        customCommand: |
+          /home/senuser/container-scripts/simple_vllm_serve.sh /model-cache/$MODEL_PATH \
+          --served-model-name $MODEL_NAME \
+          --port $VLLM_METRICS_PORT \
+          --max-model-len $VLLM_MAX_MODEL_LEN \
+          --tensor-parallel-size $VLLM_TENSOR_PARALLELISM \
+          --max-num-seq $VLLM_MAX_NUM_SEQ \
+          --enable-auto-tool-choice \
+          --tool-call-parser granite \
+          --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
+          --enable-prefix-caching \
+          --block-size $VLLM_BLOCK_SIZE \
+          --prefix-caching-hash-algo sha256_cbor \
+          --kv-events-config '{"enable_kv_cache_events":true, "publisher":"zmq", "endpoint":"$(KV_EVENTS_ENDPOINT)", "topic":"kv@$(POD_IP):$(POD_PORT)@$(MODEL_NAME)"}'
+
+      extraEnvVars:
+        - name: FLEX_COMPUTE
+          value: SENTIENT
+        - name: FLEX_DEVICE
+          value: PF
+        - name: VLLM_SPYRE_PERF_METRIC_LOGGING_ENABLED
+          value: "1"
+        - name: FLEX_HDMA_P2PSIZE
+          value: "268435456"
+        - name: FLEX_HDMA_COLLSIZE
+          value: "268435456"
+        - name: HF_HUB_DISABLE_XET
+          value: "1"
+        - name: TORCH_SENDNN_CACHE_ENABLE
+          value: "1"
+        - name: TORCH_SENDNN_CACHE_DIR
+          value: /mnt/spyre-precompiled-model
+        - name: VLLM_SPYRE_DYNAMO_BACKEND
+          value: sendnn
+        - name: VLLM_SPYRE_USE_CB
+          value: "1"
+        - name: VLLM_SPYRE_USE_CHUNKED_PREFILL
+          value: "1"
+        - name: VLLM_DT_CHUNK_LEN
+          value: "1024"
+        # ZMQ endpoint for KV-cache event publishing (precise-prefix-cache).
+        - name: KV_EVENTS_ENDPOINT
+          value: "tcp://*:5556"
+
+      # Expose ZMQ KV-events port so the EPP can subscribe per pod.
+      extraContainerConfig:
+        ports:
+          - containerPort: 5556  # ZMQ KV-cache events publisher
+            name: kv-events
+            protocol: TCP
+
+    # =========================================================================
+    # INFERENCE EXTENSION (EPP)
+    # Combined routing chain (all three strategies compose via max-score-picker):
+    #   token-producer (HTTP via vllm-render at localhost:8000)
+    #     -> decode-filter
+    #     -> context-length-aware (w=3, soft -- enableFiltering: false)
+    #     -> precise-prefix-cache-scorer (w=3)
+    #     -> token-load-scorer (w=2)
+    #     -> kv-cache-utilization-scorer (w=2)
+    #     -> queue-scorer (w=2)
+    #     -> no-hit-lru-scorer (w=2)
+    #     -> max-score-picker
+    # =========================================================================
+    inferenceExtension:
+      pluginsConfigFile: "spyre-precise-load-aware-config.yaml"
+      flags:
+        v: "1"  # use v: "4" for debugging, v: "1" or "2" for benchmarking
+      sidecar:
+        enabled: true
+        # OpenShift assigns the auto-injected vllm-render container a random
+        # non-root UID. The image's default HOME (/root) and HuggingFace's
+        # default cache (/.cache) are both unwritable under that UID.
+        # Redirect both to /tmp, which is world-writable.
+        env:
+          - name: HOME
+            value: /tmp
+          - name: HF_HOME
+            value: /tmp/hf-cache
+      pluginsCustomConfig:
+        spyre-precise-load-aware-config.yaml: |
+          apiVersion: llm-d.ai/v1alpha1
+          kind: EndpointPickerConfig
+          plugins:
+            # The chart auto-injects a `vllm-render` HTTP sidecar at
+            # localhost:8000 when inferenceExtension.sidecar.enabled is true.
+            # The token-producer plugin tokenizes prompts via that endpoint.
+            - type: token-producer
+              parameters:
+                modelName: ${model.name}
+                vllm:
+                  url: "http://localhost:8000"
+            - type: endpoint-notification-source
+            - type: metrics-data-source
+            - type: core-metrics-extractor
+            - type: single-profile-handler
+            - type: decode-filter
+            - type: context-length-aware
+              parameters:
+                label: llm-d.ai/context-length-range
+                # Soft preference (not a hard filter) so context-length composes
+                # with prefix-cache and load-aware scorers via max-score-picker.
+                # In-range pods get 0.3-1.0 (tighter range = higher); out-of-range
+                # 0.0-0.3 (closer max = higher); unlabeled 0.5.
+                enableFiltering: false
+            - type: precise-prefix-cache-scorer
+              parameters:
+                tokenProcessorConfig:
+                  blockSize: 64           # must match vLLM --block-size
+                speculativeIndexing: true
+                indexerConfig:
+                  kvBlockIndexConfig:
+                    enableMetrics: true
+                kvEventsConfig:
+                  topicFilter: "kv@"
+                  concurrency: 8
+                  discoverPods: true
+                  podDiscoveryConfig:
+                    socketPort: 5556
+            - type: token-load-scorer
+            - type: kv-cache-utilization-scorer
+            - type: queue-scorer
+            - type: no-hit-lru-scorer
+            - type: max-score-picker
+          dataLayer:
+            sources:
+              - pluginRef: metrics-data-source
+                extractors:
+                  - pluginRef: core-metrics-extractor
+              - pluginRef: endpoint-notification-source
+                extractors:
+                  - pluginRef: precise-prefix-cache-scorer
+          schedulingProfiles:
+            - name: default
+              plugins:
+                # token-producer is a data-layer producer (tokenizes the
+                # request body); it is not referenced in the profile.
+                - pluginRef: decode-filter
+                - pluginRef: context-length-aware
+                  weight: 3.0
+                - pluginRef: precise-prefix-cache-scorer
+                  weight: 3.0
+                - pluginRef: token-load-scorer
+                  weight: 2.0
+                - pluginRef: kv-cache-utilization-scorer
+                  weight: 2.0
+                - pluginRef: queue-scorer
+                  weight: 2.0
+                - pluginRef: no-hit-lru-scorer
+                  weight: 2.0
+                - pluginRef: max-score-picker
+
+    # =========================================================================
+    # WORKLOAD / HARNESS
+    # =========================================================================
+    workDir: "~/data/spyre-precise-load-aware"
+
+    harness:
+      name: vllm-benchmark
+      experimentProfile: fixed_dataset.yaml.in
+      waitTimeout: 36000

@@ -8,8 +8,8 @@
 > `auto` Helm/image versions are resolved against live registries at
 > generation time via the existing `VersionResolver`.
 
-- Generated at: `2026-06-03 17:43:26` (UTC)
-- Generated against git ref: `c19cd752090ed1d99ac452ac2d2927c70ca84153`
+- Generated at: `2026-06-04 22:41:17` (UTC)
+- Generated against git ref: `24e5b0ffb9d6ddd1f9243192f6bf13b4565f4733`
 
 ## System Tool Dependencies
 
@@ -126,12 +126,12 @@ annotated with their `pyproject.toml` line.
 | **distro** | `1.9.0` | version | (transitive in `.venv`) | [distro (PyPI)](https://pypi.org/project/distro/) |
 | **durationpy** | `0.10` | version | (transitive in `.venv`) | [durationpy (PyPI)](https://pypi.org/project/durationpy/) |
 | **fastapi** | `0.136.3` | version | (transitive in `.venv`) | [fastapi (PyPI)](https://pypi.org/project/fastapi/) |
-| **filelock** | `3.29.1` | version | (transitive in `.venv`) | [filelock (PyPI)](https://pypi.org/project/filelock/) |
+| **filelock** | `3.29.0` | version | (transitive in `.venv`) | [filelock (PyPI)](https://pypi.org/project/filelock/) |
 | **frozenlist** | `1.8.0` | version | (transitive in `.venv`) | [frozenlist (PyPI)](https://pypi.org/project/frozenlist/) |
 | **fsspec** | `2026.4.0` | version | (transitive in `.venv`) | [fsspec (PyPI)](https://pypi.org/project/fsspec/) |
 | **gitdb** | `4.0.12` | version | (transitive in `.venv`) | [gitdb (PyPI)](https://pypi.org/project/gitdb/) |
 | **GitPython** | `3.1.50` | version | `pyproject.toml` line 14 (direct) | [GitPython (PyPI)](https://pypi.org/project/gitpython/) |
-| **google-api-core** | `2.31.0` | version | (transitive in `.venv`) | [google-api-core (PyPI)](https://pypi.org/project/google-api-core/) |
+| **google-api-core** | `2.30.3` | version | (transitive in `.venv`) | [google-api-core (PyPI)](https://pypi.org/project/google-api-core/) |
 | **google-auth** | `2.53.0` | version | `pyproject.toml` line 18 (direct) | [google-auth (PyPI)](https://pypi.org/project/google-auth/) |
 | **google-cloud-core** | `2.6.0` | version | (transitive in `.venv`) | [google-cloud-core (PyPI)](https://pypi.org/project/google-cloud-core/) |
 | **google-cloud-storage** | `3.10.1` | version | `pyproject.toml` line 19 (direct) | [google-cloud-storage (PyPI)](https://pypi.org/project/google-cloud-storage/) |
@@ -204,7 +204,7 @@ annotated with their `pyproject.toml` line.
 | **tabulate** | `0.10.0` | version | (transitive in `.venv`) | [tabulate (PyPI)](https://pypi.org/project/tabulate/) |
 | **tokenizers** | `0.22.2` | version | (transitive in `.venv`) | [tokenizers (PyPI)](https://pypi.org/project/tokenizers/) |
 | **tqdm** | `4.67.3` | version | (transitive in `.venv`) | [tqdm (PyPI)](https://pypi.org/project/tqdm/) |
-| **transformers** | `5.10.0` | version | `pyproject.toml` line 16 (direct) | [transformers (PyPI)](https://pypi.org/project/transformers/) |
+| **transformers** | `5.9.0` | version | `pyproject.toml` line 16 (direct) | [transformers (PyPI)](https://pypi.org/project/transformers/) |
 | **typer** | `0.25.1` | version | (transitive in `.venv`) | [typer (PyPI)](https://pypi.org/project/typer/) |
 | **typing-inspection** | `0.4.2` | version | (transitive in `.venv`) | [typing-inspection (PyPI)](https://pypi.org/project/typing-inspection/) |
 | **typing_extensions** | `4.15.0` | version | (transitive in `.venv`) | [typing_extensions (PyPI)](https://pypi.org/project/typing-extensions/) |

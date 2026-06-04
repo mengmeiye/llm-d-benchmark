@@ -640,27 +640,21 @@ inferenceExtension:
   #       ...
   pluginsCustomConfig: {}
   verbosity: "1"
-  # UDS tokenizer sidecar - runs alongside EPP for precise-prefix-cache scoring.
-  # In the llm-d-router chart this maps to `router.tokenizer.enabled`
-  # and the chart owns the container, sockets, and volumes -- the
-  # post-renderer / explicit sidecar block is no longer needed. The
-  # fields below remain for any legacy scenario that still provides
-  # them; they are tolerated by the renderer but not consumed by the
-  # new chart's tokenizer feature.
+  # Tokenizer sidecar - runs alongside EPP to tokenize prompts.
+  # `enabled: true` maps to `router.tokenizer.enabled: true` in the
+  # llm-d-router chart, which auto-injects the `vllm-render` (HTTP) sidecar.
+  # Optional `env` and `volumeMounts` are passed through to the chart's
+  # `router.tokenizer.{env,volumeMounts}` to override the auto-injected
+  # container -- needed on OpenShift, where the random non-root UID can't
+  # write to /root/.cache; redirect HuggingFace cache to /tmp via env vars.
+  # The legacy `name`/`imagePullPolicy` fields below are no-ops with the
+  # new chart but kept for backwards compatibility with older scenarios.
   sidecar:
     enabled: false
     name: tokenizer-uds
     imagePullPolicy: IfNotPresent
-    env:
-      - name: TOKENIZERS_DIR
-        value: /tokenizers
-      - name: HF_HOME
-        value: /tokenizers
-    volumeMounts:
-      - mountPath: /tokenizers
-        name: tokenizers
-      - mountPath: /tmp/tokenizer
-        name: tokenizer-uds
+    env: []
+    volumeMounts: []
   # Resources are intentionally NOT set here.
   # CI runners override this in their scenario YAML -- see
   # config/scenarios/cicd/kind-sim.yaml for an example.
