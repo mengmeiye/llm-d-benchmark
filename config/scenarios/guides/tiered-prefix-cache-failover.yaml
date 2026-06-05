@@ -1,0 +1,247 @@
+# TIERED PREFIX CACHE - FAILOVER VARIANT
+# Two decode replicas share an RWX PVC for KV-cache offload via the
+# llm-d FS connector. When one decode pod dies, the other reads the
+# blocks the dead pod wrote, so the next request resumes from disk
+# instead of recomputing prefill.
+#
+# Based on:
+#   guides/tiered-prefix-cache.yaml (CPU offload only)
+# Adds:
+#   - SharedStorageOffloadingSpec via MultiConnector
+#   - llm-d FS connector wheel install in customCommand
+#   - additionalVolumes mounting a pre-created RWX PVC at /mnt/files-storage
+#
+# PREREQUISITE (manual): create the PVC before running standup, e.g.
+#   oc create namespace llm-d-tiered-prefix-cache-failover
+#   cat <<EOF | oc apply -n llm-d-tiered-prefix-cache-failover -f -
+#   apiVersion: v1
+#   kind: PersistentVolumeClaim
+#   metadata: { name: llm-d-kv-cache-storage }
+#   spec:
+#     accessModes: [ReadWriteMany]
+#     resources: { requests: { storage: 200Gi } }
+#     storageClassName: ocs-storagecluster-cephfs   # adjust to your RWX class
+#   EOF
+#
+# Wheel: pin to a version matching your vLLM image's CUDA major.
+# List available wheels under
+#   llm-d-kv-cache/kv_connectors/llmd_fs_backend/wheels/
+
+scenario:
+  - name: "tiered-prefix-cache-failover"
+
+    # =========================================================================
+    # Model
+    # =========================================================================
+    model:
+      name: Qwen/Qwen3-32B
+      shortName: qwen-qwen3-32b
+      path: models/Qwen/Qwen3-32B
+      huggingfaceId: Qwen/Qwen3-32B
+      size: 1Ti
+      maxModelLen: 16000
+      blockSize: 64
+      gpuMemoryUtilization: 0.95
+      cacheBase: /model-cache
+
+    # =========================================================================
+    # Routing
+    # =========================================================================
+    routing:
+      connector: nixlv2
+
+    # =========================================================================
+    # Deployment method
+    # =========================================================================
+    modelservice:
+      enabled: true
+    standalone:
+      enabled: false
+
+    # =========================================================================
+    # GAIE / EPP plugins
+    # =========================================================================
+    inferenceExtension:
+      extraServicePorts:
+        - name: http
+          port: 80
+          protocol: TCP
+          targetPort: 8081
+      pluginsConfigFile: "tiered-prefix-cache-plugins.yaml"
+      pluginsCustomConfig:
+        tiered-prefix-cache-plugins.yaml: |
+          apiVersion: inference.networking.x-k8s.io/v1alpha1
+          kind: EndpointPickerConfig
+          plugins:
+          - type: queue-scorer
+          - type: kv-cache-utilization-scorer
+          - type: prefix-cache-scorer
+            name: gpu-prefix-cache-scorer
+          schedulingProfiles:
+          - name: default
+            plugins:
+            - pluginRef: queue-scorer
+              weight: 2
+            - pluginRef: kv-cache-utilization-scorer
+              weight: 2.0
+            - pluginRef: gpu-prefix-cache-scorer
+              weight: 1.0
+
+    # =========================================================================
+    # Storage (model PVC)
+    # =========================================================================
+    storage:
+      modelPvc:
+        size: 1Ti
+        # storageClassName: ocs-storagecluster-cephfs
+
+    # =========================================================================
+    # Prefill: not used (decode-only failover scenario)
+    # =========================================================================
+    prefill:
+      enabled: false
+      replicas: 0
+
+    # =========================================================================
+    # Decode (2 replicas sharing the RWX PVC)
+    # =========================================================================
+    decode:
+      replicas: 2
+
+      vllm:
+        customCommand: |
+          export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
+          export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
+          . /shared-config/llmdbench_env.sh
+          mkdir -p /tmp/custom-package
+          uv pip install --no-deps --target /tmp/custom-package \
+            https://raw.githubusercontent.com/llm-d/llm-d-kv-cache/main/kv_connectors/llmd_fs_backend/wheels/llmd_fs_connector-0.20+cu130-cp312-cp312-linux_x86_64.whl
+          export PYTHONPATH="/tmp/custom-package:${PYTHONPATH}"
+          exec vllm serve /model-cache/$MODEL_PATH \
+            --host 0.0.0.0 \
+            --served-model-name $MODEL_NAME \
+            --port $VLLM_METRICS_PORT \
+            --block-size $VLLM_BLOCK_SIZE \
+            --max-model-len $VLLM_MAX_MODEL_LEN \
+            --max-num-seq $VLLM_MAX_NUM_SEQ \
+            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
+            --tensor-parallel-size $TP_SIZE \
+            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+            --prefix-caching-hash-algo sha256_cbor \
+            --kv-transfer-config '{
+              "kv_connector":"MultiConnector",
+              "kv_role":"kv_both",
+              "kv_connector_extra_config":{
+                "connectors":[
+                  {
+                    "kv_connector":"OffloadingConnector",
+                    "kv_role":"kv_both",
+                    "kv_connector_extra_config":{
+                      "cpu_bytes_to_use":$(CPU_BYTES_TO_USE),
+                      "lazy_offload":true
+                    }
+                  },
+                  {
+                    "kv_connector":"OffloadingConnector",
+                    "kv_role":"kv_both",
+                    "kv_connector_extra_config":{
+                      "spec_name":"SharedStorageOffloadingSpec",
+                      "shared_storage_path":"/mnt/files-storage/",
+                      "block_size":256,
+                      "threads_per_gpu":64,
+                      "spec_module_path":"llmd_fs_backend.spec"
+                    }
+                  }
+                ]
+              }
+            }' \
+            --disable-uvicorn-access-log \
+            --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+
+      initContainers:
+        - name: preprocess
+          imageKey: benchmark
+          imagePullPolicy: Always
+          command: ["set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
+          volumeMounts:
+            - name: shared-config
+              mountPath: /shared-config
+
+      parallelism:
+        tensor: 2
+        data: 1
+        dataLocal: 1
+        workers: 1
+
+      resources:
+        limits:
+          memory: 400Gi
+          cpu: "16"
+          nvidia.com/gpu: 2
+        requests:
+          memory: 200Gi
+          cpu: "8"
+          nvidia.com/gpu: 2
+
+      extraEnvVars:
+        - name: PYTHONHASHSEED
+          value: "42"
+        - name: CPU_BYTES_TO_USE
+          value: "68719476736"   # 64 GB CPU offload tier
+
+      extraContainerConfig:
+        ports:
+          - containerPort: 5557
+            protocol: TCP
+          - containerPort: 8200
+            name: metrics
+            protocol: TCP
+        securityContext:
+          capabilities:
+            add:
+              - "IPC_LOCK"
+              - "SYS_RAWIO"
+              - "NET_ADMIN"
+              - "NET_RAW"
+          runAsGroup: 0
+          runAsUser: 0
+        imagePullPolicy: Always
+
+      additionalVolumeMounts:
+        - name: files-storage
+          mountPath: /mnt/files-storage
+
+      additionalVolumes:
+        - name: files-storage
+          type: persistentVolumeClaim
+          persistentVolumeClaim:
+            claimName: llm-d-kv-cache-storage
+
+    # =========================================================================
+    # Common volumes
+    # =========================================================================
+    vllmCommon:
+      volumes:
+        - name: shared-config
+          type: emptyDir
+          emptyDir: {}
+        - name: dshm
+          type: emptyDir
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      volumeMounts:
+        - name: shared-config
+          mountPath: /shared-config
+        - name: dshm
+          mountPath: /dev/shm
+
+    # =========================================================================
+    # Workload / harness
+    # =========================================================================
+    workDir: "~/data/tiered-prefix-cache-failover"
+
+    harness:
+      name: inference-perf
+      experimentProfile: shared_prefix_synthetic.yaml

@@ -1,0 +1,26 @@
+# RWX PVC for shared KV-cache offload, used by the
+# tiered-prefix-cache-failover scenario.
+#
+# Mounted by every decode replica at /mnt/files-storage. Both replicas
+# read/write deterministic-hash-named files, so when one pod dies the
+# survivor can rehydrate the dying pod's KV blocks from this volume.
+#
+# Apply BEFORE running standup:
+#   export NS=llm-d-tiered-prefix-cache-failover
+#   oc create namespace ${NS} 2>/dev/null || true
+#   oc apply -n ${NS} -f config/scenarios/guides/manifests/tiered-prefix-cache-failover-pvc.yaml
+#
+# Adjust storageClassName if your cluster's default RWX class differs
+# from ibm-spectrum-scale-fileset (e.g. nfs-client-ess, ocs-storagecluster-cephfs, efs-sc).
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-d-kv-cache-storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 200Gi
+  storageClassName: ibm-spectrum-scale-fileset
