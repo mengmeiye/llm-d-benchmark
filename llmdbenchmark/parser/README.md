@@ -57,17 +57,47 @@ For each stack in the scenario:
 1. Merge defaults with the optional top-level `shared:` block (scenario-wide
    settings applied to every stack), then with stack-specific overrides:
    `defaults -> shared -> stack`.
-2. Apply setup overrides (from DoE experiment treatments) if present.
-3. Apply resource preset (if `resourcePreset` is set in the config).
-4. Run the resolver chain (see below).
-5. Validate against the Pydantic config schema.
-6. Inject the scenario-wide sibling summary (`siblingStacks`) and this
+2. Hoist scenario-nested modelservice sections to the top level (see
+   [Modelservice-nested sections](#modelservice-nested-sections)).
+3. Apply setup overrides (from DoE experiment treatments) if present.
+4. Apply resource preset (if `resourcePreset` is set in the config).
+5. Run the resolver chain (see below).
+6. Validate against the Pydantic config schema.
+7. Inject the scenario-wide sibling summary (`siblingStacks`) and this
    stack's 1-indexed `stackIndex` into the Jinja values so templates can
    emit cross-stack constructs (e.g. a shared HTTPRoute with N backendRefs)
    or gate cluster-scoped resources on `stackIndex == 1` to avoid races.
-7. Render all templates with the merged values.
-8. Write `config.yaml` with the fully-resolved config (JSON round-trip strips YAML anchors).
-9. Validate all generated YAML files for syntax.
+8. Render all templates with the merged values.
+9. Write `config.yaml` with the fully-resolved config (JSON round-trip strips YAML anchors).
+10. Validate all generated YAML files for syntax.
+
+#### Modelservice-nested sections
+
+`gateway`, `router`, and `routing` are consumed only on the modelservice
+deploy path (standalone / kustomize / fma never read them). A scenario may
+express them either flat at the top level, or nested under `modelservice:`
+to document that scope:
+
+```yaml
+modelservice:
+  enabled: true
+  gateway:
+    className: epponly
+  router:
+    epp: { replicas: 2 }
+```
+
+`RenderPlans._hoist_modelservice_sections` lifts any nested block back to the
+top level (deep-merged over the defaults, nested wins) before the resolver
+chain runs, then pops the nested copy so `config.yaml` has a single home per
+section. Templates, resolvers and standup steps always read the **top-level**
+keys, so the two spellings render identically -- pick one per section.
+
+The hoist runs **before** setup overrides so the precedence stays
+`defaults < scenario < treatment/CLI`: DoE experiment treatments and CLI
+overrides target the **top-level** dotted path (e.g.
+`router.epp.pluginsConfigFile`, `--gateway-class`) and win over a nested
+scenario value.
 
 ### 3. Config Schema Validation (`config_schema.py`)
 

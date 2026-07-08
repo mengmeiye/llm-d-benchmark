@@ -581,6 +581,33 @@ annotations:
     container: {}
 
 # ============================================================================
+# MODELSERVICE-ONLY SECTIONS: gateway / router / routing
+#
+# The three sections below (gateway, router, routing) are consumed ONLY on
+# the modelservice deploy path -- standalone, kustomize and fma do not read
+# them. Scenarios MAY nest them under `modelservice:` to make that scope
+# explicit, e.g.:
+#
+#   modelservice:
+#     enabled: true
+#     gateway:
+#       className: epponly
+#     router:
+#       epp: { replicas: 2 }
+#
+# The renderer hoists any such nested block back to the top level before the
+# resolver chain runs (RenderPlans._hoist_modelservice_sections). Templates,
+# resolvers and standup steps always read the TOP-LEVEL keys -- which is why
+# these defaults live at the top level. The flat top-level spelling in a
+# scenario is equally valid; pick one spelling per section.
+#
+# IMPORTANT: DoE experiment treatments and CLI overrides target the
+# TOP-LEVEL dotted path (e.g. `router.epp.pluginsConfigFile`,
+# `--gateway-class`), not the nested path. Precedence is
+# defaults < scenario < treatment/CLI.
+# ============================================================================
+
+# ============================================================================
 # GATEWAY CONFIGURATION
 # ============================================================================
 gateway:

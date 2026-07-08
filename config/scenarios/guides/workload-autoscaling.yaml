@@ -95,11 +95,43 @@ scenario:
     modelservice:
       enabled: true
 
+      gateway:
+        className: epponly
+
+      # =========================================================================
+      # ROUTING / GAIE CONFIGURATION
+      # =========================================================================
+      # WVA autoscaling is driven by EPP queue depth, so we must enable the
+      # `flowControl` feature gate in the EPP's EndpointPickerConfig. That gate
+      # is not on by default, and toggling it requires shipping a custom
+      # EndpointPickerConfig (the default one the gaie chart ships has no
+      # `featureGates` block). We inline it here and point `pluginsConfigFile`
+      # at this filename so the chart mounts it as the active config.
+      router:
+        epp:
+          pluginsConfigFile: "wva-plugins.yaml"
+          pluginsCustomConfig:
+            wva-plugins.yaml: |
+              apiVersion: llm-d.ai/v1alpha1
+              kind: EndpointPickerConfig
+              featureGates:
+                - flowControl
+              plugins:
+                - type: queue-scorer
+                - type: kv-cache-utilization-scorer
+                - type: prefix-cache-scorer
+              schedulingProfiles:
+                - name: default
+                  plugins:
+                    - pluginRef: queue-scorer
+                      weight: 2
+                    - pluginRef: kv-cache-utilization-scorer
+                      weight: 2
+                    - pluginRef: prefix-cache-scorer
+                      weight: 3
+
     standalone:
       enabled: false
-
-    gateway:
-      className: epponly
 
     # =========================================================================
     # WVA CONFIGURATION
@@ -252,38 +284,6 @@ scenario:
       # compatibility with the rule format the WVA chart emits.
       # The upstream WVA README also pins this version.
       prometheusAdapter: 5.2.0
-
-    # =========================================================================
-    # ROUTING / GAIE CONFIGURATION
-    # =========================================================================
-    # WVA autoscaling is driven by EPP queue depth, so we must enable the
-    # `flowControl` feature gate in the EPP's EndpointPickerConfig. That gate
-    # is not on by default, and toggling it requires shipping a custom
-    # EndpointPickerConfig (the default one the gaie chart ships has no
-    # `featureGates` block). We inline it here and point `pluginsConfigFile`
-    # at this filename so the chart mounts it as the active config.
-    router:
-      epp:
-        pluginsConfigFile: "wva-plugins.yaml"
-        pluginsCustomConfig:
-          wva-plugins.yaml: |
-            apiVersion: llm-d.ai/v1alpha1
-            kind: EndpointPickerConfig
-            featureGates:
-              - flowControl
-            plugins:
-              - type: queue-scorer
-              - type: kv-cache-utilization-scorer
-              - type: prefix-cache-scorer
-            schedulingProfiles:
-              - name: default
-                plugins:
-                  - pluginRef: queue-scorer
-                    weight: 2
-                  - pluginRef: kv-cache-utilization-scorer
-                    weight: 2
-                  - pluginRef: prefix-cache-scorer
-                    weight: 3
 
     # =========================================================================
     # PREFILL / DECODE CONFIGURATION (same as inference-scheduling.yaml)

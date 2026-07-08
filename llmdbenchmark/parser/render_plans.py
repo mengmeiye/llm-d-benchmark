@@ -875,6 +875,50 @@ class RenderPlans:
             cur = cur[part]
         cur[path[-1]] = value
 
+    # Sections a scenario may nest under `modelservice:` for clarity. They
+    # are consumed only on the modelservice path (see step_08_deploy_router
+    # and the modelservice-guarded templates), but every template, resolver
+    # and standup step reads them as TOP-LEVEL keys -- so we hoist them back
+    # to the top level before any resolver runs. Nesting is purely a
+    # scenario-authoring convenience; the flat top-level spelling keeps
+    # working unchanged.
+    _MODELSERVICE_HOISTED = ("gateway", "router", "routing")
+
+    def _hoist_modelservice_sections(self, values: dict) -> dict:
+        """Lift ``modelservice.{gateway,router,routing}`` to the top level.
+
+        Scenarios may nest these under ``modelservice:`` to document that
+        they only apply on the modelservice deploy path. Templates,
+        resolvers and standup steps read them as top-level keys, so this
+        hoists them before the resolver chain runs.
+
+        The nested block is deep-merged ON TOP OF the existing top-level
+        block (defaults.yaml, or a flat scenario override), i.e. the nested
+        spelling wins, then the nested copy is popped so the resolved
+        ``config.yaml`` has a single home for each section.
+
+        A no-op when nothing is nested, so existing flat scenarios render
+        identically. ``defaults.yaml`` always provides a top-level block for
+        each key, so we can't reliably distinguish a flat scenario override
+        from the defaults here -- we simply let the nested block win over
+        whatever is present. Authors should pick one spelling per section.
+        """
+        modelservice = values.get("modelservice")
+        if not isinstance(modelservice, dict):
+            return values
+
+        for key in self._MODELSERVICE_HOISTED:
+            if key not in modelservice:
+                continue
+            nested = modelservice.pop(key)
+            existing = values.get(key)
+            values[key] = self.deep_merge(
+                existing if isinstance(existing, dict) else {},
+                nested if isinstance(nested, dict) else {},
+            )
+
+        return values
+
     def _normalize_router_block(self, values: dict) -> dict:
         """Lay benchmark-specific runtime details into the router block.
 
@@ -1413,6 +1457,16 @@ class RenderPlans:
         # shared value by setting it explicitly.
         merged_values = self.deep_merge(defaults, shared or {})
         merged_values = self.deep_merge(merged_values, stack_config)
+
+        # Hoist scenario-nested modelservice.{gateway,router,routing} to the
+        # top level BEFORE setup overrides are merged. Templates, resolvers
+        # and standup steps read these as top-level keys, and DoE treatment /
+        # CLI overrides target the top-level dotted paths (e.g.
+        # `router.epp.pluginsConfigFile`). Hoisting first preserves the
+        # documented precedence defaults < scenario < treatment: a treatment's
+        # top-level override lands on top of the hoisted scenario value and
+        # wins, instead of the nested scenario block clobbering it.
+        merged_values = self._hoist_modelservice_sections(merged_values)
 
         if self.setup_overrides:
             merged_values = self.deep_merge(merged_values, self.setup_overrides)
