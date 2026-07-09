@@ -63,7 +63,7 @@ llmdbenchmark --spec guides/workload-autoscaling standup  -p <namespace>
 
 The shared cluster-wide infrastructure (`prometheus-adapter`, ClusterRole,
 prometheus-ca ConfigMap) survives teardown automatically - see
-[Section 4](#4-cluster-wide-vs-per-tenant-resources--teardown-semantics)
+[Section 4](#4-cluster-wide-vs-per-tenant-resources-and-teardown-semantics)
 for the full preservation policy.
 
 ---
@@ -313,7 +313,7 @@ chartVersions:
 
 ---
 
-## 4. Cluster-wide vs per-tenant resources & teardown semantics
+## 4. Cluster-wide vs per-tenant resources and teardown semantics
 
 WVA installs a mix of cluster-wide and per-tenant resources. To keep
 multi-tenant clusters healthy, our standup and teardown follow this policy:
@@ -516,8 +516,8 @@ HPA, but it's still considered cluster-hygiene rude to run cluster-scoped.
 | Kustomize wrapper for the WVA controller install | [`config/templates/jinja/19_wva-kustomize.yaml.j2`](../config/templates/jinja/19_wva-kustomize.yaml.j2) |
 | WVA namespace label patch | [`config/templates/jinja/23_wva-namespace.yaml.j2`](../config/templates/jinja/23_wva-namespace.yaml.j2) |
 | Per-stack `VariantAutoscaling` | [`config/templates/jinja/27_wva-variantautoscaling.yaml.j2`](../config/templates/jinja/27_wva-variantautoscaling.yaml.j2) |
-| Per-stack `HorizontalPodAutoscaler` | [`config/templates/jinja/28_wva-hpa.yaml.j2`](../config/templates/jinja/28_wva-hpa.yaml.j2) |
-| `prometheus-adapter` values | [`config/templates/jinja/21_prometheus-adapter-values.yaml.j2`](../config/templates/jinja/21_prometheus-adapter-values.yaml.j2) |
+| Per-stack KEDA `ScaledObject` | [`config/templates/jinja/28_wva-scaledobject.yaml.j2`](../config/templates/jinja/28_wva-scaledobject.yaml.j2) |
+| KEDA `TriggerAuthentication` (Prometheus metrics auth) | [`config/templates/jinja/21_keda-triggerauthentication.yaml.j2`](../config/templates/jinja/21_keda-triggerauthentication.yaml.j2) |
 | `allow-thanos-querier-api-access` ClusterRole | [`config/templates/jinja/22_prometheus-rbac.yaml.j2`](../config/templates/jinja/22_prometheus-rbac.yaml.j2) |
 | Cluster-wide WVA defaults (chart version, image, monitoring URL) | [`config/templates/values/defaults.yaml`](../config/templates/values/defaults.yaml) (`wva:` and `chartVersions.wva` blocks) |
 | Standup admin install (controller + adapter) | [`llmdbenchmark/standup/steps/step_03_workload_monitoring.py`](../llmdbenchmark/standup/steps/step_03_workload_monitoring.py) |
