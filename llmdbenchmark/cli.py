@@ -810,6 +810,15 @@ def _do_run(args, logger, render_plan_errors, experiment_file_override=None):
 
     experiments_file = experiment_file_override or getattr(args, "experiments", None)
 
+    # Honor the top-level ``reset_caches`` key in the experiment YAML. When
+    # set, step_07 POSTs the vLLM cache-reset endpoints (prefix/mm/encoder)
+    # to every serving pod before each treatment's run. Covers both the
+    # `run` and `experiment` subcommands, which both flow their file through
+    # ``experiments_file``.
+    from llmdbenchmark.experiment.parser import read_reset_caches
+
+    reset_caches = read_reset_caches(experiments_file)
+
     context = ExecutionContext(
         plan_dir=config.plan_dir,
         workspace=config.workspace,
@@ -842,6 +851,7 @@ def _do_run(args, logger, render_plan_errors, experiment_file_override=None):
         ),
         harness_debug=getattr(args, "debug", False),
         harness_skip_run=getattr(args, "skip", False),
+        reset_caches=reset_caches,
         harness_service_account=getattr(args, "serviceaccount", None),
         harness_envvars_to_pod=getattr(args, "envvarspod", None),
         analyze_locally=getattr(args, "analyze", False),
@@ -1221,6 +1231,7 @@ def _render_plans_for_experiment(args, logger, setup_overrides=None):
         cli_methods=getattr(args, "methods", None),
         cli_monitoring=getattr(args, "monitoring", None),
         cli_wva=getattr(args, "wva", False),
+        cli_epp_keda_saturation=getattr(args, "epp_keda_saturation", False),
         cli_gateway_class=getattr(args, "gateway_class", None),
         setup_overrides=setup_overrides,
         cli_non_admin=getattr(args, "non_admin", False),
@@ -1822,6 +1833,8 @@ def cli() -> None:
         args.debug = env_bool("LLMDBENCH_DEBUG")
     if hasattr(args, "wva") and not args.wva:
         args.wva = env_bool("LLMDBENCH_WVA")
+    if hasattr(args, "epp_keda_saturation") and not args.epp_keda_saturation:
+        args.epp_keda_saturation = env_bool("LLMDBENCH_EPP_KEDA_SATURATION")
     if not args.specification_file:
         parser.error(
             "the following arguments are required: --specification_file/--spec"

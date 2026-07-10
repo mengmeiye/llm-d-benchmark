@@ -76,14 +76,17 @@ STABLE_BOTH=(
   examples/cpu
   examples/gpu
   examples/sim
-  guides/simulated-accelerators
 )
 
 # Stable: modelservice-only well-lit paths
+# (guide specs renamed upstream: inference-scheduling -> optimized-baseline,
+#  precise-prefix-cache-aware -> precise-prefix-cache-routing,
+#  simulated-accelerators -> predicted-latency-routing)
 STABLE_MS_ONLY=(
-  guides/inference-scheduling
+  guides/optimized-baseline
   guides/pd-disaggregation
-  guides/precise-prefix-cache-aware
+  guides/precise-prefix-cache-routing
+  guides/predicted-latency-routing
   guides/tiered-prefix-cache
 )
 
