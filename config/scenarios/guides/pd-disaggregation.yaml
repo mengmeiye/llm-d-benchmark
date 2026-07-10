@@ -235,6 +235,17 @@ scenario:
             sampler: "parentbased_traceidratio"
             samplerArg: "0.1"
 
+      # -------------------------------------------------------------------------
+      # HTTPRoute Configuration
+      # requestTimeout: end-to-end Gateway-API HTTPRoute timeout the istio
+      # gateway enforces per request. Long agentic turns that exceed it are
+      # aborted by the gateway with a 502 (surfaces as "connection reset by
+      # peer" on the decode routing-proxy loopback hop). Set "0s" to disable.
+      # -------------------------------------------------------------------------
+      httpRoute:
+        requestTimeout: "300s"
+        backendRequestTimeout: "0s"
+
     standalone:
       enabled: false
 
@@ -252,17 +263,6 @@ scenario:
     #     nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3      # OpenShift
     #     # gpu.nvidia.com/model: H200                        # Kubernetes
     #     # cloud.google.com/gke-accelerator: nvidia-h100-80gb  # GKE
-
-    # -------------------------------------------------------------------------
-    # HTTPRoute Configuration
-    # requestTimeout: end-to-end Gateway-API HTTPRoute timeout the istio
-    # gateway enforces per request. Long agentic turns that exceed it are
-    # aborted by the gateway with a 502 (surfaces as "connection reset by
-    # peer" on the decode routing-proxy loopback hop). Set "0s" to disable.
-    # -------------------------------------------------------------------------
-    httpRoute:
-      requestTimeout: "300s"
-      backendRequestTimeout: "0s"
 
     # =========================================================================
     # COMMON -- Applies to all deployment methods (continued)

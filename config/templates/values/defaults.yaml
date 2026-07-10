@@ -575,12 +575,12 @@ annotations:
     container: {}
 
 # ============================================================================
-# MODELSERVICE-ONLY SECTIONS: gateway / router / routing
+# MODELSERVICE-ONLY SECTIONS: gateway / router / routing / httpRoute
 #
-# The three sections below (gateway, router, routing) are consumed ONLY on
-# the modelservice deploy path -- standalone, kustomize and fma do not read
-# them. Scenarios MAY nest them under `modelservice:` to make that scope
-# explicit, e.g.:
+# These sections (gateway, router, routing below, plus httpRoute further
+# down) are consumed ONLY on the modelservice deploy path -- standalone,
+# kustomize and fma do not read them. Scenarios MAY nest them under
+# `modelservice:` to make that scope explicit, e.g.:
 #
 #   modelservice:
 #     enabled: true
@@ -588,6 +588,8 @@ annotations:
 #       className: epponly
 #     router:
 #       epp: { replicas: 2 }
+#     httpRoute:
+#       requestTimeout: "300s"
 #
 # The renderer hoists any such nested block back to the top level before the
 # resolver chain runs (RenderPlans._hoist_modelservice_sections). Templates,

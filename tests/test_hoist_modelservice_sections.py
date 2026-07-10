@@ -1,14 +1,15 @@
 """Tests for `RenderPlans._hoist_modelservice_sections`.
 
-Scenarios may nest `gateway`, `routing`, and `router` under `modelservice:`
-to document that they only apply on the modelservice deploy path. Every
-template, resolver, and standup step reads these as TOP-LEVEL keys, so the
-renderer hoists them back to the top level before the resolver chain runs.
+Scenarios may nest `gateway`, `routing`, `router`, and `httpRoute` under
+`modelservice:` to document that they only apply on the modelservice deploy
+path. Every template, resolver, and standup step reads these as TOP-LEVEL
+keys, so the renderer hoists them back to the top level before the resolver
+chain runs.
 
 The contract this module pins:
 
-- Nested `modelservice.{gateway,routing,router}` are lifted to the top level
-  and removed from `modelservice` (single home in the resolved config).
+- Nested `modelservice.{gateway,routing,router,httpRoute}` are lifted to the
+  top level and removed from `modelservice` (single home in the resolved config).
 - The nested block deep-merges ON TOP OF whatever top-level block exists
   (defaults.yaml base, or a flat scenario override) -- nested wins, and
   untouched sibling keys survive.
@@ -44,6 +45,7 @@ class TestHoist:
                 "gateway": {"className": "epponly"},
                 "routing": {"connector": "nixlv2"},
                 "router": {"epp": {"replicas": 2}},
+                "httpRoute": {"requestTimeout": "300s"},
             },
         }
         out = renderer._hoist_modelservice_sections(values)
@@ -52,6 +54,7 @@ class TestHoist:
         assert out["gateway"] == {"className": "epponly"}
         assert out["routing"] == {"connector": "nixlv2"}
         assert out["router"] == {"epp": {"replicas": 2}}
+        assert out["httpRoute"] == {"requestTimeout": "300s"}
 
         # Removed from modelservice; the toggle survives.
         assert out["modelservice"] == {"enabled": True}

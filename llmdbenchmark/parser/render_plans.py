@@ -905,10 +905,10 @@ class RenderPlans:
     # to the top level before any resolver runs. Nesting is purely a
     # scenario-authoring convenience; the flat top-level spelling keeps
     # working unchanged.
-    _MODELSERVICE_HOISTED = ("gateway", "router", "routing")
+    _MODELSERVICE_HOISTED = ("gateway", "router", "routing", "httpRoute")
 
     def _hoist_modelservice_sections(self, values: dict) -> dict:
-        """Lift ``modelservice.{gateway,router,routing}`` to the top level.
+        """Lift ``modelservice.{gateway,router,routing,httpRoute}`` to the top level.
 
         Scenarios may nest these under ``modelservice:`` to document that
         they only apply on the modelservice deploy path. Templates,

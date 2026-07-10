@@ -73,10 +73,10 @@ For each stack in the scenario:
 
 #### Modelservice-nested sections
 
-`gateway`, `router`, and `routing` are consumed only on the modelservice
-deploy path (standalone / kustomize / fma never read them). A scenario may
-express them either flat at the top level, or nested under `modelservice:`
-to document that scope:
+`gateway`, `router`, `routing`, and `httpRoute` are consumed only on the
+modelservice deploy path (standalone / kustomize / fma never read them). A
+scenario may express them either flat at the top level, or nested under
+`modelservice:` to document that scope:
 
 ```yaml
 modelservice:
@@ -85,6 +85,8 @@ modelservice:
     className: epponly
   router:
     epp: { replicas: 2 }
+  httpRoute:
+    requestTimeout: "300s"
 ```
 
 `RenderPlans._hoist_modelservice_sections` lifts any nested block back to the
