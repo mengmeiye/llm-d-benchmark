@@ -262,8 +262,7 @@ scenario:
           --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
           --no-enable-log-requests \
           --disable-uvicorn-access-log \
-          --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
-          --no-enable-prefix-caching
+          --disable-access-log-for-endpoints=/health,/metrics,/v1/models
 
       initContainers:
         - name: preprocess
