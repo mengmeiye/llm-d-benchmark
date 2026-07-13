@@ -296,6 +296,15 @@ def _load_stack_info_from_config(config_file, stack_name=""):
                 "kustomize_enabled": (
                     plan_config.get("kustomize", {}).get("enabled", False)
                 ),
+                "nok8s_enabled": (plan_config.get("nok8s", {}).get("enabled", False)),
+                "nok8s_listen_port": (
+                    plan_config.get("nok8s", {})
+                    .get("envoy", {})
+                    .get("listenPort", 8081)
+                ),
+                "nok8s_runtime": (
+                    plan_config.get("nok8s", {}).get("runtime", "docker")
+                ),
                 "harness": plan_config.get("harness", {}),
             }
     except (OSError, _yaml.YAMLError):
@@ -374,6 +383,7 @@ def _resolve_deploy_methods(args, plan_info, logger, phase="standup"):
     fma = plan_info.get("fma_enabled", False)
     modelservice = plan_info.get("modelservice_enabled", False)
     kustomize = plan_info.get("kustomize_enabled", False)
+    nok8s = plan_info.get("nok8s_enabled", False)
 
     if phase == "run":
         # Run phase returns all enabled methods for endpoint detection
@@ -386,6 +396,8 @@ def _resolve_deploy_methods(args, plan_info, logger, phase="standup"):
             methods.append("modelservice")
         if kustomize:
             methods.append("kustomize")
+        if nok8s:
+            methods.append("nok8s")
         if methods:
             logger.log_info(
                 f"Auto-detected deploy method(s) from plan: {', '.join(methods)}"
@@ -393,6 +405,9 @@ def _resolve_deploy_methods(args, plan_info, logger, phase="standup"):
             return methods
     else:
         # Standup/teardown: treat as mutually exclusive
+        if nok8s:
+            logger.log_info("Auto-detected deploy method from plan: nok8s")
+            return ["nok8s"]
         if kustomize:
             logger.log_info("Auto-detected deploy method from plan: kustomize")
             return ["kustomize"]
@@ -432,7 +447,8 @@ def _do_standup(args, logger, render_plan_errors):
         plan_info,
     )
 
-    if not namespace:
+    container_only = "nok8s" in deployed_methods
+    if not namespace and not container_only:
         raise PhaseError(
             "No namespace specified. Set 'namespace.name' in your scenario "
             "YAML, defaults.yaml, or pass --namespace on the CLI."
@@ -453,6 +469,9 @@ def _do_standup(args, logger, render_plan_errors):
         harness_namespace=harness_ns,
         model_name=plan_info.get("model_name"),
         logger=logger,
+        container_only=container_only,
+        container_runtime=plan_info.get("nok8s_runtime", "docker"),
+        nok8s_deploy_timeout=int(getattr(args, "nok8s_deploy_timeout", 900) or 900),
         standalone_deploy_timeout=int(
             getattr(args, "standalone_deploy_timeout", 900) or 900
         ),
@@ -497,8 +516,12 @@ def _execute_standup(args, logger, render_plan_errors):
 
     _print_standup_summary(context, result, logger)
 
-    # Auto-chain smoketest after standup unless --skip-smoketest
-    skip_smoketest = getattr(args, "skip_smoketest", False)
+    # Auto-chain smoketest after standup unless --skip-smoketest.
+    # nok8s has no cluster/namespace for the smoketest pod and the deploy step
+    # already curls /v1/models for readiness, so skip the chained smoketest.
+    skip_smoketest = getattr(args, "skip_smoketest", False) or (
+        "nok8s" in (context.deployed_methods or [])
+    )
     if not skip_smoketest:
         logger.log_info("")
         logger.log_info(
@@ -721,7 +744,8 @@ def _do_teardown(args, logger, render_plan_errors):
         plan_info,
     )
 
-    if not namespace:
+    container_only = "nok8s" in deployed_methods
+    if not namespace and not container_only:
         raise PhaseError(
             "No namespace specified. Set 'namespace.name' in your scenario "
             "YAML, defaults.yaml, or pass --namespace on the CLI."
@@ -738,6 +762,8 @@ def _do_teardown(args, logger, render_plan_errors):
         current_phase=Phase.TEARDOWN,
         kubeconfig=getattr(args, "kubeconfig", None),
         deployed_methods=deployed_methods,
+        container_only=container_only,
+        container_runtime=plan_info.get("nok8s_runtime", "docker"),
         deep_clean=getattr(args, "deep", False),
         release=getattr(args, "release", "llmdbench"),
         namespace=namespace,
@@ -800,6 +826,12 @@ def _do_run(args, logger, render_plan_errors, experiment_file_override=None):
 
     endpoint_url = getattr(args, "endpoint_url", None)
     run_config_file = getattr(args, "run_config", None)
+    container_only = "nok8s" in deployed_methods
+    # No-Kubernetes: default the benchmark target to the local Envoy front door
+    # so the run is fully cluster-free (flips is_run_only_mode, skipping k8s
+    # endpoint discovery and namespace validation).
+    if container_only and not endpoint_url:
+        endpoint_url = f"http://localhost:{plan_info.get('nok8s_listen_port', 8081)}"
     is_run_only = bool(endpoint_url or run_config_file)
 
     if not namespace and not is_run_only:
@@ -857,6 +889,8 @@ def _do_run(args, logger, render_plan_errors, experiment_file_override=None):
         analyze_locally=getattr(args, "analyze", False),
         endpoint_url=endpoint_url,
         run_config_file=run_config_file,
+        container_only=container_only,
+        container_runtime=plan_info.get("nok8s_runtime", "docker"),
         generate_config_only=getattr(args, "generate_config", False),
         dataset_url=getattr(args, "dataset", None),
         harness_data_access_timeout=int(
