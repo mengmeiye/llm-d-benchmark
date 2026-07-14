@@ -83,7 +83,7 @@ single-GPU example. Key fields (full defaults in
 | `nok8s.runtime` | `docker` or `podman` (GPU flag switches to CDI for podman) |
 | `nok8s.hfTokenEnv` | Host env var passed to vLLM for HF auth |
 | `nok8s.workspaceHostDir` | Host dir where EPP/Envoy configs are staged + bind-mounted |
-| `nok8s.vllm.{image,tag,hostPort,tensorParallel,gpus,shmSize,replicas,extraArgs}` | vLLM worker(s); worker *i* is published on `hostPort + i` |
+| `nok8s.vllm.{image,tag,hostPort,tensorParallel,accelerator,gpus,deviceArgs,shmSize,replicas,extraArgs}` | vLLM worker(s); worker *i* is published on `hostPort + i` (see Accelerators for `accelerator`/`deviceArgs`) |
 | `nok8s.epp.{image,tag,grpcPort,grpcHealthPort,metricsPort}` | Endpoint Picker |
 | `nok8s.envoy.{image,tag,listenPort}` | Envoy front door (the run target) |
 | `model.{name,huggingfaceId}` | Set both; standup uses `name`, run reads `huggingfaceId` |
