@@ -146,6 +146,10 @@ class DeployHarnessLocalStep(Step):
                     f"-e LLMDBENCH_RUN_EXPERIMENT_ID={experiment_id} "
                     f"-e LLMDBENCH_DEPLOY_METHODS={deploy_method} "
                     f"-e LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR_PREFIX=/requests "
+                    # Harness reads the profile from
+                    # $LLMDBENCH_RUN_WORKSPACE_DIR/profiles/<harness>/<workload>;
+                    # keep it in sync with the profiles bind-mount below.
+                    f"-e LLMDBENCH_RUN_WORKSPACE_DIR=/workspace "
                     f"-e {hf_token_env} "
                     f"-v {results_dir}:/requests "
                     f"-v {profiles_dir}:/workspace/profiles "
