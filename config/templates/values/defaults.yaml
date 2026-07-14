@@ -1317,9 +1317,18 @@ nok8s:
     tag: *vllm-openai_version
     hostPort: 8000          # worker i is published on hostPort + i
     containerPort: 8000
-    tensorParallel: 1       # GPUs to shard each worker across
-    gpus: "all"             # docker --gpus value (podman uses CDI, see runtime)
-    shmSize: "20g"          # required for NCCL when tensorParallel > 1
+    tensorParallel: 1       # accelerators to shard each worker across
+    # Accelerator preset for exposing the device to the container:
+    #   nvidia | amd | intel | gaudi | cpu | spyre
+    # Only NVIDIA is validated end-to-end; others follow each backend's
+    # documented device flags. Change `image` to the matching vLLM backend.
+    accelerator: nvidia
+    gpus: "all"             # nvidia only: docker --gpus value (podman uses CDI)
+    # Raw runtime device flags; overrides the accelerator preset entirely.
+    # Use for IBM Spyre/AIU or any custom device wiring, e.g.
+    #   deviceArgs: ["--device", "/dev/kfd", "--device", "/dev/dri"]
+    deviceArgs: []
+    shmSize: "20g"          # required for NCCL/RCCL when tensorParallel > 1
     hfCacheDir: "~/.cache/huggingface"
     replicas: 1
     extraArgs: []           # appended after `serve <MODEL> --tensor-parallel-size=N`

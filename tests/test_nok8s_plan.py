@@ -169,6 +169,31 @@ def test_nok8s_preflight_passes_when_runtime_and_gpu_present(tmp_path: Path) -> 
     assert result.success is True
 
 
+def test_device_args_per_accelerator() -> None:
+    from llmdbenchmark.standup.steps.step_06_nok8s_deploy import NoK8sDeployStep
+
+    dev = NoK8sDeployStep._device_args
+    assert dev("docker", {"accelerator": "nvidia", "gpus": "all"}) == "--gpus all"
+    assert (
+        dev("podman", {"accelerator": "nvidia", "gpus": "all"})
+        == "--device nvidia.com/gpu=all"
+    )
+    assert "/dev/kfd" in dev("docker", {"accelerator": "amd"})
+    assert dev("docker", {"accelerator": "intel"}) == "--device /dev/dri"
+    assert "habana" in dev("docker", {"accelerator": "gaudi"})
+    assert dev("docker", {"accelerator": "cpu"}) == ""
+    # spyre has no preset -> expects deviceArgs; empty without it.
+    assert dev("docker", {"accelerator": "spyre"}) == ""
+    # raw deviceArgs override wins regardless of accelerator.
+    assert (
+        dev(
+            "docker",
+            {"accelerator": "spyre", "deviceArgs": ["--device", "/dev/vfio/1"]},
+        )
+        == "--device /dev/vfio/1"
+    )
+
+
 def test_resolve_deploy_method_forces_nok8s() -> None:
     """--methods nok8s wins and disables the other methods (mutual exclusion)."""
     rp = RenderPlans(

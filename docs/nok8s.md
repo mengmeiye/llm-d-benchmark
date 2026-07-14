@@ -93,6 +93,39 @@ Sizing (fp16, single GPU): ~16 GB → 7–8B · ~24 GB → 8B · ~40 GB → 14B 
 (e.g. `["--max-model-len","16384","--gpu-memory-utilization","0.95"]`) or an
 FP8 checkpoint.
 
+## Accelerators
+
+The router (EPP + Envoy) and the benchmark harness are accelerator-agnostic;
+only the **vLLM worker** is accelerator-specific. Select the accelerator with
+`nok8s.vllm.accelerator` and set `nok8s.vllm.image` to the matching vLLM
+backend. Only **NVIDIA is validated end-to-end**; the others use each backend's
+documented device flags.
+
+| `accelerator` | Device flags emitted | vLLM image (example) |
+|---------------|----------------------|----------------------|
+| `nvidia` (default) | `--gpus all` (docker) / `--device nvidia.com/gpu=all` (podman) | `vllm/vllm-openai` |
+| `amd` | `--device /dev/kfd --device /dev/dri --group-add video` | `rocm/vllm` |
+| `intel` | `--device /dev/dri` | Intel vLLM XPU image |
+| `gaudi` | `--runtime=habana -e HABANA_VISIBLE_DEVICES=all` | Habana vLLM image |
+| `cpu` | *(none)* | vLLM CPU build |
+| `spyre` | *(none -- set `deviceArgs`)* | IBM vLLM-Spyre image |
+
+For anything not covered by a preset — including **IBM Spyre / AIU** — use the
+raw escape hatch `nok8s.vllm.deviceArgs`, which overrides the preset entirely:
+
+```yaml
+nok8s:
+  vllm:
+    accelerator: spyre
+    image: <ibm-vllm-spyre-image>
+    deviceArgs: ["--device", "/dev/vfio/vfio", "--device", "/dev/vfio/<grp>"]
+    extraArgs: ["--..."]   # any Spyre-specific vLLM flags
+```
+
+Step 00 probes the accelerator when it can (`nvidia-smi`/`rocm-smi`/`xpu-smi`/
+`hl-smi`); `cpu`/`spyre`/custom are not probed (a note is logged) — ensure the
+device and image match yourself.
+
 ## How it maps to the pipeline
 
 | Phase | nok8s behaviour |

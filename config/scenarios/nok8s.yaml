@@ -47,7 +47,16 @@ scenario:
         tag: v0.19.1
         hostPort: 8000
         tensorParallel: 1
+        # Accelerator: nvidia | amd | intel | gaudi | cpu | spyre.
+        # For non-NVIDIA, also change `image` to the matching vLLM backend and
+        # (for spyre/custom) set `deviceArgs`. Examples:
+        #   amd:    image: rocm/vllm         (device flags auto: /dev/kfd,/dev/dri)
+        #   intel:  image: intel vLLM XPU    (device flags auto: /dev/dri)
+        #   gaudi:  image: habana vLLM       (--runtime=habana)
+        #   spyre:  image: <IBM vLLM-Spyre>  deviceArgs: ["--device","/dev/vfio/..."]
+        accelerator: nvidia
         gpus: "all"
+        deviceArgs: []
         shmSize: "20g"
         hfCacheDir: "~/.cache/huggingface"
         replicas: 1

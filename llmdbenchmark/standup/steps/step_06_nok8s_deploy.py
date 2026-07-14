@@ -141,11 +141,12 @@ class NoK8sDeployStep(Step):
         kind = c["kind"]
         image = c["image"]
         if kind == "vllm":
-            gpu_flag = self._gpu_flag(runtime, c.get("gpus", "all"))
+            device = self._device_args(runtime, c)
             extra = " ".join(c.get("extraArgs") or [])
             return (
-                f"{runtime} run -d --name {c['name']} {gpu_flag} "
-                f"--shm-size={c.get('shmSize', '20g')} "
+                f"{runtime} run -d --name {c['name']}"
+                + (f" {device}" if device else "")
+                + f" --shm-size={c.get('shmSize', '20g')} "
                 f"-p {c['hostPort']}:{c.get('containerPort', 8000)} "
                 f"-e {hf_token_env} "
                 f"-v {hf_cache}:/root/.cache/huggingface "
@@ -179,10 +180,36 @@ class NoK8sDeployStep(Step):
         raise ValueError(f"Unknown nok8s container kind: {kind}")
 
     @staticmethod
-    def _gpu_flag(runtime: str, gpus: str) -> str:
-        """docker uses --gpus; podman uses CDI --device nvidia.com/gpu=..."""
-        if runtime == "podman":
-            return f"--device nvidia.com/gpu={gpus}"
+    def _device_args(runtime: str, c: dict) -> str:
+        """Runtime flags to expose the accelerator to the vLLM container.
+
+        ``deviceArgs`` (if set) is a raw override -- use it for anything not
+        covered by the presets below (e.g. IBM Spyre/AIU). Otherwise the
+        ``accelerator`` field selects a preset. Only NVIDIA is validated
+        end-to-end; the others follow each backend's documented device flags.
+        """
+        raw = c.get("deviceArgs")
+        if raw:
+            return " ".join(raw)
+        accel = str(c.get("accelerator") or "nvidia").lower()
+        gpus = c.get("gpus", "all")
+        if accel == "nvidia":
+            # docker: --gpus; podman: CDI device.
+            return (
+                f"--device nvidia.com/gpu={gpus}"
+                if runtime == "podman"
+                else f"--gpus {gpus}"
+            )
+        if accel == "amd":
+            return "--device /dev/kfd --device /dev/dri --group-add video"
+        if accel == "intel":
+            return "--device /dev/dri"
+        if accel == "gaudi":
+            return "--runtime=habana -e HABANA_VISIBLE_DEVICES=all"
+        if accel in ("cpu", "spyre"):
+            # cpu: no device; spyre/AIU: supply nok8s.vllm.deviceArgs.
+            return ""
+        # Unknown accelerator: fall back to NVIDIA behaviour.
         return f"--gpus {gpus}"
 
     def _wait_ready(

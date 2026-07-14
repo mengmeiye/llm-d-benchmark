@@ -23,7 +23,9 @@ containers:
     image: "{{ nok8s.vllm.image }}:{{ nok8s.vllm.tag }}"
     hostPort: {{ nok8s.vllm.hostPort + i }}
     containerPort: {{ nok8s.vllm.containerPort }}
+    accelerator: {{ nok8s.vllm.accelerator | default('nvidia') }}
     gpus: "{{ nok8s.vllm.gpus }}"
+    deviceArgs: [{% for a in nok8s.vllm.deviceArgs | default([]) %}"{{ a }}"{% if not loop.last %}, {% endif %}{% endfor %}]
     shmSize: "{{ nok8s.vllm.shmSize }}"
     tensorParallel: {{ nok8s.vllm.tensorParallel }}
     extraArgs: [{% for a in nok8s.vllm.extraArgs %}"{{ a }}"{% if not loop.last %}, {% endif %}{% endfor %}]

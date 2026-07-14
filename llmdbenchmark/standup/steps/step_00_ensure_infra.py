@@ -126,6 +126,7 @@ class EnsureInfraStep(Step):
         runtime = context.container_runtime or "docker"
         plan_config = self._load_plan_config(context) or {}
         nok8s = plan_config.get("nok8s", {})
+        accelerator = str(nok8s.get("vllm", {}).get("accelerator", "nvidia")).lower()
         hf_env = nok8s.get("hfTokenEnv", "HUGGING_FACE_HUB_TOKEN")
         ports = [
             nok8s.get("vllm", {}).get("hostPort", 8000),
@@ -138,7 +139,7 @@ class EnsureInfraStep(Step):
         if context.dry_run:
             context.logger.log_info(
                 f"[dry-run] nok8s preflight: would verify '{runtime}' runtime, "
-                f"GPU (nvidia-smi), free ports {ports}, and ${hf_env}."
+                f"'{accelerator}' accelerator, free ports {ports}, and ${hf_env}."
             )
             return StepResult(
                 step_number=self.number,
@@ -167,14 +168,26 @@ class EnsureInfraStep(Step):
                 f"permissions). Verify with '{runtime} info'."
             )
 
-        # 2. NVIDIA GPU visible on the host (warning).
-        if not cmd.execute(
-            "nvidia-smi -L", check=False, force=True, silent=True
-        ).success:
-            warnings.append(
-                "nvidia-smi found no GPU/driver; vLLM requires an NVIDIA GPU + "
-                "driver, and the NVIDIA Container Toolkit configured for "
-                f"'{runtime}'."
+        # 2. Accelerator visible on the host (warning). Probe depends on the
+        #    configured accelerator; cpu/spyre/custom are not probed here.
+        probe = {
+            "nvidia": "nvidia-smi -L",
+            "amd": "rocm-smi --showid",
+            "intel": "xpu-smi discovery",
+            "gaudi": "hl-smi -L",
+        }.get(accelerator)
+        if probe:
+            if not cmd.execute(probe, check=False, force=True, silent=True).success:
+                tool = probe.split()[0]
+                warnings.append(
+                    f"'{tool}' found no {accelerator} accelerator; vLLM needs the "
+                    f"device + driver present, the matching vLLM image, and the "
+                    f"container toolkit configured for '{runtime}'."
+                )
+        else:
+            context.logger.log_info(
+                f"    accelerator='{accelerator}': skipping device probe "
+                f"(cpu/spyre/custom -- ensure nok8s.vllm.deviceArgs + image match)."
             )
 
         # 3. Hugging Face token (warning).

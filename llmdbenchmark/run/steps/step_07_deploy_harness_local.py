@@ -151,7 +151,9 @@ class DeployHarnessLocalStep(Step):
                     f"-v {profiles_dir}:/workspace/profiles "
                     f"-v {harnesses_dir}:/workspace/harnesses:ro "
                     f"-v {entry_host}:/tmp/harness-entry.sh:ro "
-                    f"{image} sh /tmp/harness-entry.sh"
+                    # Override the image ENTRYPOINT (llm-d-benchmark.sh) so our
+                    # setup script runs -- mirrors the k8s pod's command:[sh,-c].
+                    f"--entrypoint sh {image} /tmp/harness-entry.sh"
                 )
                 cmd.execute(f"{runtime} rm -f {name}", check=False)
                 result = cmd.execute(run_cmd, check=False)
