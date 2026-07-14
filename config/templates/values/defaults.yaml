@@ -1330,6 +1330,10 @@ nok8s:
     deviceArgs: []
     shmSize: "20g"          # required for NCCL/RCCL when tensorParallel > 1
     hfCacheDir: "~/.cache/huggingface"
+    # Number of independent vLLM workers (EPP load-balances across them). With
+    # replicas > 1 each worker is pinned to its own slice of `tensorParallel`
+    # GPU indices (replica i -> devices i*TP .. i*TP+TP-1) via the accelerator's
+    # visible-devices env. Total GPUs used = replicas * tensorParallel.
     replicas: 1
     extraArgs: []           # appended after `serve <MODEL> --tensor-parallel-size=N`
 

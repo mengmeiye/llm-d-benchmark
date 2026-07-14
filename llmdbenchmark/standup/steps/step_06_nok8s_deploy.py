@@ -142,10 +142,12 @@ class NoK8sDeployStep(Step):
         image = c["image"]
         if kind == "vllm":
             device = self._device_args(runtime, c)
+            pin = self._pin_env(c)
             extra = " ".join(c.get("extraArgs") or [])
             return (
                 f"{runtime} run -d --name {c['name']}"
                 + (f" {device}" if device else "")
+                + (f" {pin}" if pin else "")
                 + f" --shm-size={c.get('shmSize', '20g')} "
                 f"-p {c['hostPort']}:{c.get('containerPort', 8000)} "
                 f"-e {hf_token_env} "
@@ -178,6 +180,36 @@ class NoK8sDeployStep(Step):
                 f"--drain-strategy immediate --drain-time-s 60 -c {mount_path}"
             )
         raise ValueError(f"Unknown nok8s container kind: {kind}")
+
+    # Per-accelerator env var that pins a process to a subset of devices.
+    _VISIBLE_DEVICE_ENV = {
+        "nvidia": "CUDA_VISIBLE_DEVICES",
+        "amd": "HIP_VISIBLE_DEVICES",
+        "intel": "ZE_AFFINITY_MASK",
+    }
+
+    @classmethod
+    def _pin_env(cls, c: dict) -> str:
+        """Per-replica GPU pinning flag (``-e <VISIBLE_DEVICES>=<slice>``).
+
+        With ``replicas > 1`` each replica is pinned to its own contiguous slice
+        of ``tensorParallel`` device indices (replica *i* -> devices
+        ``i*TP .. i*TP+TP-1``) so workers don't contend for the same GPUs.
+        Returns "" for a single replica (keeps the current --gpus all behaviour),
+        when ``deviceArgs`` is set (caller controls devices), or for accelerators
+        without an index-based visible-devices env (gaudi/cpu/spyre).
+        """
+        replicas = int(c.get("replicas", 1) or 1)
+        if replicas <= 1 or c.get("deviceArgs"):
+            return ""
+        accel = str(c.get("accelerator") or "nvidia").lower()
+        var = cls._VISIBLE_DEVICE_ENV.get(accel)
+        if not var:
+            return ""
+        tp = int(c.get("tensorParallel", 1) or 1)
+        idx = int(c.get("replicaIndex", 0) or 0)
+        devices = ",".join(str(d) for d in range(idx * tp, idx * tp + tp))
+        return f"-e {var}={devices}"
 
     @staticmethod
     def _device_args(runtime: str, c: dict) -> str:

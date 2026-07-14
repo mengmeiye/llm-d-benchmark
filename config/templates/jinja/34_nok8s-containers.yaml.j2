@@ -28,6 +28,8 @@ containers:
     deviceArgs: [{% for a in nok8s.vllm.deviceArgs | default([]) %}"{{ a }}"{% if not loop.last %}, {% endif %}{% endfor %}]
     shmSize: "{{ nok8s.vllm.shmSize }}"
     tensorParallel: {{ nok8s.vllm.tensorParallel }}
+    replicas: {{ nok8s.vllm.replicas }}
+    replicaIndex: {{ i }}
     extraArgs: [{% for a in nok8s.vllm.extraArgs %}"{{ a }}"{% if not loop.last %}, {% endif %}{% endfor %}]
 {% endfor %}
   - name: epp

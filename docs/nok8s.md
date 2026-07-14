@@ -137,12 +137,39 @@ device and image match yourself.
 | run step 07 | `step_07_deploy_harness_local` runs the harness image locally with `--network host`; results land in `workspace/results/` via a bind-mount |
 | teardown step 06 | `step_06_nok8s_teardown` removes the containers |
 
-## Multiple workers
+## Multiple GPUs
 
-Set `nok8s.vllm.replicas: N` (needs `N` GPUs, or a small model sharing one GPU
-with `--gpu-memory-utilization`). Each worker is published on `hostPort + i`
-and added to the EPP endpoints file, so the router load-balances / prefix-routes
-across them.
+Two modes, driven by `tensorParallel` and `replicas`:
+
+**One model sharded across GPUs (tensor parallelism)** — serve a large model:
+```yaml
+nok8s:
+  vllm:
+    tensorParallel: 4      # shard one model across 4 GPUs
+    replicas: 1
+    shmSize: "40g"         # bump for NCCL/RCCL with TP > 1
+```
+→ `--gpus all --tensor-parallel-size=4`.
+
+**Multiple independent workers (throughput / router load-balancing)** — set
+`replicas: N`. Each worker is published on `hostPort + i`, added to the EPP
+endpoints file (so the router load-balances / prefix-routes across them), and
+**pinned to its own slice of `tensorParallel` GPU indices** (replica *i* →
+devices `i*TP .. i*TP+TP-1`) via the accelerator's visible-devices env
+(`CUDA_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` / `ZE_AFFINITY_MASK`) so workers
+don't contend for the same GPUs.
+
+**Total GPUs used = `replicas × tensorParallel`.** Examples on an 8-GPU host:
+| Goal | `replicas` | `tensorParallel` |
+|------|-----------|------------------|
+| One big model sharded 8-way | 1 | 8 |
+| 8 workers, 1 GPU each (max throughput) | 8 | 1 |
+| 2 workers, each sharded over 4 | 2 | 4 |
+
+Step 00 warns if `replicas × tensorParallel` exceeds the detected GPU count
+(NVIDIA). Per-replica pinning uses index-based env vars for nvidia/amd/intel;
+for gaudi/spyre or custom wiring, set `nok8s.vllm.deviceArgs` (which disables
+auto-pinning and puts you in control).
 
 ## Troubleshooting
 

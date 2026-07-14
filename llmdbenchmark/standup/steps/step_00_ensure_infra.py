@@ -190,6 +190,25 @@ class EnsureInfraStep(Step):
                 f"(cpu/spyre/custom -- ensure nok8s.vllm.deviceArgs + image match)."
             )
 
+        # 2b. GPU capacity: replicas x tensorParallel must fit the host's GPUs.
+        #     Only checkable for nvidia (nvidia-smi -L enumerates devices).
+        vllm = nok8s.get("vllm", {})
+        replicas = int(vllm.get("replicas", 1) or 1)
+        tp = int(vllm.get("tensorParallel", 1) or 1)
+        needed = replicas * tp
+        if accelerator == "nvidia" and needed > 1:
+            res_gpu = cmd.execute("nvidia-smi -L", check=False, force=True, silent=True)
+            if res_gpu.success and res_gpu.stdout:
+                count = sum(
+                    1 for ln in res_gpu.stdout.splitlines() if ln.startswith("GPU ")
+                )
+                if count and needed > count:
+                    warnings.append(
+                        f"nok8s.vllm needs {needed} GPUs (replicas {replicas} x "
+                        f"tensorParallel {tp}) but only {count} detected -- workers "
+                        f"will contend for devices or fail to start."
+                    )
+
         # 3. Hugging Face token (warning).
         if not os.environ.get(hf_env):
             warnings.append(

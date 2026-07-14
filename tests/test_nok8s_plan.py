@@ -194,6 +194,38 @@ def test_device_args_per_accelerator() -> None:
     )
 
 
+def test_pin_env_per_replica() -> None:
+    from llmdbenchmark.standup.steps.step_06_nok8s_deploy import NoK8sDeployStep
+
+    pin = NoK8sDeployStep._pin_env
+    # Single replica -> no pinning (back-compat, uses --gpus all).
+    assert pin({"replicas": 1, "accelerator": "nvidia"}) == ""
+    # 3 replicas, TP=1 -> one GPU each, distinct indices.
+    assert pin({"replicas": 3, "replicaIndex": 0, "tensorParallel": 1}) == (
+        "-e CUDA_VISIBLE_DEVICES=0"
+    )
+    assert pin({"replicas": 3, "replicaIndex": 2, "tensorParallel": 1}) == (
+        "-e CUDA_VISIBLE_DEVICES=2"
+    )
+    # 2 replicas, TP=4 -> contiguous 4-GPU slices.
+    assert pin({"replicas": 2, "replicaIndex": 1, "tensorParallel": 4}) == (
+        "-e CUDA_VISIBLE_DEVICES=4,5,6,7"
+    )
+    # accelerator-specific env var.
+    assert pin({"replicas": 2, "replicaIndex": 1, "accelerator": "amd"}) == (
+        "-e HIP_VISIBLE_DEVICES=1"
+    )
+    assert pin({"replicas": 2, "replicaIndex": 0, "accelerator": "intel"}) == (
+        "-e ZE_AFFINITY_MASK=0"
+    )
+    # gaudi/spyre/cpu -> no index-pinning env.
+    assert pin({"replicas": 2, "replicaIndex": 0, "accelerator": "gaudi"}) == ""
+    # deviceArgs override disables auto-pinning (caller controls devices).
+    assert (
+        pin({"replicas": 2, "replicaIndex": 1, "deviceArgs": ["--device", "x"]}) == ""
+    )
+
+
 def test_resolve_deploy_method_forces_nok8s() -> None:
     """--methods nok8s wins and disables the other methods (mutual exclusion)."""
     rp = RenderPlans(
