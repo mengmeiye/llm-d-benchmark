@@ -679,7 +679,8 @@ def _print_standup_summary(context, result, logger):
     logger.log_info("  STANDUP COMPLETE")
     logger.log_info("=" * W)
     logger.log_info(f"  User:       {username}")
-    logger.log_info(f"  Platform:   {platform}")
+    if not context.container_only:
+        logger.log_info(f"  Platform:   {platform}")
     logger.log_info(f"  Mode:       {mode}")
     if len(stack_models) > 1:
         logger.log_info(f"  Models:     {len(stack_models)} (one per stack)")
@@ -690,18 +691,22 @@ def _print_standup_summary(context, result, logger):
             stack_models[0][1] if stack_models else (context.model_name or "unknown")
         )
         logger.log_info(f"  Model:      {single_model}")
-    logger.log_info(f"  Namespace:  {ns}")
-    if harness_ns != ns:
-        logger.log_info(f"  Harness NS: {harness_ns}")
+    # Namespace / Harness NS / Gateway are Kubernetes concepts; omit them for
+    # the no-Kubernetes (container_only) path.
+    if not context.container_only:
+        logger.log_info(f"  Namespace:  {ns}")
+        if harness_ns != ns:
+            logger.log_info(f"  Harness NS: {harness_ns}")
     logger.log_info(f"  Methods:    {methods}")
-    # Gateway class only takes effect on the modelservice path; for the
-    # other deploy methods the label says "n/a (...)" so the operator
-    # isn't misled by the scenario's default value.
-    from llmdbenchmark.utilities.cluster import resolve_phase_gateway_label
+    if not context.container_only:
+        # Gateway class only takes effect on the modelservice path; for the
+        # other deploy methods the label says "n/a (...)" so the operator
+        # isn't misled by the scenario's default value.
+        from llmdbenchmark.utilities.cluster import resolve_phase_gateway_label
 
-    gateway_label = resolve_phase_gateway_label(context)
-    if gateway_label:
-        logger.log_info(f"  Gateway:    {gateway_label}")
+        gateway_label = resolve_phase_gateway_label(context)
+        if gateway_label:
+            logger.log_info(f"  Gateway:    {gateway_label}")
     logger.log_info(f"  Stacks:     {stacks}")
 
     total_steps = len(result.global_results)
