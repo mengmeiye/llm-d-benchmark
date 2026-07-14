@@ -1124,7 +1124,8 @@ def _execute_run(args, logger, render_plan_errors):
             stack_models[0][1] if stack_models else (context.model_name or "unknown")
         )
         logger.log_info(f"  Model:         {single_model}")
-    logger.log_info(f"  Namespace:     {namespace}")
+    if not context.container_only:
+        logger.log_info(f"  Namespace:     {namespace}")
     logger.log_info(f"  Mode:          {mode}")
     logger.log_info(f"  Parallelism:   {parallelism}")
     if experiment_ids:
@@ -1139,13 +1140,16 @@ def _execute_run(args, logger, render_plan_errors):
                     logger.log_info(
                         f"      [{i}/{parallelism}] {local_path.name} ({file_count} files)"
                     )
-    kube_bin = "oc" if context.is_openshift else "kubectl"
     logger.log_info(f"  Local results: {results_dir}")
-    logger.log_info(
-        f"  PVC results:   {kube_bin} exec -n {namespace} "
-        f"$({kube_bin} get pod -n {namespace} -l role=llm-d-benchmark-data-access "
-        f"-o jsonpath='{{.items[0].metadata.name}}') -- ls /requests/"
-    )
+    # The PVC/data-access-pod hint is Kubernetes-only; nok8s writes results
+    # straight to the local dir shown above.
+    if not context.container_only:
+        kube_bin = "oc" if context.is_openshift else "kubectl"
+        logger.log_info(
+            f"  PVC results:   {kube_bin} exec -n {namespace} "
+            f"$({kube_bin} get pod -n {namespace} -l role=llm-d-benchmark-data-access "
+            f"-o jsonpath='{{.items[0].metadata.name}}') -- ls /requests/"
+        )
     logger.log_info("=" * 60)
     logger.log_info(
         f"Run complete (mode={mode}, harness={harness}).",
@@ -1153,7 +1157,11 @@ def _execute_run(args, logger, render_plan_errors):
     )
 
     # --- Store run parameters as ConfigMap in namespace ---
-    if not context.dry_run:
+    # Skipped for nok8s (container_only): the store applies a ConfigMap via
+    # kubectl, and there is no cluster. Per-experiment run_metadata is already
+    # written into the local results dir by the harness, so the audit trail
+    # remains on disk.
+    if not context.dry_run and not context.container_only:
         _store_run_parameters_configmap(
             context, harness, workload, experiment_ids, logger
         )
