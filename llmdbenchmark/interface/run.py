@@ -36,7 +36,7 @@ def add_subcommands(
         "-t",
         "--methods",
         default=env("LLMDBENCH_METHODS"),
-        help="Deploy method used during standup (standalone, modelservice, or custom resource name).",
+        help="Deploy method used during standup (standalone, modelservice, nok8s, or custom resource name).",
     )
     run_parser.add_argument(
         "--gateway-class",

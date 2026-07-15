@@ -8,8 +8,8 @@
 > `auto` Helm/image versions are resolved against live registries at
 > generation time via the existing `VersionResolver`.
 
-- Generated at: `2026-07-10 18:59:33` (UTC)
-- Generated against git ref: `b26be2d5caa9a161d3d90cd5bf68908ac952f4ff`
+- Generated at: `2026-07-13 21:15:16` (UTC)
+- Generated against git ref: `af463d9747e97e364313276ad1eb9b5f897c69ce`
 
 ## System Tool Dependencies
 
@@ -108,7 +108,7 @@ annotated with their `pyproject.toml` line.
 | **aiosignal** | `1.4.0` | version | (transitive in `.venv`) | [aiosignal (PyPI)](https://pypi.org/project/aiosignal/) |
 | **annotated-doc** | `0.0.4` | version | (transitive in `.venv`) | [annotated-doc (PyPI)](https://pypi.org/project/annotated-doc/) |
 | **annotated-types** | `0.7.0` | version | (transitive in `.venv`) | [annotated-types (PyPI)](https://pypi.org/project/annotated-types/) |
-| **anyio** | `4.14.1` | version | (transitive in `.venv`) | [anyio (PyPI)](https://pypi.org/project/anyio/) |
+| **anyio** | `4.14.2` | version | (transitive in `.venv`) | [anyio (PyPI)](https://pypi.org/project/anyio/) |
 | **attrs** | `26.1.0` | version | (transitive in `.venv`) | [attrs (PyPI)](https://pypi.org/project/attrs/) |
 | **binaryornot** | `0.6.0` | version | (transitive in `.venv`) | [binaryornot (PyPI)](https://pypi.org/project/binaryornot/) |
 | **boxsdk** | `3.14.0` | version | (transitive in `.venv`) | [boxsdk (PyPI)](https://pypi.org/project/boxsdk/) |
@@ -128,7 +128,7 @@ annotated with their `pyproject.toml` line.
 | **frozenlist** | `1.8.0` | version | (transitive in `.venv`) | [frozenlist (PyPI)](https://pypi.org/project/frozenlist/) |
 | **fsspec** | `2026.6.0` | version | (transitive in `.venv`) | [fsspec (PyPI)](https://pypi.org/project/fsspec/) |
 | **gitdb** | `4.0.12` | version | (transitive in `.venv`) | [gitdb (PyPI)](https://pypi.org/project/gitdb/) |
-| **GitPython** | `3.1.50` | version | `pyproject.toml` line 14 (direct) | [GitPython (PyPI)](https://pypi.org/project/gitpython/) |
+| **GitPython** | `3.1.51` | version | `pyproject.toml` line 14 (direct) | [GitPython (PyPI)](https://pypi.org/project/gitpython/) |
 | **google-api-core** | `2.31.0` | version | (transitive in `.venv`) | [google-api-core (PyPI)](https://pypi.org/project/google-api-core/) |
 | **google-auth** | `2.55.2` | version | `pyproject.toml` line 18 (direct) | [google-auth (PyPI)](https://pypi.org/project/google-auth/) |
 | **google-cloud-core** | `2.6.0` | version | (transitive in `.venv`) | [google-cloud-core (PyPI)](https://pypi.org/project/google-cloud-core/) |
@@ -187,7 +187,7 @@ annotated with their `pyproject.toml` line.
 | **python-dotenv** | `1.2.2` | version | (transitive in `.venv`) | [python-dotenv (PyPI)](https://pypi.org/project/python-dotenv/) |
 | **python-multipart** | `0.0.32` | version | (transitive in `.venv`) | [python-multipart (PyPI)](https://pypi.org/project/python-multipart/) |
 | **PyYAML** | `6.0.3` | version | `pyproject.toml` line 7 (direct) | [PyYAML (PyPI)](https://pypi.org/project/pyyaml/) |
-| **regex** | `2026.6.28` | version | (transitive in `.venv`) | [regex (PyPI)](https://pypi.org/project/regex/) |
+| **regex** | `2026.7.10` | version | (transitive in `.venv`) | [regex (PyPI)](https://pypi.org/project/regex/) |
 | **requests** | `2.34.2` | version | `pyproject.toml` line 9 (direct) | [requests (PyPI)](https://pypi.org/project/requests/) |
 | **requests-oauthlib** | `2.0.0` | version | (transitive in `.venv`) | [requests-oauthlib (PyPI)](https://pypi.org/project/requests-oauthlib/) |
 | **requests-toolbelt** | `1.0.0` | version | (transitive in `.venv`) | [requests-toolbelt (PyPI)](https://pypi.org/project/requests-toolbelt/) |
@@ -202,14 +202,14 @@ annotated with their `pyproject.toml` line.
 | **tabulate** | `0.10.0` | version | (transitive in `.venv`) | [tabulate (PyPI)](https://pypi.org/project/tabulate/) |
 | **tokenizers** | `0.22.2` | version | (transitive in `.venv`) | [tokenizers (PyPI)](https://pypi.org/project/tokenizers/) |
 | **tqdm** | `4.68.4` | version | (transitive in `.venv`) | [tqdm (PyPI)](https://pypi.org/project/tqdm/) |
-| **transformers** | `5.13.0` | version | `pyproject.toml` line 16 (direct) | [transformers (PyPI)](https://pypi.org/project/transformers/) |
+| **transformers** | `5.13.1` | version | `pyproject.toml` line 16 (direct) | [transformers (PyPI)](https://pypi.org/project/transformers/) |
 | **typer** | `0.26.8` | version | (transitive in `.venv`) | [typer (PyPI)](https://pypi.org/project/typer/) |
 | **typing-inspection** | `0.4.2` | version | (transitive in `.venv`) | [typing-inspection (PyPI)](https://pypi.org/project/typing-inspection/) |
 | **typing_extensions** | `4.16.0` | version | (transitive in `.venv`) | [typing_extensions (PyPI)](https://pypi.org/project/typing-extensions/) |
 | **urllib3** | `2.7.0` | version | (transitive in `.venv`) | [urllib3 (PyPI)](https://pypi.org/project/urllib3/) |
 | **uvicorn** | `0.48.0` | version | (transitive in `.venv`) | [uvicorn (PyPI)](https://pypi.org/project/uvicorn/) |
 | **uvloop** | `0.22.1` | version | (transitive in `.venv`) | [uvloop (PyPI)](https://pypi.org/project/uvloop/) |
-| **virtualenv** | `21.6.0` | version | (transitive in `.venv`) | [virtualenv (PyPI)](https://pypi.org/project/virtualenv/) |
+| **virtualenv** | `21.6.1` | version | (transitive in `.venv`) | [virtualenv (PyPI)](https://pypi.org/project/virtualenv/) |
 | **watchfiles** | `1.2.0` | version | (transitive in `.venv`) | [watchfiles (PyPI)](https://pypi.org/project/watchfiles/) |
 | **websocket-client** | `1.9.0` | version | (transitive in `.venv`) | [websocket-client (PyPI)](https://pypi.org/project/websocket-client/) |
 | **websockets** | `16.1` | version | (transitive in `.venv`) | [websockets (PyPI)](https://pypi.org/project/websockets/) |

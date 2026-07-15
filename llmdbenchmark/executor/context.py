@@ -128,8 +128,15 @@ class ExecutionContext:  # pylint: disable=too-many-instance-attributes
     # Standup pod deployment timeouts
     kustomize_deploy_timeout: int = 900
     standalone_deploy_timeout: int = 900
+    nok8s_deploy_timeout: int = 900
     gateway_deploy_timeout: int = 120
     modelservice_deploy_timeout: int = 1500
+
+    # No-Kubernetes (nok8s) deployment: run the stack + harness as local
+    # containers on the host, with no cluster at all.  When container_only is
+    # True, cluster resolution is skipped and steps talk to docker/podman.
+    container_only: bool = False
+    container_runtime: str = "docker"
 
     pvc_bind_timeout: int = 240
 
@@ -173,6 +180,12 @@ class ExecutionContext:  # pylint: disable=too-many-instance-attributes
     def resolve_cluster(self) -> None:
         """Resolve cluster connectivity and metadata (idempotent)."""
         if self._cluster_resolved:
+            return
+        # No-Kubernetes deployment: there is no cluster to resolve.  Still
+        # build a CommandExecutor so steps can invoke docker/podman.
+        if self.container_only:
+            self.rebuild_cmd()
+            self._cluster_resolved = True
             return
         from llmdbenchmark.utilities.cluster import resolve_cluster as _resolve
 

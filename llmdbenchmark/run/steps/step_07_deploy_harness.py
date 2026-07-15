@@ -47,7 +47,9 @@ class DeployHarnessStep(Step):
         )
 
     def should_skip(self, context: ExecutionContext) -> bool:
-        """Skip deployment in skip-run mode."""
+        """Skip in skip-run mode, or for nok8s (handled by the local step)."""
+        if "nok8s" in (context.deployed_methods or []):
+            return True
         return context.harness_skip_run
 
     def execute(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
