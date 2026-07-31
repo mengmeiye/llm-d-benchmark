@@ -61,6 +61,123 @@ llmdbenchmark --spec examples/multi-model-wva standup -p my-namespace --stack qw
 The same flag works on `smoketest`, `run`, and `teardown` with identical
 semantics, so you can scope every lifecycle phase to the same subset.
 
+## Overriding scenario values from the CLI (`--set`)
+
+A scenario variant that differs from an existing one in only a handful of
+fields does not need its own YAML file. Every subcommand that renders
+templates accepts `--set`, which deep-merges dotted-path values on top of
+the scenario:
+
+```bash
+# Run the SGLang flavour of a guide without a separate scenario file
+llmdbenchmark --spec guides/optimized-baseline standup \
+  -t kustomize --set kustomize.acceleratorBackend=gpu/sglang
+```
+
+Pairs are comma-separated and the flag is repeatable. Values are parsed as
+YAML, so `4`, `true`, `[a, b]` and `{x: 1}` mean what they would inside the
+scenario file; commas inside `[]`, `{}` or quotes belong to the value.
+
+> [!WARNING]
+> **Multi-line values are folded onto one line.** A value containing real
+> newlines is read as a YAML plain scalar, so its line breaks collapse into
+> spaces -- which silently changes the meaning of a shell command
+> (`export FOO=1`⏎`vllm serve` becomes `export FOO=1 vllm serve`). To keep
+> the breaks, wrap the value in double quotes so `\n` is an escape:
+> `--set 'decode.vllm.customCommand="export FOO=1\nvllm serve /model-cache/x"'`.
+> For a full multi-line `customCommand`, prefer the scenario file or
+> `--cluster-config` -- `--set` is best suited to single-line values.
+
+> [!IMPORTANT]
+> `--set` always means the **scenario**, on every subcommand. It is not the
+> same as `run`/`experiment`'s `-o/--overrides`, which overrides the
+> **workload profile**. Those two are separate flags and can be combined:
+> `run --set decode.replicas=4 -o max-concurrency=8`. `standup` has no
+> workload profile, so it accepts `--set` only.
+
+The same value can be supplied via `LLMDBENCH_SET`. Pass `--set` to every
+lifecycle phase (`plan`/`standup`/`smoketest`/`run`/`teardown`) so each one
+renders the same plan -- these phases re-render templates, and a phase that
+misses the flag will disagree with what was deployed.
+
+### Scoping overrides in multi-stack scenarios
+
+Prefix the key with a stack name, or an fnmatch glob, to scope an override
+in a [multi-stack scenario](#multi-stack-scenarios). Unprefixed applies to
+every stack:
+
+```bash
+# every stack
+llmdbenchmark --spec examples/multi-model-wva standup --set decode.replicas=2
+
+# one stack; both are still deployed
+llmdbenchmark --spec examples/multi-model-wva standup \
+  --set 'qwen3-06b:decode.replicas=4,llama-31-8b:decode.replicas=1'
+
+# a common floor with one exception
+llmdbenchmark --spec examples/multi-model-wva standup \
+  --set 'wva.hpa.maxReplicas=6' --set 'llama-31-8b:wva.hpa.maxReplicas=2'
+
+# every stack whose name ends in -8b
+llmdbenchmark --spec examples/multi-model-wva standup \
+  --set '*-8b:decode.resources.limits.memory=64Gi'
+```
+
+When several selectors match a stack they are applied by specificity --
+global, then globs, then exact names -- so the exception above wins
+regardless of the order the flags were typed. A selector that matches no
+stack in the scenario is a hard error, not a silent no-op.
+
+`--stack` and override selectors are orthogonal: `--stack` chooses which
+stacks are **deployed**, a selector chooses which stacks are **modified**.
+Note that an unprefixed `--set` applies to every stack even when `--stack`
+narrows the deployment, which differs from `-m/--models` (that one scopes
+itself to a single filtered stack).
+
+### Precedence and limits
+
+Highest wins:
+
+```
+defaults.yaml → shared: → stack block → --cluster-config → --set
+  → DoE setup.treatments → dedicated flags (-m, -t, --gateway-class,
+                                            --monitoring, --wva)
+```
+
+`--set` beats the stack's own block -- unlike a value in `shared:`, which
+loses to it. DoE `setup.treatments` beat `--set`, because the treatment is
+the deliberate sweep factor.
+
+The dedicated flags sit at the top because they are applied by resolver
+functions that run *after* the whole merge, not as another merge layer. So
+`-m facebook/opt-125m` wins over both `--set model.name=...` and a
+treatment that sets `model.name`. Use `--set` for keys with no dedicated
+flag; when a flag exists, the flag is authoritative.
+
+Every applied override is logged with its previous value
+(`[stack] Scenario override: decode.replicas: 1 -> 4`), and an override
+whose *parent* path does not exist warns about a possible typo.
+
+**Lists are assigned whole, never indexed.** A dotted path cannot address a
+list element, so `--set vllmCommon.volumeMounts.0.mountPath=/x` is rejected
+rather than silently replacing the whole list. Assign the list instead:
+
+```bash
+--set 'vllmCommon.volumeMounts=[{name: dshm, mountPath: /dev/shm}]'
+```
+
+(This differs from `run -o`, which overrides the workload profile and *does*
+support list indices.)
+
+Three things overrides cannot do:
+
+- **Add or remove a stack.** Scenarios differing in stack *count* cannot be
+  collapsed into one file.
+- **Change a stack's `name`.** It names the plan output directory and is
+  read before the merge.
+- **Move the workspace via `workDir`.** That is read before rendering; use
+  `--workspace` instead.
+
 ## Multiple steps
 The full standup of a stack is a multi-step process. The [lifecycle](lifecycle.md) document go into more details explaning the meaning of each different individual step.
 

@@ -10,6 +10,7 @@ All declarative configuration for `llmdbenchmark` lives in this directory. The t
   - [Method 1: Scenario File](#method-1-scenario-file-recommended-for-deployment-specific-config)
   - [Method 2: Environment Variables](#method-2-environment-variables-for-shellci-defaults)
   - [Method 3: CLI Arguments](#method-3-cli-arguments-highest-priority-runtime-overrides)
+    - [Overriding arbitrary scenario keys (`--set`)](#overriding-arbitrary-scenario-keys---set)
   - [Method 4: Experiment Treatments](#method-4-experiment-treatments-for-parameter-sweeps)
 - [Templates](#templates)
   - [Jinja2 Templates](#templatesjinja)
@@ -226,6 +227,74 @@ llmdbenchmark --spec my-spec.yaml.j2 standup -r my-release
 # Combine multiple overrides
 llmdbenchmark --spec my-spec.yaml.j2 standup -p my-ns -t modelservice -r my-release
 ```
+
+##### Overriding arbitrary scenario keys (`--set`)
+
+The flags above cover the values that have a dedicated flag. **Any** key in
+the merged config can be overridden with `--set`, using the same dotted
+paths a scenario file uses. This is what makes a
+near-duplicate scenario file unnecessary:
+
+```bash
+# One key -- the SGLang flavour of a guide, no second scenario file
+llmdbenchmark --spec guides/optimized-baseline standup \
+  -t kustomize -o kustomize.acceleratorBackend=gpu/sglang
+
+# Several keys: comma-separated, or repeat the flag
+llmdbenchmark --spec guides/pd-disaggregation standup \
+  --set 'decode.replicas=2,prefill.replicas=4' \
+  --set 'storage.modelPvc.size=2Ti'
+```
+
+Values are parsed as YAML, so `4`, `true`, `[a, b]` and `{x: 1}` mean what
+they would in the scenario file. Commas inside `[]`, `{}` or quotes belong to
+the value, not the separator. Because it is real YAML, `012` is octal 10 and
+`1:30` is 90 -- quote the value (`"foo='012'"`) to keep it a string; a
+warning is emitted whenever a value is read as something other than it looks.
+
+Multi-line values are folded onto one line: real newlines in a plain scalar
+collapse into spaces, which silently changes the meaning of a shell command.
+Wrap the value in double quotes so `\n` is an escape --
+`--set 'decode.vllm.customCommand="export FOO=1\nvllm serve /model-cache/x"'`
+-- or, for a full multi-line `customCommand`, set it in the scenario file
+instead; `--set` is best suited to single-line values.
+
+Lists are assigned whole, never indexed: `vllmCommon.volumeMounts.0.name=x`
+is rejected (it would silently replace the entire list) -- pass the full
+list instead, `'vllmCommon.volumeMounts=[{name: x, mountPath: /x}]'`.
+
+In a multi-stack scenario, prefix a key with a stack name (or an fnmatch
+glob) to scope it; unprefixed applies to every stack:
+
+```bash
+# Different value per pool, both still deployed
+llmdbenchmark --spec examples/multi-model-wva standup \
+  --set 'qwen3-06b:decode.replicas=4,llama-31-8b:decode.replicas=1'
+
+# A common floor with one exception (exact name beats the global)
+llmdbenchmark --spec examples/multi-model-wva standup \
+  --set 'wva.hpa.maxReplicas=6' --set 'llama-31-8b:wva.hpa.maxReplicas=2'
+```
+
+A selector matching no stack is a hard error, not a silent no-op. Every
+applied override is logged with its previous value
+(`[llama-31-8b] Scenario override: decode.replicas: 1 -> 4`).
+
+`--set` is available on every subcommand that renders templates
+(`plan`, `standup`, `smoketest`, `run`, `teardown`, `experiment`) -- pass it
+to each phase of a lifecycle, since they all re-render. Full reference:
+[docs/standup.md](../docs/standup.md#overriding-scenario-values-from-the-cli---set).
+
+> [!IMPORTANT]
+> `--set` always means the **scenario**. On `run` and `experiment`,
+> `-o/--overrides` is a **different** flag that overrides the workload
+> profile; the two can be combined. `standup` has no workload profile, so
+> it accepts `--set` only.
+
+There is also `--cluster-config FILE`, which takes the same overrides as a
+YAML mapping for values that are constant per cluster (storage class,
+service account). `--set` wins over that file on a contested key. See
+[docs/openshift-setup.md](../docs/openshift-setup.md).
 
 #### Method 4: Experiment Treatments (for parameter sweeps)
 
