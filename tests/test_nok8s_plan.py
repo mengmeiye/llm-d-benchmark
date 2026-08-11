@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from llmdbenchmark.parser.render_plans import RenderPlans
@@ -247,6 +248,118 @@ def test_nok8s_preflight_warns_when_no_port_probe_available(tmp_path: Path) -> N
     )
     EnsureInfraStep().execute(ctx)
     assert any("Cannot verify host ports" in w for w in ctx.logger.warnings)
+
+
+# Scenario YAML is not type-validated, so any of these fields can arrive as a
+# string (a quoted port), None (a key with no value), or something stranger.
+# The preflight is warnings-only: it must never abort standup on a bad value.
+
+_STRING_PORT_CASES = (
+    ({"envoy": {"listenPort": "8081"}}, 8081),
+    ({"envoy": {"adminPort": "19000"}}, 19000),
+    ({"epp": {"grpcPort": "9002"}}, 9002),
+    ({"epp": {"grpcHealthPort": "9003"}}, 9003),
+    ({"epp": {"metricsPort": "9090"}}, 9090),
+    ({"vllm": {"hostPort": "8000"}}, 8000),
+)
+
+
+@pytest.mark.parametrize("override,port", _STRING_PORT_CASES)
+def test_nok8s_preflight_accepts_quoted_ports(
+    tmp_path: Path, override: dict, port: int
+) -> None:
+    """A quoted port is still checked, not a TypeError from sorted()."""
+    from llmdbenchmark.standup.steps.step_00_ensure_infra import EnsureInfraStep
+
+    nok8s = {"vllm": {"accelerator": "cpu"}}
+    for section, fields in override.items():
+        nok8s.setdefault(section, {}).update(fields)
+
+    ss_out = f"LISTEN 0 4096 0.0.0.0:{port} 0.0.0.0:*\n"
+    ctx = _nok8s_ctx(tmp_path, _FakeCmd(stdout_for={"ss -ltn": ss_out}), nok8s=nok8s)
+    result = EnsureInfraStep().execute(ctx)
+    assert result.success is True
+    assert str(port) in _busy_warning(ctx)
+
+
+@pytest.mark.parametrize("value", ["auto", "", True, [8081], {"a": 1}, 8.5])
+def test_nok8s_preflight_reports_unusable_port_instead_of_crashing(
+    tmp_path: Path, value
+) -> None:
+    """A value that is not a port is named as unchecked, not raised."""
+    from llmdbenchmark.standup.steps.step_00_ensure_infra import EnsureInfraStep
+
+    ctx = _nok8s_ctx(
+        tmp_path,
+        _FakeCmd(stdout_for={"ss -ltn": "State  Recv-Q\n"}),
+        nok8s={"vllm": {"accelerator": "cpu"}, "envoy": {"listenPort": value}},
+    )
+    result = EnsureInfraStep().execute(ctx)
+    assert result.success is True
+    assert any(
+        "nok8s.envoy.listenPort" in w and "not a whole number" in w.lower()
+        for w in ctx.logger.warnings
+    ), ctx.logger.warnings
+
+
+def test_nok8s_preflight_treats_empty_port_as_default(tmp_path: Path) -> None:
+    """`listenPort:` with no value renders as the Jinja default, so check that."""
+    from llmdbenchmark.standup.steps.step_00_ensure_infra import EnsureInfraStep
+
+    ss_out = "LISTEN 0 4096 0.0.0.0:8081 0.0.0.0:*\n"
+    ctx = _nok8s_ctx(
+        tmp_path,
+        _FakeCmd(stdout_for={"ss -ltn": ss_out}),
+        nok8s={"vllm": {"accelerator": "cpu"}, "envoy": {"listenPort": None}},
+    )
+    result = EnsureInfraStep().execute(ctx)
+    assert result.success is True
+    assert "8081" in _busy_warning(ctx)
+
+
+@pytest.mark.parametrize("replicas", ["3", "abc", None, 0, -1, True])
+def test_nok8s_preflight_survives_any_replicas_value(tmp_path: Path, replicas) -> None:
+    """replicas feeds the port span and the GPU-capacity math; neither may raise."""
+    from llmdbenchmark.standup.steps.step_00_ensure_infra import EnsureInfraStep
+
+    ctx = _nok8s_ctx(
+        tmp_path,
+        _FakeCmd(stdout_for={"ss -ltn": "State  Recv-Q\n"}),
+        nok8s={"vllm": {"accelerator": "nvidia", "replicas": replicas}},
+    )
+    result = EnsureInfraStep().execute(ctx)
+    assert result.success is True
+
+
+def test_nok8s_preflight_survives_non_numeric_tensor_parallel(tmp_path: Path) -> None:
+    """tensorParallel multiplies replicas in the GPU-capacity check."""
+    from llmdbenchmark.standup.steps.step_00_ensure_infra import EnsureInfraStep
+
+    ctx = _nok8s_ctx(
+        tmp_path,
+        _FakeCmd(stdout_for={"ss -ltn": "State  Recv-Q\n"}),
+        nok8s={
+            "vllm": {"accelerator": "nvidia", "replicas": 2, "tensorParallel": "abc"}
+        },
+    )
+    result = EnsureInfraStep().execute(ctx)
+    assert result.success is True
+
+
+def test_nok8s_preflight_quoted_replicas_still_spans_replica_ports(
+    tmp_path: Path,
+) -> None:
+    """replicas: "3" must still claim hostPort..hostPort+2, like the int does."""
+    from llmdbenchmark.standup.steps.step_00_ensure_infra import EnsureInfraStep
+
+    ss_out = "LISTEN 0 4096 0.0.0.0:8002 0.0.0.0:*\n"
+    ctx = _nok8s_ctx(
+        tmp_path,
+        _FakeCmd(stdout_for={"ss -ltn": ss_out}),
+        nok8s={"vllm": {"replicas": "3", "hostPort": 8000, "accelerator": "cpu"}},
+    )
+    EnsureInfraStep().execute(ctx)
+    assert "8002" in _busy_warning(ctx)
 
 
 def test_device_args_per_accelerator() -> None:
