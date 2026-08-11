@@ -705,6 +705,86 @@ def test_nok8s_claims_validator_survives_a_non_int_replicas() -> None:
     )
 
 
+def test_nok8s_quoted_replicas_still_spans_every_worker_port() -> None:
+    """`replicas: "2"` must not under-count the span and hide a port clash."""
+    errors = _validator()._validate_nok8s_host_claims(
+        {
+            "nok8s": {
+                "enabled": True,
+                "vllm": {"replicas": "2", "hostPort": 8000},
+                "envoy": {"listenPort": 8001},
+            }
+        },
+        "solo",
+    )
+    assert any("8001" in e and "claimed by both" in e for e in errors), errors
+
+
+# A non-integer port is only caught by template arithmetic on `vllm.hostPort`.
+# The other five interpolate verbatim, so without this validation they render a
+# nonsense port into the Envoy bootstrap and the endpoint URL and exit 0.
+_BAD_PORT_VALUES = ("auto", "", "80a1", "8081x", True, [8081], {"a": 1}, 8.5)
+
+
+@pytest.mark.parametrize("value", _BAD_PORT_VALUES)
+def test_nok8s_non_integer_port_is_a_render_error(value) -> None:
+    errors = _validator()._validate_nok8s_host_claims(
+        {"nok8s": {"enabled": True, "envoy": {"listenPort": value}}},
+        "solo",
+    )
+    assert any(
+        "nok8s.envoy.listenPort" in e and "must be an integer port" in e for e in errors
+    ), (value, errors)
+
+
+@pytest.mark.parametrize("value", (0, -1, 65536, 99999))
+def test_nok8s_out_of_range_port_is_a_render_error(value: int) -> None:
+    errors = _validator()._validate_nok8s_host_claims(
+        {"nok8s": {"enabled": True, "envoy": {"listenPort": value}}},
+        "solo",
+    )
+    assert any("nok8s.envoy.listenPort" in e and "1-65535" in e for e in errors), (
+        value,
+        errors,
+    )
+
+
+@pytest.mark.parametrize("value", ("8000", " 8000 ", "08000"))
+def test_nok8s_quoted_port_is_accepted_as_its_number(value: str) -> None:
+    """A digit-string is the number it looks like, so it can clash like one."""
+    errors = _validator()._validate_nok8s_host_claims(
+        {
+            "nok8s": {
+                "enabled": True,
+                "vllm": {"hostPort": 8000},
+                "envoy": {"listenPort": value},
+            }
+        },
+        "solo",
+    )
+    assert any("8000" in e and "claimed by both" in e for e in errors), errors
+
+
+def test_nok8s_absent_port_is_not_a_render_error() -> None:
+    """defaults.yaml supplies every port; presence is not this check's contract."""
+    assert (
+        _validator()._validate_nok8s_host_claims(
+            {"nok8s": {"enabled": True, "vllm": {"hostPort": 8000}}},
+            "solo",
+        )
+        == []
+    )
+
+
+def test_nok8s_sibling_stacks_sharing_an_unusable_port_are_both_reported() -> None:
+    """Two stacks with the same non-port value must not both slip through."""
+    v = _validator()
+    values = {"nok8s": {"enabled": True, "envoy": {"listenPort": "auto"}}}
+    first = v._validate_nok8s_host_claims(values, "stack-a")
+    second = v._validate_nok8s_host_claims(values, "stack-b")
+    assert first and second, (first, second)
+
+
 def test_nok8s_run_endpoint_needs_one_stack() -> None:
     """The run phase refuses to benchmark every stack through stack 1's Envoy."""
     from llmdbenchmark.cli import PhaseError, _nok8s_endpoint_url
