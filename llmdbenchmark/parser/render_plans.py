@@ -1089,7 +1089,14 @@ class RenderPlans:
         errors: list[str] = []
         nok8s = values["nok8s"]
         replicas = nok8s.get("vllm", {}).get("replicas", 1)
-        if not isinstance(replicas, int) or replicas < 1:
+        if isinstance(replicas, str) and replicas.strip().isdigit():
+            # `replicas: "2"` fails the render on its own (the container
+            # template does arithmetic on it), but coerce it here anyway so
+            # the port span below covers every worker the author asked for --
+            # under-counting would hide a sibling-stack clash behind an error
+            # message about the type.
+            replicas = int(replicas.strip())
+        if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas < 1:
             # A bad value is already reported by the template render; this
             # validator only has to not crash on it.
             replicas = 1
@@ -1115,11 +1122,34 @@ class RenderPlans:
 
         for path, is_base in self._NOK8S_HOST_PORTS:
             base = self._get_nested(values, path)
-            if isinstance(base, str) and base.isdigit():
-                base = int(base)
-            if not isinstance(base, int):
-                continue
             key = ".".join(path)
+            if base is None:
+                # Absent, not misconfigured: defaults.yaml supplies all six, and
+                # `deep_merge` drops an explicit ``null`` so the default wins.
+                # Presence is not this validator's contract.
+                continue
+            if isinstance(base, str) and base.strip().isdigit():
+                base = int(base.strip())
+            # Only `vllm.hostPort` is used in template arithmetic, so a bad
+            # value there fails the render on its own. The other five are
+            # interpolated verbatim: they would render a nonsense port into
+            # the Envoy bootstrap and the endpoint URL, exit 0, and only fail
+            # when the container refuses to start. Reject them here instead --
+            # and a value that is not a port cannot be clash-checked below, so
+            # skipping it silently would also hide a sibling-stack collision.
+            if not isinstance(base, int) or isinstance(base, bool):
+                errors.append(
+                    f"[{stack_name}] {key} must be an integer port, got "
+                    f"{base!r}. A quoted value in the scenario YAML "
+                    f"(listenPort: '8081') is a string, not a number."
+                )
+                continue
+            if not 1 <= base <= 65535:
+                errors.append(
+                    f"[{stack_name}] {key} is {base}, outside the valid port "
+                    f"range 1-65535."
+                )
+                continue
             for port in range(base, base + (replicas if is_base else 1)):
                 owner, owner_key = self._nok8s_port_claims.setdefault(
                     port, (stack_name, key)
