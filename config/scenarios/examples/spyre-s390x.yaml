@@ -268,10 +268,22 @@ scenario:
       enabled: true
 
       # =========================================================================
-      # INFERENCE EXTENSION (EPP) -- Context-length-aware routing with UDS tokenizer
+      # INFERENCE EXTENSION (EPP) -- Context-length-aware routing
       # Uncomment this section along with multinode, contextLengthRanges, and
       # vllmVariants above to enable context-length-aware routing.
       # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
+      #
+      # `router.tokenizer.enabled: true` adds the chart's `vllm-render` sidecar
+      # to the EPP pod, which serves vLLM's /render endpoints over loopback HTTP
+      # on `router.tokenizer.port` (default 8000). The token-producer below must
+      # point at that port. Do NOT use `udsTokenizerConfig` here -- the UDS
+      # tokenizer sidecar was removed when the deployment moved to the
+      # llm-d-router chart, and the socket it expects is never created.
+      #
+      # NOTE (s390x): the chart's default tokenizer image
+      # (docker.io/vllm/vllm-openai-cpu) is amd64-only. On a homogeneous s390x
+      # cluster, override `router.tokenizer.image` with an s390x build, or
+      # schedule the EPP pod onto an amd64 node via `router.epp.affinity`.
       # =========================================================================
       # router:
       #   tokenizer:
@@ -285,11 +297,11 @@ scenario:
       #         apiVersion: llm-d.ai/v1alpha1
       #         kind: EndpointPickerConfig
       #         plugins:
-      #           - type: tokenizer
+      #           - type: token-producer
       #             parameters:
       #               modelName: "${model.name}"
-      #               udsTokenizerConfig:
-      #                 socketFile: /tmp/tokenizer/tokenizer-uds.socket
+      #               vllm:
+      #                 url: http://localhost:8000
       #           - type: context-length-aware
       #             parameters:
       #               label: llm-d.ai/context-length-range
@@ -297,7 +309,7 @@ scenario:
       #         schedulingProfiles:
       #           - name: default
       #             plugins:
-      #               - pluginRef: tokenizer
+      #               - pluginRef: token-producer
       #               - pluginRef: context-length-aware
 
       gateway:

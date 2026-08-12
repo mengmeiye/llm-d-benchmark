@@ -96,13 +96,13 @@ scenario:
 
       images:
         vllmOpenai:
-          repository: icr.io/ibmaiu_internal/amd64/vllm-spyre
-          tag: v1.10.0-aiu1.2.0
+          repository: registry.redhat.io/rhaii-early-access/vllm-spyre-rhel9
+          tag: 3.4.0-ea.2
           pullPolicy: IfNotPresent
 
         vllm:
-          repository: icr.io/ibmaiu_internal/amd64/vllm-spyre
-          tag: v1.10.0-aiu1.2.0
+          repository: registry.redhat.io/rhaii-early-access/vllm-spyre-rhel9
+          tag: 3.4.0-ea.2
 
       # -------------------------------------------------------------------------
       # vLLM Common Configuration
@@ -185,8 +185,10 @@ scenario:
           cpu: "20"
 
       vllm:
+        # This image's entrypoint execs `python3 -m vllm.entrypoints.openai.api_server "$@"`,
+        # which takes the model as `--model`, not as a positional argument.
         customCommand: |
-          /home/senuser/container-scripts/simple_vllm_serve.sh /model-cache/$MODEL_PATH \
+          /opt/app-root/spyre_entrypoint.sh --model /model-cache/$MODEL_PATH \
           --served-model-name $MODEL_NAME \
           --port $VLLM_INFERENCE_PORT \
           --max-model-len $VLLM_MAX_MODEL_LEN \
@@ -194,10 +196,8 @@ scenario:
           --tensor-parallel-size $VLLM_TENSOR_PARALLELISM \
           --enable-auto-tool-choice \
           --tool-call-parser granite \
-          --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-          --enable-prefix-caching
+          --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS
 
-      # Spyre-specific environment variables
       extraEnvVars:
         - name: FLEX_COMPUTE
           value: SENTIENT
@@ -205,10 +205,6 @@ scenario:
           value: PF
         - name: VLLM_SPYRE_PERF_METRIC_LOGGING_ENABLED
           value: "1"
-        - name: FLEX_HDMA_P2PSIZE
-          value: "268435456"
-        - name: FLEX_HDMA_COLLSIZE
-          value: "268435456"
         - name: HF_HUB_DISABLE_XET
           value: "1"
         - name: TORCH_SENDNN_CACHE_ENABLE
@@ -221,8 +217,6 @@ scenario:
           value: "1"
         - name: VLLM_SPYRE_USE_CHUNKED_PREFILL
           value: "1"
-        - name: VLLM_DT_CHUNK_LEN
-          value: "1024"
 
     # =========================================================================
     # MODELSERVICE -- Only applies when modelservice.enabled: true
@@ -233,10 +227,17 @@ scenario:
       enabled: true
 
       # =========================================================================
-      # INFERENCE EXTENSION (EPP) -- Context-length-aware routing with UDS tokenizer
+      # INFERENCE EXTENSION (EPP) -- Context-length-aware routing
       # Uncomment this section along with multinode, contextLengthRanges, and
       # vllmVariants above to enable context-length-aware routing.
       # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
+      #
+      # `router.tokenizer.enabled: true` adds the chart's `vllm-render` sidecar
+      # to the EPP pod, which serves vLLM's /render endpoints over loopback HTTP
+      # on `router.tokenizer.port` (default 8000). The token-producer below must
+      # point at that port. Do NOT use `udsTokenizerConfig` here -- the UDS
+      # tokenizer sidecar was removed when the deployment moved to the
+      # llm-d-router chart, and the socket it expects is never created.
       # =========================================================================
       router:
         tokenizer:
@@ -250,11 +251,11 @@ scenario:
               apiVersion: llm-d.ai/v1alpha1
               kind: EndpointPickerConfig
               plugins:
-                - type: tokenizer
+                - type: token-producer
                   parameters:
                     modelName: "${model.name}"
-                    udsTokenizerConfig:
-                      socketFile: /tmp/tokenizer/tokenizer-uds.socket
+                    vllm:
+                      url: http://localhost:8000
                 - type: decode-filter
                 - type: context-length-aware
                   parameters:
@@ -265,7 +266,7 @@ scenario:
               schedulingProfiles:
                 - name: default
                   plugins:
-                    - pluginRef: tokenizer
+                    - pluginRef: token-producer
                     - pluginRef: decode-filter
                     - pluginRef: context-length-aware
                     - pluginRef: max-score-picker
@@ -319,8 +320,10 @@ scenario:
             cpu: "20"
 
         vllm:
+          # See the standalone customCommand above: this image's entrypoint
+          # takes the model via --model, not positionally.
           customCommand: |
-            /home/senuser/container-scripts/simple_vllm_serve.sh /model-cache/$MODEL_PATH \
+            /opt/app-root/spyre_entrypoint.sh --model /model-cache/$MODEL_PATH \
             --served-model-name $MODEL_NAME \
             --port $VLLM_METRICS_PORT \
             --max-model-len $VLLM_MAX_MODEL_LEN \
@@ -328,10 +331,12 @@ scenario:
             --max-num-seq $VLLM_MAX_NUM_SEQ \
             --enable-auto-tool-choice \
             --tool-call-parser granite \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --enable-prefix-caching
+            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS
 
-        # Same Spyre-specific env vars as standalone
+        # Same Spyre-specific env vars as standalone -- see the notes on the
+        # standalone extraEnvVars above for why the VLLM_SPYRE_* prefix is used,
+        # why USE_CB is set explicitly, and why the FLEX_HDMA_* / CHUNK_LEN /
+        # VLLM_PLUGINS knobs are absent.
         extraEnvVars:
           - name: FLEX_COMPUTE
             value: SENTIENT
@@ -339,10 +344,6 @@ scenario:
             value: PF
           - name: VLLM_SPYRE_PERF_METRIC_LOGGING_ENABLED
             value: "1"
-          - name: FLEX_HDMA_P2PSIZE
-            value: "268435456"
-          - name: FLEX_HDMA_COLLSIZE
-            value: "268435456"
           - name: HF_HUB_DISABLE_XET
             value: "1"
           - name: TORCH_SENDNN_CACHE_ENABLE
@@ -355,8 +356,6 @@ scenario:
             value: "1"
           - name: VLLM_SPYRE_USE_CHUNKED_PREFILL
             value: "1"
-          - name: VLLM_DT_CHUNK_LEN
-            value: "1024"
 
     # =========================================================================
     # WORKLOAD / HARNESS -- Benchmark execution configuration

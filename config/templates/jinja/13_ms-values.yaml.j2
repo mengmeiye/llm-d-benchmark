@@ -354,6 +354,23 @@ decode:
 {{ decode.podSecurityContext | toyaml | indent(4, first=True) }}
 {% endif %}
 
+{# Pod-level extraConfig. The chart splices this into the PodSpec via
+   `llm-d-modelservice.modelPod` (.pdSpec.extraConfig), which is where
+   PodSpec-scoped fields such as `imagePullSecrets` must go -- the
+   container-level `extraConfig` further down lands inside the vllm
+   container, where the kubelet would never read them. #}
+{% set decode_pod_extra = decode.extraPodConfig | default({}, true) %}
+{% if (vllmCommon.pullSecret is defined and vllmCommon.pullSecret) or decode_pod_extra %}
+  extraConfig:
+{% if vllmCommon.pullSecret is defined and vllmCommon.pullSecret %}
+    imagePullSecrets:
+    - name: {{ vllmCommon.pullSecret }}
+{% endif %}
+{% if decode_pod_extra %}
+{{ decode_pod_extra | toyaml | indent(4, first=True) }}
+{% endif %}
+{% endif %}
+
 {# LWS / Multinode specific options #}
 {% if decode.hostIPC is defined %}
   hostIPC: {{ decode.hostIPC | lower }}
@@ -465,10 +482,6 @@ decode:
         {{ decode_net_resource }}: "{{ decode_net_nr }}"
 {% endif %}
     extraConfig:
-{% if vllmCommon.pullSecret is defined and vllmCommon.pullSecret %}
-      imagePullSecrets:
-      - name: {{ vllmCommon.pullSecret }}
-{% endif %}
       startupProbe:
         httpGet:
           path: {{ decode.probes.startup.path }}
@@ -777,6 +790,20 @@ prefill:
 {{ prefill.podSecurityContext | toyaml | indent(4, first=True) }}
 {% endif %}
 
+{# Pod-level extraConfig -- see the decode block above for why
+   `imagePullSecrets` cannot live in the container-level `extraConfig`. #}
+{% set prefill_pod_extra = prefill.extraPodConfig | default({}, true) %}
+{% if (vllmCommon.pullSecret is defined and vllmCommon.pullSecret) or prefill_pod_extra %}
+  extraConfig:
+{% if vllmCommon.pullSecret is defined and vllmCommon.pullSecret %}
+    imagePullSecrets:
+    - name: {{ vllmCommon.pullSecret }}
+{% endif %}
+{% if prefill_pod_extra %}
+{{ prefill_pod_extra | toyaml | indent(4, first=True) }}
+{% endif %}
+{% endif %}
+
 {# LWS / Multinode specific options #}
 {% if prefill.hostIPC is defined %}
   hostIPC: {{ prefill.hostIPC | lower }}
@@ -885,10 +912,6 @@ prefill:
         {{ prefill_net_resource }}: "{{ prefill_net_nr }}"
 {% endif %}
     extraConfig:
-{% if vllmCommon.pullSecret is defined and vllmCommon.pullSecret %}
-      imagePullSecrets:
-      - name: {{ vllmCommon.pullSecret }}
-{% endif %}
       startupProbe:
         httpGet:
           path: {{ prefill.probes.startup.path }}
