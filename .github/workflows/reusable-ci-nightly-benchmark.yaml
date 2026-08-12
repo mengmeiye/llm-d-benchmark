@@ -977,7 +977,7 @@ jobs:
         shell: bash
 
       - name: Display image list for all pods
-        id: infra_debug_info
+        id: guide_image_info
         run: |
           {
               echo -e "POD\tCONTAINER\tIMAGE\tTAG"
