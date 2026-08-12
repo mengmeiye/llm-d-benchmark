@@ -41,7 +41,6 @@ scenario:
       # Enable multinode (LeaderWorkerSet) for sequential pod naming.
       # Required when using contextLengthRanges or vllmVariants.
       # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
-      # TEMPORARY (context-length-routing test) -- revert with the block below.
       multinode:
         enabled: true
 
@@ -94,8 +93,6 @@ scenario:
 
         # Preprocess script -- required for context-length-aware routing.
         # Splits ,,-delimited env vars by pod index and self-labels pods via K8s API.
-        # Uncomment when enabling contextLengthRanges or vllmVariants below.
-        # TEMPORARY (context-length-routing test)
         preprocessScript: "python3 /setup/preprocess/set_llmdbench_environment.py && source $HOME/llmdbench_env.sh"
 
         # These flags control the auto-generated vllm serve command.
@@ -108,8 +105,6 @@ scenario:
           noPrefixCaching: true        # --no-enable-prefix-caching
 
         # Volumes required for preprocess script and kubeconfig (pod self-labeling).
-        # Uncomment when enabling context-length-aware routing.
-        # TEMPORARY (context-length-routing test)
         volumes:
           - name: preprocesses
             type: configMap
@@ -197,9 +192,6 @@ scenario:
       # tokenizer sidecar was removed when the deployment moved to the
       # llm-d-router chart, and the socket it expects is never created.
       # =========================================================================
-      # TEMPORARY (context-length-routing test) -- v: "4" is debug verbosity,
-      # which is what makes the per-request routing decision visible in the EPP
-      # log. Revert to v: "2" (or re-comment the whole block) when done.
       router:
         tokenizer:
           enabled: true
@@ -245,7 +237,6 @@ scenario:
       # from model.*, vllmCommon.flags.*, and decode.vllm.additionalFlags.
       # -------------------------------------------------------------------------
       decode:
-        # TEMPORARY (context-length-routing test) -- one replica per range.
         replicas: 2
 
         # Context-length-aware routing: per-pod labels (one per replica).
@@ -254,12 +245,7 @@ scenario:
         # Also requires the preprocess script (vllmCommon.preprocessScript) for
         # pod self-labeling and ,,-delimited env var splitting.
         # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
-        #
-        # TEMPORARY (context-length-routing test): the commented-out example
-        # ranges are 0-8000 / 8000-32768, but facebook/opt-125m has
-        # max_position_embeddings=2048, so an 8000-token prompt can never be
-        # sent and the second range would be unreachable. These ranges fit the
-        # model so both pods are actually exercised.
+        
         contextLengthRanges:
           - "0-1000"
           - "1000-2048"
@@ -267,9 +253,6 @@ scenario:
         # Per-pod vllm parameter overrides (one per replica).
         # Values are converted to ,,-delimited env vars; the preprocess script
         # selects the right value based on pod index from LWS.
-        # TEMPORARY (context-length-routing test): maxModelLen is 2048 on both
-        # (the model's hard limit); maxNumSeq differs so the two pods are
-        # distinguishable in their startup logs.
         vllmVariants:
           - maxModelLen: 2048
             maxNumSeq: 64
