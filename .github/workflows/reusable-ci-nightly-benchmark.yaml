@@ -896,7 +896,7 @@ jobs:
             export LLMDBENCH_EXTRA_STANDUP_OPERATION_CMD="--no-monitoring $LLMDBENCH_EXTRA_STANDUP_OPERATION_CMD "
             export LLMDBENCH_EXTRA_TEARDOWN_OPERATION_CMD="$LLMDBENCH_EXTRA_TEARDOWN_OPERATION_CMD "
           fi
-          if [[ "$LLMDBENCH_CICD_DEEP_CLEANING" ]]; then
+          if [[ "$LLMDBENCH_CICD_DEEP_CLEANING" == "true" ]]; then
             export LLMDBENCH_EXTRA_TEARDOWN_OPERATION_CMD="$LLMDBENCH_EXTRA_TEARDOWN_OPERATION_CMD --deep"
           fi
           if [[ ! -z $LLMDBENCH_CICD_DETECTED_MODEL ]]; then
@@ -974,6 +974,50 @@ jobs:
           else
             echo "### Unable to obtain debug info"
           fi
+        shell: bash
+
+      - name: Display image list for all pods
+        id: infra_debug_info
+        run: |
+          {
+              echo -e "POD\tCONTAINER\tIMAGE\tTAG"
+              for pod in $(kubectl -n "$NAMESPACE" get pods -o jsonpath='{.items[*].metadata.name}')
+              do
+                  kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{range .spec.containers[*]}{.name}{"\t"}{.image}{"\n"}{end}' \
+                  | while IFS=$'\t' read -r container image
+                  do
+                      [[ -z $container ]] && continue
+                      if [[ $image == *:* && $image != *:*/* ]]
+                      then
+                          tag=${image##*:}
+                          repo=${image%:*}
+                      else
+                          tag="latest"
+                          repo=$image
+                      fi
+                      echo -e "${pod}\t${container}\t${repo}\t${tag}"
+                  done
+              done
+          } | awk -F'\t' '
+          {
+              for (i = 1; i <= NF; i++) {
+                  len = length($i)
+                  if (len > width[i]) width[i] = len
+              }
+              line[NR] = $0
+              cols[NR] = NF
+          }
+          END {
+              for (r = 1; r <= NR; r++) {
+                  n = split(line[r], f, "\t")
+                  out = ""
+                  for (i = 1; i <= n; i++) {
+                      sep = (i < n) ? "  " : ""
+                      out = out sprintf("%-*s%s", width[i], f[i], sep)
+                  }
+                  print out
+              }
+          }'
         shell: bash
 
       - name: Run
