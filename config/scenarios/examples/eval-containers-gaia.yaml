@@ -61,34 +61,41 @@ scenario:
             - ReadWriteOnce
         uriProtocol: hf
 
-        images:
-          vllmOpenai:
-            repository: ghcr.io/llm-d/llm-d-inference-sim
-            tag: latest
-          vllm:
-            repository: ghcr.io/llm-d/llm-d-inference-sim
-            tag: latest
-          # The harness pod runs THIS image: agent + in-pod gateway + grader + otel,
-          # the single-container standalone bundle. Swap for any published
-          # evals/<benchmark>--<agent>-standalone image to run a different eval.
-          benchmark:
-            # codex agent: its web search is client-side, so it works on
-            # non-Anthropic served models (unlike claude-code's server-side one).
-            repository: ghcr.io/exgentic/evals/gaia--codex-standalone
-            tag: v0.1.0
-            pullPolicy: IfNotPresent
+      # NOTE: `images` and `vllmCommon` belong at `common.<key>`, NOT nested
+      # inside `common.storage`. One level deeper they parse as
+      # common.storage.images / common.storage.vllmCommon, which nothing reads,
+      # and the harness silently falls back to images.benchmark from
+      # defaults.yaml (ghcr.io/llm-d/llm-d-benchmark) -- an image with no
+      # /entrypoint.sh and no /usr/local/bin/run, so the harness container exits
+      # 127 within ~20s having produced no task artifacts.
+      images:
+        vllmOpenai:
+          repository: ghcr.io/llm-d/llm-d-inference-sim
+          tag: latest
+        vllm:
+          repository: ghcr.io/llm-d/llm-d-inference-sim
+          tag: latest
+        # The harness pod runs THIS image: agent + in-pod gateway + grader + otel,
+        # the single-container standalone bundle. Swap for any published
+        # evals/<benchmark>--<agent>-standalone image to run a different eval.
+        benchmark:
+          # codex agent: its web search is client-side, so it works on
+          # non-Anthropic served models (unlike claude-code's server-side one).
+          repository: ghcr.io/exgentic/evals/gaia--codex-standalone
+          tag: v0.1.0
+          pullPolicy: IfNotPresent
 
-        vllmCommon:
-          shmMemory: 500Mi
-          volumes:
-            - name: dshm
-              type: emptyDir
-              emptyDir:
-                medium: Memory
-                sizeLimit: 500Mi
-          volumeMounts:
-            - name: dshm
-              mountPath: /dev/shm
+      vllmCommon:
+        shmMemory: 500Mi
+        volumes:
+          - name: dshm
+            type: emptyDir
+            emptyDir:
+              medium: Memory
+              sizeLimit: 500Mi
+        volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
 
     # =========================================================================
     # STANDALONE -- Only applies when standalone.enabled: true
@@ -217,6 +224,20 @@ scenario:
       # runAsUser and serviceAccount are OpenShift-specific.
       # Set them in your --cluster-config file (see docs/openshift-setup.md).
       # A real agent + in-pod gateway runs here, not a load generator -- give it room.
+      extraEnvVars:
+        # Per-task agent wall-clock cap (seconds), read by the image's run-agent.
+        # The image default of 300 truncates a reasoning model mid-task. NOTE this
+        # is PER ATTEMPT: images with 2-attempt grading re-invoke run-agent on a
+        # failed first try, so a task's wall-clock can reach ~2x this value.
+        - name: EVAL_TIMEOUT
+          value: "1500"
+        # GAIA's full set is 165 tasks, most of which need live web search. The
+        # agent's search is client-side, so in a cluster without egress those
+        # tasks fail for connectivity, not model quality. no-search is the 54
+        # tasks answerable without it -- the only subset whose score means
+        # anything here. Drop this to run all 165.
+        - name: EVAL_GAIA_SUBSET
+          value: no-search
       resources:
         cpu: "2"
         memory: 6Gi

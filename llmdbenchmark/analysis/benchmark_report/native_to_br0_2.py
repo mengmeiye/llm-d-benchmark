@@ -1553,6 +1553,57 @@ def import_inference_max(results_file: str) -> BenchmarkReportV02:
     return load_benchmark_report(br_dict)
 
 
+#: Span-name fragments identifying a gateway's per-REQUEST span, one per LLM
+#: call. bifrost names it after the inbound path, which differs per wire:
+#: OpenAI chat/responses (completions, responses), Anthropic (messages), and
+#: Gemini (generatecontent); litellm emits litellm_request. Token usage is NOT
+#: here -- it rides on the provider span ("chat <model>") -- so these names are
+#: used only for counting calls and measuring request latency.
+#:
+#: Lowercase, and matched case-insensitively: Gemini's streaming variant is
+#: ":streamGenerateContent" with a capital G, so a case-sensitive
+#: "generateContent" test silently drops every streamed call. On a 100-task
+#: gemini-cli run that was 738 of 1037 calls (71%), which looks like a quiet
+#: undercount rather than an error.
+AGENTIC_REQUEST_SPAN_NAMES: tuple[str, ...] = (
+    "messages",
+    "completions",
+    "responses",
+    "generatecontent",
+    "litellm_request",
+)
+
+
+def is_agentic_request_span(name: str) -> bool:
+    """True if ``name`` is a gateway per-request span (one per LLM call)."""
+    lowered = name.lower()
+    return any(s in lowered for s in AGENTIC_REQUEST_SPAN_NAMES)
+
+
+def agentic_stat(xs: list[float], units: Units) -> dict | None:
+    """Summarize ``xs`` in the v0.2 ``Statistics`` shape, or None if empty.
+
+    Shared by the per-task converter below and the run-level aggregator in
+    ``llmdbenchmark.analysis.aggregate_eval_containers`` so both report
+    identical numbers. Only the field names the schema's ``Statistics`` model
+    permits -- notably ``p50`` rather than ``median`` -- since that model
+    forbids extras.
+    """
+    if not xs:
+        return None
+    a = np.array(xs, dtype=float)
+    return {
+        "units": units,
+        "mean": float(a.mean()),
+        "stddev": float(a.std()),
+        "min": float(a.min()),
+        "p50": float(np.percentile(a, 50)),
+        "p90": float(np.percentile(a, 90)),
+        "p99": float(np.percentile(a, 99)),
+        "max": float(a.max()),
+    }
+
+
 def import_eval_containers(results_file: str) -> BenchmarkReportV02:
     """Convert eval-containers agentic output into a v0.2 Benchmark Report.
 
@@ -1597,19 +1648,43 @@ def import_eval_containers(results_file: str) -> BenchmarkReportV02:
                 for ss in rs.get("scopeSpans", []):
                     for sp in ss.get("spans", []):
                         name = sp.get("name", "")
-                        # one span per LLM request, across gateways: bifrost emits
-                        # /anthropic/v1/messages or /openai/.../completions; litellm
-                        # emits litellm_request. Skip the child provider span
-                        # (llm.call) so requests aren't double-counted.
-                        if not any(
-                            s in name
-                            for s in (
-                                "messages",
-                                "completions",
-                                "responses",
-                                "litellm_request",
-                            )
+                        attrs = {
+                            a.get("key", ""): a.get("value", {})
+                            for a in sp.get("attributes", [])
+                        }
+
+                        # Token usage rides on the PROVIDER span, not the HTTP
+                        # span. bifrost names it "chat <model>"; the HTTP span
+                        # (/openai/v1/responses, /anthropic/v1/messages) carries
+                        # routing only and no gen_ai.usage.* at all. Selecting by
+                        # attribute presence rather than span name keeps this
+                        # working across gateways instead of hard-coding each
+                        # one's naming. Counted separately from n_calls so a
+                        # provider span never inflates the request count.
+                        #
+                        # Exact keys, not endswith():
+                        # gen_ai.usage.reasoning.output_tokens also ends in
+                        # "output_tokens" and would be double-counted into the
+                        # output total on reasoning models.
+                        for tok_key, prompt_key, target in (
+                            ("gen_ai.usage.input_tokens", "prompt_tokens", "in"),
+                            ("gen_ai.usage.output_tokens", "completion_tokens", "out"),
                         ):
+                            val = attrs.get(tok_key)
+                            if val is None:
+                                # litellm/openai-style flat naming fallback
+                                val = attrs.get(prompt_key)
+                            if val is None:
+                                continue
+                            iv = int(val.get("intValue") or 0)
+                            if target == "in":
+                                in_tok += iv
+                            else:
+                                out_tok += iv
+
+                        # One span per LLM request. Skips the provider span
+                        # ("chat <model>") so requests aren't double-counted.
+                        if not is_agentic_request_span(name):
                             continue
                         n_calls += 1
                         st = int(sp.get("startTimeUnixNano", 0) or 0)
@@ -1618,32 +1693,9 @@ def import_eval_containers(results_file: str) -> BenchmarkReportV02:
                             lats_ms.append((en - st) / 1e6)
                             t_first = st if t_first is None else min(t_first, st)
                             t_last = en if t_last is None else max(t_last, en)
-                        for a in sp.get("attributes", []):
-                            k = a.get("key", "")
-                            iv = int(a.get("value", {}).get("intValue") or 0)
-                            if k.endswith("input_tokens") or k.endswith(
-                                "prompt_tokens"
-                            ):
-                                in_tok += iv
-                            elif k.endswith("output_tokens") or k.endswith(
-                                "completion_tokens"
-                            ):
-                                out_tok += iv
 
     def _stat(xs: list[float]):
-        if not xs:
-            return None
-        a = np.array(xs, dtype=float)
-        return {
-            "units": Units.MS,
-            "mean": float(a.mean()),
-            "stddev": float(a.std()),
-            "min": float(a.min()),
-            "p50": float(np.percentile(a, 50)),
-            "p90": float(np.percentile(a, 90)),
-            "p99": float(np.percentile(a, 99)),
-            "max": float(a.max()),
-        }
+        return agentic_stat(xs, Units.MS)
 
     n = n_calls
     dur_s = (
