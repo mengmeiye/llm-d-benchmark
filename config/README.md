@@ -486,7 +486,7 @@ scenario:
         pluginsCustomConfig:
           my-config.yaml: |
             plugins:
-              - type: tokenizer
+              - type: token-producer
                 parameters:
                   modelName: "${model.name}"
 ```
@@ -996,6 +996,11 @@ scenario:
     # llm-d-router charts; the legacy
     # `inference.networking.x-k8s.io/v1alpha1` is still accepted but
     # deprecated.
+    #
+    # `router.tokenizer.enabled: true` adds the chart's `vllm-render` sidecar
+    # to the EPP pod, serving vLLM's /render endpoints over loopback HTTP on
+    # `router.tokenizer.port` (default 8000); `token-producer` points at it.
+    # `router.tokenizer.modelName` is filled from `model.name` automatically.
     router:
       tokenizer:
         enabled: true
@@ -1006,11 +1011,11 @@ scenario:
             apiVersion: llm-d.ai/v1alpha1
             kind: EndpointPickerConfig
             plugins:
-              - type: tokenizer
+              - type: token-producer
                 parameters:
                   modelName: "${model.name}"
-                  udsTokenizerConfig:
-                    socketFile: /tmp/tokenizer/tokenizer-uds.socket
+                  vllm:
+                    url: http://localhost:8000
               - type: context-length-aware
                 parameters:
                   label: llm-d.ai/context-length-range
@@ -1018,8 +1023,8 @@ scenario:
             schedulingProfiles:
               - name: default
                 plugins:
-                  - pluginRef: tokenizer
-                - pluginRef: context-length-aware
+                  - pluginRef: token-producer
+                  - pluginRef: context-length-aware
 
     # Preprocess script and kubeconfig secret volume are required
     vllmCommon:
@@ -1553,7 +1558,7 @@ All images are defined in `defaults.yaml`. There are two groups: the shared `ima
 | `images.benchmark` | `ghcr.io/llm-d/llm-d-benchmark:auto` | Download job, harness pod, data access pod |
 | `images.routerEndpointPicker` | `ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:auto` | llm-d-router EPP |
 | `images.routingSidecar` | `ghcr.io/llm-d/llm-d-routing-sidecar:auto` | Modelservice routing sidecar (proxy in front of vLLM) |
-| `images.udsTokenizer` | `ghcr.io/llm-d/llm-d-uds-tokenizer:auto` | EPP sidecar (precise-prefix-cache scoring); also used as an init container in some scenarios |
+| `images.udsTokenizer` | `ghcr.io/llm-d/llm-d-uds-tokenizer:auto` | Legacy UDS tokenizer. **No longer wired to `router.tokenizer`** -- the llm-d-router chart runs its own `vllm-render` sidecar, configured via `router.tokenizer.image`. Retained only for scenarios that reference it as an init container via `imageKey: udsTokenizer`. |
 | `images.python` | `python:3.10` | Utility containers |
 | `images.vllmOpenai` | `docker.io/vllm/vllm-openai:auto` | Not currently used by any template (reserved) |
 
@@ -1578,7 +1583,6 @@ Each image key has `repository`, `tag`, and `pullPolicy` sub-fields. The one exc
 | `13_ms-values.yaml.j2` (prefill) | `images.vllm` | Prefill pods in modelservice |
 | `13_ms-values.yaml.j2` (sidecar) | `images.routingSidecar` | Routing sidecar in modelservice |
 | `13_ms-values.yaml.j2` (init containers) | `images.<imageKey>` | Per-init-container, via `imageKey:` (defaults to `images.benchmark`) |
-| `12_router-values.yaml.j2` (tokenizer) | `images.udsTokenizer` | EPP UDS tokenizer (when `router.tokenizer.enabled: true`) |
 | `14_standalone-deployment_yaml.j2` | `standalone.image` | Standalone vLLM container |
 | `14_standalone-deployment_yaml.j2` (launcher) | `standalone.launcher.image` | Standalone launcher container |
 | `19_wva-kustomize.yaml.j2` | `wva.image` | Workload Variant Autoscaler |
@@ -1690,9 +1694,9 @@ scenario:
         tag: v1.2.3
 ```
 
-**Routing sidecar and EPP sidecar:**
+**Routing sidecar:**
 
-These are read directly from `images.routingSidecar` and `images.udsTokenizer` -- override the same way:
+This is read directly from `images.routingSidecar` -- override the same way:
 
 ```yaml
 scenario:
@@ -1700,12 +1704,29 @@ scenario:
     images:
       routingSidecar:
         tag: v0.8.0
-      udsTokenizer:
-        repository: my-registry/uds-tokenizer
-        tag: dev
 ```
 
-There is no per-block image field on `routing.proxy` or `router.tokenizer` -- the `images.*` entry is the single source of truth.
+There is no per-block image field on `routing.proxy` -- the `images.*` entry is the single source of truth.
+
+**EPP tokenizer sidecar:**
+
+`router.tokenizer` is the exception: it is passed through to the llm-d-router
+chart verbatim, so its image is set on the block itself rather than under
+`images.*`. Useful when the chart default (`docker.io/vllm/vllm-openai-cpu`,
+amd64-only) does not match your nodes:
+
+```yaml
+scenario:
+  - name: "my-deployment"
+    modelservice:
+      router:
+        tokenizer:
+          enabled: true
+          image:
+            registry: my-registry
+            repository: vllm-openai-cpu
+            tag: v0.19.1
+```
 
 **Init containers** (`decode.initContainers[*]`, `prefill.initContainers[*]`, `standalone.initContainers[*]`):
 
@@ -1739,6 +1760,48 @@ After standup, the deployed images are recorded in the `llm-d-benchmark-standup-
 ```bash
 oc get configmap llm-d-benchmark-standup-parameters -n <namespace> -o yaml
 ```
+
+---
+
+## Private Registries (`vllmCommon.pullSecret`)
+
+Set `vllmCommon.pullSecret` to the name of an existing pull secret and
+`imagePullSecrets` is added to every pod spec the benchmark renders:
+
+```yaml
+vllmCommon:
+  pullSecret: secret-example  # pragma: allowlist secret
+```
+
+Or without editing the scenario:
+
+```bash
+llmdbenchmark --spec examples/spyre standup --set 'vllmCommon.pullSecret=secret-example'  # pragma: allowlist secret
+```
+
+The secret must already exist in the namespace -- nothing here creates it:
+
+```bash
+oc create secret docker-registry secret-example \
+  --docker-server=<registry-host> \
+  --docker-username=<username> \
+  --docker-password="$REGISTRY_PASSWORD" \
+  -n <namespace>
+```
+
+Covered pod specs: decode and prefill (via the modelservice chart's pod-level
+`extraConfig`), standalone, the model download job and daemonset, the harness
+pod, the harness data-access pod, and the ephemeral pods used by smoketests.
+
+> [!IMPORTANT]
+> This does **not** reach the EPP pod or its `vllm-render` tokenizer sidecar.
+> The llm-d-router chart exposes no `imagePullSecrets` field, so a private
+> `router.tokenizer.image` (or EPP image) needs a different mechanism -- link
+> the secret to the router's service account, or use the cluster-wide pull
+> secret:
+> ```bash
+> oc secrets link <model-id-label> secret-example --for=pull -n <namespace>
+> ```
 
 ---
 

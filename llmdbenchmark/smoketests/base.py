@@ -948,6 +948,67 @@ class BaseSmoketest:
         )
 
     @staticmethod
+    def assert_env_variant_list(
+        pod_env: dict[str, str],
+        var_name: str,
+        expected_values: list,
+        container: str = "vllm",
+        pod_name: str = "",
+    ) -> CheckResult:
+        """Check a ``,,``-delimited per-replica env var built from `vllmVariants`.
+
+        When a role sets `vllmVariants`, `_macros.j2` renders one env var holding
+        every replica's value joined by ``,,`` (e.g.
+        ``VLLM_MAX_MODEL_LEN="8000,,32768"``) rather than a single scalar. The
+        pod template is shared by all replicas, so the list is what lands in the
+        pod spec; the preprocess script (`set_llmdbench_environment.py`) splits
+        it at container start and re-exports the entry matching the pod's LWS
+        index. Comparing the raw spec value against one scalar therefore always
+        fails -- compare against the joined list instead.
+
+        Only the list is verifiable from the pod spec. The per-index selection
+        happens in the running container's shell and leaves no trace in the
+        spec, so the resolved value is surfaced in the message for readability
+        rather than asserted.
+        """
+        loc = (
+            f"pod/{pod_name} container/{container}"
+            if pod_name
+            else f"container/{container}"
+        )
+        # A variant that omits the key renders as an empty segment: the
+        # template maps the attribute without a default and this Jinja
+        # environment is non-strict, so Undefined stringifies to "". Match
+        # that instead of writing the literal "None".
+        expected = ",,".join("" if v is None else str(v) for v in expected_values)
+        actual = pod_env.get(var_name)
+        detail = f"{len(expected_values)} variants, split per pod index at startup"
+        if actual is None:
+            return CheckResult(
+                f"env_{var_name}",
+                False,
+                expected=expected,
+                actual="not set",
+                message=f"{var_name} not set in {loc} env (expected {expected})",
+            )
+        if str(actual) != expected:
+            return CheckResult(
+                f"env_{var_name}",
+                False,
+                expected=expected,
+                actual=str(actual),
+                message=(
+                    f"{var_name}={actual} in {loc} env "
+                    f"(expected {expected} -- {detail})"
+                ),
+            )
+        return CheckResult(
+            f"env_{var_name}",
+            True,
+            message=f"{var_name}={actual} in {loc} env ({detail})",
+        )
+
+    @staticmethod
     def assert_container_exists(containers: list[str], name: str) -> CheckResult:
         """Check that a container named *name* exists in the pod."""
         if name in containers:
@@ -1414,8 +1475,28 @@ class BaseSmoketest:
                     )
                 )
 
+            # `vllmVariants` (context-length-aware routing) overrides the
+            # scalar model.* values with one ,,-joined list per env var --
+            # see assert_env_variant_list and _macros.j2. The gating below
+            # mirrors the template's exactly: maxModelLen is emitted whenever
+            # variants exist, the other two only when the first variant
+            # declares them.
+            variants = role_config.get("vllmVariants") or []
+
             max_model_len = model_config.get("maxModelLen")
-            if max_model_len is not None:
+            if variants:
+                report.add(_tag(self.assert_arg_present(args, "--max-model-len")))
+                report.add(
+                    _tag(
+                        self.assert_env_variant_list(
+                            env,
+                            "VLLM_MAX_MODEL_LEN",
+                            [v.get("maxModelLen") for v in variants],
+                            pod_name=pod_name,
+                        )
+                    )
+                )
+            elif max_model_len is not None:
                 report.add(_tag(self.assert_arg_present(args, "--max-model-len")))
                 report.add(
                     _tag(
@@ -1427,6 +1508,22 @@ class BaseSmoketest:
                         )
                     )
                 )
+
+            for var_name, variant_key in (
+                ("VLLM_MAX_NUM_SEQ", "maxNumSeq"),
+                ("VLLM_MAX_NUM_BATCHED_TOKENS", "maxNumBatchedTokens"),
+            ):
+                if variants and variants[0].get(variant_key) is not None:
+                    report.add(
+                        _tag(
+                            self.assert_env_variant_list(
+                                env,
+                                var_name,
+                                [v.get(variant_key) for v in variants],
+                                pod_name=pod_name,
+                            )
+                        )
+                    )
 
             # --- Additional flags from role config ---
             additional_flags = _nested_get(role_config, "vllm", "additionalFlags") or []

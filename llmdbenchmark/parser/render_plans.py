@@ -1486,11 +1486,49 @@ class RenderPlans:
 
         # --- 6. Tokenizer modelName fallback to model.name.
         tokenizer = router.get("tokenizer") or {}
-        if tokenizer.get("enabled") and not tokenizer.get("modelName"):
-            model_name = (values.get("model") or {}).get("name")
-            if model_name:
-                tokenizer["modelName"] = model_name
-                router["tokenizer"] = tokenizer
+        if tokenizer.get("enabled"):
+            if not tokenizer.get("modelName"):
+                model_name = (values.get("model") or {}).get("name")
+                if model_name:
+                    tokenizer["modelName"] = model_name
+            # The chart mounts its HF cache at /root/.cache/huggingface, which
+            # only works when the container runs as root. Under OpenShift's
+            # restricted SCC the sidecar gets an arbitrary UID whose passwd
+            # entry has HOME=/, so huggingface_hub resolves its cache to
+            # /.cache -- and neither that nor /root (mode 0700) is writable.
+            # The sidecar then dies with PermissionError: '/.cache' and the EPP
+            # pod crashloops. Point HF at a writable path under /tmp instead;
+            # a user-supplied HF_HOME always wins.
+            env = list(tokenizer.get("env") or [])
+            if not any(isinstance(e, dict) and e.get("name") == "HF_HOME" for e in env):
+                # Helm replaces lists rather than merging them, so once we set
+                # `env` we also have to restate the chart's default HF_TOKEN
+                # entry or the gated-model download loses its credentials.
+                if hf.get("enabled") and not any(
+                    isinstance(e, dict) and e.get("name") == "HF_TOKEN" for e in env
+                ):
+                    env.append(
+                        {
+                            "name": "HF_TOKEN",
+                            "valueFrom": {
+                                "secretKeyRef": {
+                                    "name": hf.get("secretName", "llm-d-hf-token"),
+                                    "key": hf.get("tokenKey", "HF_TOKEN"),
+                                }
+                            },
+                        }
+                    )
+                env.append({"name": "HF_HOME", "value": "/tmp/hf-cache"})
+                tokenizer["env"] = env
+            mounts = list(tokenizer.get("volumeMounts") or [])
+            if not any(
+                isinstance(m, dict) and m.get("mountPath") == "/tmp/hf-cache"
+                for m in mounts
+            ):
+                mounts.append({"name": "model-cache", "mountPath": "/tmp/hf-cache"})
+                tokenizer["volumeMounts"] = mounts
+        if tokenizer:
+            router["tokenizer"] = tokenizer
 
         # --- 7. modelServers benchmark defaults (matchLabels + targetPorts).
         model_servers = router.setdefault("modelServers", {})

@@ -41,8 +41,8 @@ scenario:
       # Enable multinode (LeaderWorkerSet) for sequential pod naming.
       # Required when using contextLengthRanges or vllmVariants.
       # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
-      # multinode:
-      #   enabled: true
+      multinode:
+        enabled: true
 
       # -------------------------------------------------------------------------
       # Model Configuration
@@ -93,8 +93,7 @@ scenario:
 
         # Preprocess script -- required for context-length-aware routing.
         # Splits ,,-delimited env vars by pod index and self-labels pods via K8s API.
-        # Uncomment when enabling contextLengthRanges or vllmVariants below.
-        # preprocessScript: "python3 /setup/preprocess/set_llmdbench_environment.py && source $HOME/llmdbench_env.sh"
+        preprocessScript: "python3 /setup/preprocess/set_llmdbench_environment.py && source $HOME/llmdbench_env.sh"
 
         # These flags control the auto-generated vllm serve command.
         # Flags not listed here inherit from defaults.yaml (e.g. allowLongMaxModelLen, serverDevMode).
@@ -106,24 +105,23 @@ scenario:
           noPrefixCaching: true        # --no-enable-prefix-caching
 
         # Volumes required for preprocess script and kubeconfig (pod self-labeling).
-        # Uncomment when enabling context-length-aware routing.
-        # volumes:
-        #   - name: preprocesses
-        #     type: configMap
-        #     configMap:
-        #       name: llm-d-benchmark-preprocesses
-        #       defaultMode: 493  # 0755
-        #   - name: k8s-llmdbench-context
-        #     type: secret
-        #     secret:
-        #       secretName: llmdbench-context
-        #
-        # volumeMounts:
-        #   - name: preprocesses
-        #     mountPath: /setup/preprocess
-        #   - name: k8s-llmdbench-context
-        #     mountPath: /etc/kubeconfig
-        #     readOnly: true
+        volumes:
+          - name: preprocesses
+            type: configMap
+            configMap:
+              name: llm-d-benchmark-preprocesses
+              defaultMode: 493  # 0755
+          - name: k8s-llmdbench-context
+            type: secret
+            secret:
+              secretName: llmdbench-context
+
+        volumeMounts:
+          - name: preprocesses
+            mountPath: /setup/preprocess
+          - name: k8s-llmdbench-context
+            mountPath: /etc/kubeconfig
+            readOnly: true
 
     # =========================================================================
     # STANDALONE -- Only applies when standalone.enabled: true
@@ -181,38 +179,50 @@ scenario:
         className: epponly
 
       # =========================================================================
-      # INFERENCE EXTENSION (EPP) -- Context-length-aware routing with UDS tokenizer
+      # INFERENCE EXTENSION (EPP) -- Context-length-aware routing
       # Uncomment this section along with multinode, contextLengthRanges,
       # preprocessScript, volumes/volumeMounts, and optionally vllmVariants
       # above to enable context-length-aware routing.
       # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
+      #
+      # `router.tokenizer.enabled: true` adds the chart's `vllm-render` sidecar
+      # to the EPP pod, which serves vLLM's /render endpoints over loopback HTTP
+      # on `router.tokenizer.port` (default 8000). The token-producer below must
+      # point at that port. Do NOT use `udsTokenizerConfig` here -- the UDS
+      # tokenizer sidecar was removed when the deployment moved to the
+      # llm-d-router chart, and the socket it expects is never created.
       # =========================================================================
-      # router:
-      #   tokenizer:
-      #     enabled: true
-      #   epp:
-      #     pluginsConfigFile: "context-length-aware-config.yaml"
-      #     flags:
-      #       v: "2"  # use v: "4" for debugging, v: "1" or "2" for benchmarking
-      #     pluginsCustomConfig:
-      #       context-length-aware-config.yaml: |
-      #         apiVersion: llm-d.ai/v1alpha1
-      #         kind: EndpointPickerConfig
-      #         plugins:
-      #           - type: tokenizer
-      #             parameters:
-      #               modelName: "${model.name}"
-      #               udsTokenizerConfig:
-      #                 socketFile: /tmp/tokenizer/tokenizer-uds.socket
-      #           - type: context-length-aware
-      #             parameters:
-      #               label: llm-d.ai/context-length-range
-      #               enableFiltering: true
-      #         schedulingProfiles:
-      #           - name: default
-      #             plugins:
-      #               - pluginRef: tokenizer
-      #               - pluginRef: context-length-aware
+      router:
+        tokenizer:
+          enabled: true
+        epp:
+          pluginsConfigFile: "context-length-aware-config.yaml"
+          flags:
+            v: "4"  # use v: "4" for debugging, v: "1" or "2" for benchmarking
+          pluginsCustomConfig:
+            context-length-aware-config.yaml: |
+              apiVersion: llm-d.ai/v1alpha1
+              kind: EndpointPickerConfig
+              plugins:
+                - type: token-producer
+                  parameters:
+                    modelName: "${model.name}"
+                    vllm:
+                      url: http://localhost:8000
+                - type: decode-filter
+                - type: context-length-aware
+                  parameters:
+                    label: llm-d.ai/context-length-range
+                    enableFiltering: true
+                - type: max-score-picker
+                - type: single-profile-handler
+              schedulingProfiles:
+                - name: default
+                  plugins:
+                    - pluginRef: token-producer
+                    - pluginRef: decode-filter
+                    - pluginRef: context-length-aware
+                    - pluginRef: max-score-picker
 
       # -------------------------------------------------------------------------
       # Prefill Configuration
@@ -227,7 +237,7 @@ scenario:
       # from model.*, vllmCommon.flags.*, and decode.vllm.additionalFlags.
       # -------------------------------------------------------------------------
       decode:
-        # replicas: 1  # default
+        replicas: 2
 
         # Context-length-aware routing: per-pod labels (one per replica).
         # Requires multinode enabled (for LWS sequential pod naming) and
@@ -235,18 +245,19 @@ scenario:
         # Also requires the preprocess script (vllmCommon.preprocessScript) for
         # pod self-labeling and ,,-delimited env var splitting.
         # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
-        # contextLengthRanges:
-        #   - "0-8000"
-        #   - "8000-32768"
+        
+        contextLengthRanges:
+          - "0-1000"
+          - "1000-2048"
 
         # Per-pod vllm parameter overrides (one per replica).
         # Values are converted to ,,-delimited env vars; the preprocess script
         # selects the right value based on pod index from LWS.
-        # vllmVariants:
-        #   - maxModelLen: 8000
-        #     maxNumSeq: 64
-        #   - maxModelLen: 32768
-        #     maxNumSeq: 16
+        vllmVariants:
+          - maxModelLen: 2048
+            maxNumSeq: 64
+          - maxModelLen: 2048
+            maxNumSeq: 16
 
     # =========================================================================
     # WORKLOAD / HARNESS -- Benchmark execution configuration
