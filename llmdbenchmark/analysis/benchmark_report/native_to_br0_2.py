@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import numpy as np
 import yaml
 
+from . import guidellm_native
 from .base import Units, WorkloadGenerator
 from .core import (
     check_file,
@@ -2746,19 +2747,12 @@ def import_guidellm(results_file: str, index: int = 0) -> BenchmarkReportV02:
     br_dict = _populate_benchmark_report_from_envars()
 
     native = get_nested(br_dict, ["scenario", "load", "native"])
-    # If config file was loaded, use that, otherwise extract args from results file
+    # If config file was loaded, use that, otherwise extract config from results file
     if not native.get("config"):
-        native["config"] = data["args"]
+        native["config"] = guidellm_native.report_config(data)
     cfg_id = config_hash(native)
 
-    input_args_list = get_nested(data, ["args", "data"])
-    if len(input_args_list) > 1:
-        sys.stderr.write(
-            "WARNING: Multiple data sources not supported in conversion, will"
-            " only record first source\n"
-        )
-    # Deserialize input arguments
-    input_args = yaml.safe_load(input_args_list[0])
+    input_args = guidellm_native.data_args(data)
 
     isl = {
         "value": input_args.get("prompt_tokens"),
@@ -2788,41 +2782,13 @@ def import_guidellm(results_file: str, index: int = 0) -> BenchmarkReportV02:
         else:
             osl["distribution"] = Distribution.FIXED
 
-    if "source" in input_args:
-        source = LoadSource.SAMPLED
-    else:
-        source = LoadSource.RANDOM
+    source = LoadSource(guidellm_native.source(input_args))
 
-    profile = get_nested(data, ["args", "profile"])
+    rate_qps, concurrency = guidellm_native.rate_and_concurrency(data, results, index)
+    concurrency = _normalize_concurrency(concurrency)
 
-    rate_qps = None
-    concurrency = None
-    if profile in ["async", "constant", "poisson"]:
-        rate_qps = get_nested(data, ["args", "rate"])[index]
-    elif profile in ["concurrent", "throughput"]:
-        concurrency = _normalize_concurrency(
-            int(get_nested(data, ["args", "rate"])[index])
-        )
-
-    prefix = None
-    if "prefix_tokens" in input_args:
-        prefix = {
-            "prefix_len": {
-                "distribution": Distribution.FIXED,
-                "value": input_args.get("prefix_tokens"),
-            },
-            "num_groups": 1,
-            "num_users_per_group": 1,
-            "num_prefixes": input_args.get("prefix_count"),
-        }
-    elif "prefix_buckets" in input_args:
-        sys.stderr.write(
-            "WARNING: prefix_buckets used, not capturing in standardized"
-            " section, as description there is too limited. Utilize native"
-            " section to properly capture.\n"
-        )
-
-    multi_turn = None
+    prefix = guidellm_native.prefix(input_args)
+    multi_turn = guidellm_native.multi_turn(input_args)
 
     # Add to that dict the data from GuideLLM
     update_dict(
@@ -3660,8 +3626,15 @@ def import_guidellm(results_file: str, index: int = 0) -> BenchmarkReportV02:
                                     ],
                                 ),
                             },
+                            # Seconds, not milliseconds: guidellm's other
+                            # latency metrics are natively suffixed `_ms`, but
+                            # `request_latency` is documented as seconds
+                            # (guidellm schemas/request_stats.py) and printed
+                            # under a "Sec" column in guidellm's own summary.
+                            # Labelling it `ms` made TTFT (15.9ms) exceed the
+                            # end-to-end latency (0.24) it is a component of.
                             "request_latency": {
-                                "units": Units.MS,
+                                "units": Units.S,
                                 "mean": get_nested(
                                     results,
                                     [

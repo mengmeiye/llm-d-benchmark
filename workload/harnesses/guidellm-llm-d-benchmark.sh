@@ -11,14 +11,26 @@ pushd "$LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR" > /dev/null  2>&1
 # required", sending operators off to debug the wrong thing. Check the
 # requested profile against what the installed guidellm actually supports
 # before invoking it, so the real cause is reported up front.
-requested_profile=$(yq -r '.profile' ${LLMDBENCH_RUN_WORKSPACE_DIR}/profiles/guidellm/${LLMDBENCH_RUN_EXPERIMENT_HARNESS_WORKLOAD_NAME})
+# guidellm v0.7 nested the scenario under "spec" and made the profile an
+# object keyed by "kind"; read the pre-v0.7 flat ".profile" as a fallback.
+requested_profile=$(yq -r '.spec.profile.kind // .profile // ""' ${LLMDBENCH_RUN_WORKSPACE_DIR}/profiles/guidellm/${LLMDBENCH_RUN_EXPERIMENT_HARNESS_WORKLOAD_NAME})
 if [[ -n "$requested_profile" ]] && [[ "$requested_profile" != "null" ]]; then
+  # v0.7 replaced the ProfileType/StrategyType literals with pydantic class
+  # registries; try those first, then fall back to the old literals so the
+  # guard keeps working against either version.
   supported_profiles=$(python3 -c "
+from guidellm.benchmark.schemas import ProfileArgs
+from guidellm.scheduler import SchedulingStrategy
+print(' '.join(sorted(set(ProfileArgs.registry) | set(SchedulingStrategy.registry))))
+" 2>/dev/null)
+  if [[ -z "$supported_profiles" ]]; then
+    supported_profiles=$(python3 -c "
 from guidellm.benchmark import ProfileType
 from guidellm.scheduler import StrategyType
 from guidellm.utils.typing import get_literal_vals
 print(' '.join(sorted(get_literal_vals(ProfileType | StrategyType))))
 " 2>/dev/null)
+  fi
   if [[ -n "$supported_profiles" ]] && [[ " $supported_profiles " != *" $requested_profile "* ]]; then
     echo "ERROR: workload profile '${LLMDBENCH_RUN_EXPERIMENT_HARNESS_WORKLOAD_NAME}' requests profile '${requested_profile}', which the installed guidellm ($(guidellm --version 2>/dev/null)) does not support. Supported profiles: ${supported_profiles}. If '${requested_profile}' is a newer guidellm feature (e.g. 'replay'), the benchmark image's guidellm pin needs to be updated to a version/commit that supports it." >&2
     exit 1
