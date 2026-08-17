@@ -228,8 +228,22 @@ python3 -m llmdbenchmark.analysis.benchmark_report.cli \
 * `-w, --workload-generator`: Specifies the harness generator. Must be one of: `'guidellm'`, `'inferencemax'`, `'inference-perf'`, `'vllm-benchmark'`, `'nop'`.
 * `-b, --br-version`: Target benchmark report version (defaults to `0.1`; use `0.2` for the standard version, or `0.2.1` to additionally capture the multimodal payload statistics that `inference-perf` emits).
 * `-f, --force`: Overwrites the output file if it already exists.
+* `-i, --index`: Convert only the benchmark at this index, for a results file holding several (see [Multi-benchmark results files](#multi-benchmark-results-files-guidellm) below). Omit it to convert all of them.
 * `results_file` *(Positional)*: Path to the raw native results file to convert. (e.g. For `inference-perf`, this must contain `"stage_"` in its filename, e.g., `stage_0_lifecycle_metrics.json`).
 * `output_file` *(Positional, Optional)*: Destination for the converted report. If omitted, the YAML output is printed directly to `stdout`.
+
+Keep the two positionals together rather than separating them with a flag. On Python 3.11, argparse cannot match a positional that follows an optional, so `output_file` is rejected as an unrecognized argument; Python 3.12 and later parse it correctly. The harness pod image is Python 3.13, but `requires-python` is `>=3.11`, so a local checkout may hit this:
+
+```bash
+# Portable: positionals adjacent, either before or after the flags.
+... cli -w guidellm -b 0.2 results.json benchmark_report.yaml
+... cli results.json benchmark_report.yaml -w guidellm -b 0.2
+
+# Python 3.11: "error: unrecognized arguments: benchmark_report.yaml"
+... cli results.json -w guidellm -b 0.2 benchmark_report.yaml
+```
+
+The output is always YAML, whatever the output filename's extension. To write JSON, use `export_json()` from the Python API instead ([Creating a `BenchmarkReport`](#creating-a-benchmarkreport)); a report's YAML can also be converted after the fact with `yq -o=json`.
 
 #### Example
 To convert a raw `stage_0_lifecycle_metrics.json` results file from an `inference-perf` run and save the v0.2 report to `benchmark_report_v02.yaml`:
@@ -243,6 +257,28 @@ python3 -m llmdbenchmark.analysis.benchmark_report.cli \
 ```
 
 ---
+
+#### Multi-benchmark Results Files (GuideLLM)
+
+GuideLLM writes a single `results.json` holding every benchmark of a run -- one per profile stage, so a `constant` profile with `rate: [2, 4]` yields two. A benchmark report describes one benchmark, so the CLI writes one report per stage, inserting the index before the extension of the name given:
+
+```bash
+# Writes benchmark_report_0.yaml and benchmark_report_1.yaml
+python3 -m llmdbenchmark.analysis.benchmark_report.cli \
+  -w guidellm -b 0.2 results.json benchmark_report.yaml
+```
+
+With no output file, all of them are printed to `stdout`, each preceded by a `# Benchmark <n> of <total>` comment.
+
+Pass `-i` / `--index` to convert a single stage instead. The report is then written to the given filename unchanged, with no index suffix:
+
+```bash
+# Writes benchmark_report.yaml, for the first stage only
+python3 -m llmdbenchmark.analysis.benchmark_report.cli \
+  -w guidellm -b 0.2 -i 0 results.json benchmark_report.yaml
+```
+
+Which stage a report came from is recorded in `scenario.load.standardized.stage`, alongside the `rate_qps` or `concurrency` that stage actually ran at.
 
 #### Session Lifecycle Files (Inference-Perf)
 For `inference-perf` session lifecycle files (`*_session_lifecycle_metrics.json`), pass the `-s` / `--session` flag:

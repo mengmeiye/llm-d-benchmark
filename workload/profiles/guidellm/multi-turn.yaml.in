@@ -18,8 +18,9 @@ spec:
     prompt_tokens: 128
     output_tokens: 128
     turns: 5
-    prefix_tokens: 10000
-    prefix_count: 1024  # ideally it should be 2*concurrency
+    prefix_buckets:
+    - prefix_tokens: 10000
+      prefix_count: 1024  # ideally it should be 2*concurrency
   constraints:
   - kind: max_requests
 benchmarks:
