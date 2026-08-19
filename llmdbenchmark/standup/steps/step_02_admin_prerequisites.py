@@ -16,9 +16,10 @@ from llmdbenchmark.executor.command import CommandExecutor
 _AGENTGATEWAY_SCC_NAME = "llmdbench-agentgateway"
 
 GATEWAY_API_GROUPS = ("gateway.networking.k8s.io",)
-GATEWAY_API_EXTENSION_GROUPS = (
-    "inference.networking.k8s.io",
-    "inference.networking.x-k8s.io",
+
+GATEWAY_API_EXTENSION_CRDS = (
+    "inferencepools.inference.networking.k8s.io",
+    "inferencepoolimports.inference.networking.x-k8s.io",
 )
 
 AGENTGATEWAY_CRDS = [
@@ -475,8 +476,8 @@ class AdminPrerequisitesStep(Step):
             ("apply", "--dry-run=client", "-f", ext_url, "-o", "yaml"),
             "Gateway API inference extension",
         )
-        installed_extension_crds = _crds_in_groups(
-            existing_crds, GATEWAY_API_EXTENSION_GROUPS
+        installed_extension_crds = sorted(
+            _crd_names(existing_crds) & set(GATEWAY_API_EXTENSION_CRDS)
         )
 
         if not expected_crds:
