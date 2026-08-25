@@ -39,13 +39,8 @@ from llmdbenchmark.agent import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-EXAMPLE_REPORT = (
-    PROJECT_ROOT
-    / "llmdbenchmark"
-    / "analysis"
-    / "benchmark_report"
-    / "br_v0_2_example.yaml"
-)
+BR_DIR = PROJECT_ROOT / "benchmark-report" / "llmd_benchmark_report"
+EXAMPLE_REPORT = BR_DIR / "br_v0_2_example.yaml"
 
 
 def _write_report(tmp_path: Path, name: str, data: dict) -> Path:
@@ -240,13 +235,7 @@ def test_missing_throughput_yields_diagnostic(tmp_path):
 
 
 def test_v01_report_yields_diagnostic_not_exception():
-    v01_report = (
-        PROJECT_ROOT
-        / "llmdbenchmark"
-        / "analysis"
-        / "benchmark_report"
-        / "br_v0_1_example.yaml"
-    )
+    v01_report = BR_DIR / "br_v0_1_example.yaml"
     gate = SloGate(metric=SloMetric.TIME_TO_FIRST_TOKEN, threshold=0.1, units="s")
     result = score_slo_goodput([v01_report], [gate])
     assert result.reports[0].verdict == "indeterminate"
