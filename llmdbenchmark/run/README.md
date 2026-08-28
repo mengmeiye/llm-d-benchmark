@@ -149,7 +149,19 @@ Steps are registered in `steps/__init__.py` via `get_run_steps()`:
 | 10 | `UploadResultsStep` | Upload results to cloud storage (GCS/S3) |
 | 11 | `RunCleanupPostStep` | Delete harness pods and ConfigMaps |
 
-Note: Step 12 (analyze) runs before step 10 (upload) so analysis artifacts are included in the upload.
+Note: Step 12 (analyze) runs before step 10 (upload) so analysis artifacts are included in the
+upload. Compression happens inside step 07, on the PVC, before the results are collected --
+nothing is compressed on the driver.
+
+Step 12 defers per-result-set analysis to the harness pod: where a harness ships an
+analyzer, the pod builds its reports, summary and plots before the results are collected,
+so collection is a pure transfer. The driver pass remains the fallback for a result set
+the pod did not analyse -- an older image, a harness with no analyzer, or one that failed.
+
+It still runs the work no single pod can: the cross-treatment comparison (which spans
+result directories) and the `eval-containers` run-level roll-up (which spans task
+directories). Both read their inputs out of the archive rather than requiring a plain
+copy.
 
 ## Common Patterns
 
