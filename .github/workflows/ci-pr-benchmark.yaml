@@ -2,6 +2,7 @@ name: CI - PR Benchmark Run
 
 on:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   # -- Unit tests (no cluster needed) --
@@ -48,9 +49,9 @@ jobs:
       backend_type: X
       infra_provider: X
       connector: X
-      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number }}
+      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number || github.run_id }}
       helm_release: lmdbenchcicdr
-      workspace_dir: tmp/cicd-sa-${{ github.event.number }}
+      workspace_dir: tmp/cicd-sa-${{ github.event.number || github.run_id }}
       bucket_project: llm-d-scale
       bucket_provider: none
       bucket_path: /tmp/llmdbenchcicd
@@ -79,9 +80,9 @@ jobs:
       backend_type: X
       infra_provider: X
       connector: X
-      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number }}
+      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number || github.run_id }}
       helm_release: lmdbenchcicdr
-      workspace_dir: tmp/cicd-sa-${{ github.event.number }}
+      workspace_dir: tmp/cicd-sa-${{ github.event.number || github.run_id }}
       bucket_project: llm-d-scale
       bucket_provider: none
       bucket_path: /tmp/llmdbenchcicd
@@ -107,9 +108,9 @@ jobs:
       backend_type: X
       infra_provider: X
       connector: X
-      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number }}
+      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number || github.run_id }}
       helm_release: lmdbenchcicdr
-      workspace_dir: tmp/cicd-sa-${{ github.event.number }}
+      workspace_dir: tmp/cicd-sa-${{ github.event.number || github.run_id }}
       bucket_project: llm-d-scale
       bucket_provider: none
       bucket_path: /tmp/llmdbenchcicd
@@ -135,9 +136,9 @@ jobs:
       backend_type: X
       infra_provider: X
       connector: X
-      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number }}
+      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number || github.run_id }}
       helm_release: lmdbenchcicdr
-      workspace_dir: tmp/cicd-sa-${{ github.event.number }}
+      workspace_dir: tmp/cicd-sa-${{ github.event.number || github.run_id }}
       bucket_project: llm-d-scale
       bucket_provider: none
       bucket_path: /tmp/llmdbenchcicd
@@ -163,9 +164,9 @@ jobs:
       backend_type: X
       infra_provider: X
       connector: X
-      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number }}
+      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number || github.run_id }}
       helm_release: lmdbenchcicdr
-      workspace_dir: tmp/cicd-sa-${{ github.event.number }}
+      workspace_dir: tmp/cicd-sa-${{ github.event.number || github.run_id }}
       bucket_project: llm-d-scale
       bucket_provider: none
       bucket_path: /tmp/llmdbenchcicd
@@ -191,9 +192,9 @@ jobs:
       backend_type: vllm
       infra_provider: base
       connector:
-      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number }}
+      cluster_namespace: llmdbenchcicd-sa-${{ github.event.number || github.run_id }}
       helm_release: lmdbenchcicdr
-      workspace_dir: tmp/cicd-sa-${{ github.event.number }}
+      workspace_dir: tmp/cicd-sa-${{ github.event.number || github.run_id }}
       bucket_project: llm-d-scale
       bucket_provider: none
       bucket_path: /tmp/llmdbenchcicd
