@@ -54,14 +54,14 @@ generation (and plan) time.
 
 | Dependency | Current Pin | Pin Type | File Location | Upstream Repo |
 |---|---|---|---|---|
-| **benchmark** | `nightly` | tag | `config/templates/values/defaults.yaml` line 382 (`images.benchmark`) | [llm-d/llm-d-benchmark](https://github.com/llm-d/llm-d-benchmark) (`ghcr.io/llm-d/llm-d-benchmark`) |
-| **prism** | `latest` | tag | `config/templates/values/defaults.yaml` line 405 (`images.prism`) | [llm-d/llm-d-prism](https://github.com/llm-d/llm-d-prism) (`ghcr.io/llm-d/llm-d-prism`) |
-| **python** | `3.10` | tag | `config/templates/values/defaults.yaml` line 436 (`images.python`) | [Docker Hub: python](https://hub.docker.com/_/python) (`python`) |
-| **routerEndpointPicker** | `v0.11.0` | tag | `config/templates/values/defaults.yaml` line 413 (`images.routerEndpointPicker`) | [llm-d/llm-d-router](https://github.com/llm-d/llm-d-router) (`ghcr.io/llm-d/llm-d-router-endpoint-picker`) |
-| **routingSidecar** | `v0.11.0` | tag | `config/templates/values/defaults.yaml` line 419 (`images.routingSidecar`) | [llm-d/llm-d-router](https://github.com/llm-d/llm-d-router) (`ghcr.io/llm-d/llm-d-router-disagg-sidecar`) |
-| **udsTokenizer** | `v0.30.0` | tag | `config/templates/values/defaults.yaml` line 425 (`images.udsTokenizer`) | [vllm-project/vllm](https://github.com/vllm-project/vllm) (`docker.io/vllm/vllm-openai`) |
-| **vllm** | `v0.30.0` | tag | `config/templates/values/defaults.yaml` line 388 (`images.vllm`) | [vllm-project/vllm](https://github.com/vllm-project/vllm) (`docker.io/vllm/vllm-openai`) |
-| **vllmOpenai** | `v0.30.0` | tag | `config/templates/values/defaults.yaml` line 399 (`images.vllmOpenai`) | [vllm-project/vllm](https://github.com/vllm-project/vllm) (`docker.io/vllm/vllm-openai`) |
+| **benchmark** | `nightly` | tag | `config/templates/values/defaults.yaml` line 381 (`images.benchmark`) | [llm-d/llm-d-benchmark](https://github.com/llm-d/llm-d-benchmark) (`ghcr.io/llm-d/llm-d-benchmark`) |
+| **prism** | `latest` | tag | `config/templates/values/defaults.yaml` line 404 (`images.prism`) | [llm-d/llm-d-prism](https://github.com/llm-d/llm-d-prism) (`ghcr.io/llm-d/llm-d-prism`) |
+| **python** | `3.10` | tag | `config/templates/values/defaults.yaml` line 435 (`images.python`) | [Docker Hub: python](https://hub.docker.com/_/python) (`python`) |
+| **routerEndpointPicker** | `v0.11.0` | tag | `config/templates/values/defaults.yaml` line 412 (`images.routerEndpointPicker`) | [llm-d/llm-d-router](https://github.com/llm-d/llm-d-router) (`ghcr.io/llm-d/llm-d-router-endpoint-picker`) |
+| **routingSidecar** | `v0.10.0` | tag | `config/templates/values/defaults.yaml` line 418 (`images.routingSidecar`) | [llm-d/llm-d-router](https://github.com/llm-d/llm-d-router) (`ghcr.io/llm-d/llm-d-router-disagg-sidecar`) |
+| **udsTokenizer** | `v0.30.0` | tag | `config/templates/values/defaults.yaml` line 424 (`images.udsTokenizer`) | [vllm-project/vllm](https://github.com/vllm-project/vllm) (`docker.io/vllm/vllm-openai`) |
+| **vllm** | `v0.30.0` | tag | `config/templates/values/defaults.yaml` line 387 (`images.vllm`) | [vllm-project/vllm](https://github.com/vllm-project/vllm) (`docker.io/vllm/vllm-openai`) |
+| **vllmOpenai** | `v0.30.0` | tag | `config/templates/values/defaults.yaml` line 398 (`images.vllmOpenai`) | [vllm-project/vllm](https://github.com/vllm-project/vllm) (`docker.io/vllm/vllm-openai`) |
 
 
 ## Python Package Dependencies (declared)
