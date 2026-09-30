@@ -102,8 +102,12 @@ scenario:
       launcher:
         # The launcher process IS the engine on this path, so this is its vLLM
         # flag string, verbatim -- the FMA equivalent of an `engine.command`.
-        # The capacity numbers are written as references to the same `model.*`
-        # fields the compared arm's command uses, so the two arms cannot desync.
+        # The capacity numbers are references because this stack has no
+        # `vllm serve` line for them to be read off: the `model:` block above is
+        # their single source, and the pre-deploy capacity check and the workload
+        # profile read the same fields. Re-tuning a number there moves the flag
+        # with it. (This does NOT keep the two FMA arms in step -- warmstart and
+        # hotstart are separate files. Change one, check the other.)
         # --kv-cache-memory caps KV so sleep-mode leaves headroom for sampler
         # warmup (avoids OOM); re-tune per model/GPU if changed.
         options: >-

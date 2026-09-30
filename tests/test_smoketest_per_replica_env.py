@@ -12,7 +12,7 @@ different value per replica writes a ``,,``-joined list in
           value: "2048,,32768"
       engine:
         command: |
-          vllm serve $MODEL_SERVE_REF --port 8200 --max-model-len $MY_MAX_LEN
+          vllm serve $MODEL_NAME --port 8200 --max-model-len $MY_MAX_LEN
 
 The whole list is what lands in the pod spec; ``set_llmdbench_environment.py``
 splits it at container start and re-exports the entry matching the pod's LWS
@@ -39,12 +39,27 @@ import types
 
 import pytest
 
+
 # Stub planner so we can import smoketest modules (see
 # test_smoketest_inference.py for the same pattern + rationale).
+def _stub_attr(name: str):
+    """Any real attribute is a no-op callable; dunders must still fail.
+
+    ``inspect.getsourcefile()`` does ``module.__file__.endswith(...)``, and
+    pydantic's docstring extraction walks ``sys.modules`` to get there. A stub
+    that answers ``__file__`` with a callable turns an unrelated later
+    collection into ``AttributeError: 'function' object has no attribute
+    'endswith'`` -- so the suite passes or fails on filename sort order.
+    """
+    if name.startswith("__") and name.endswith("__"):
+        raise AttributeError(name)
+    return lambda *a, **kw: None
+
+
 if "planner" not in sys.modules:
     planner_stub = types.ModuleType("planner")
     capacity_stub = types.ModuleType("planner.capacity_planner")
-    capacity_stub.__getattr__ = lambda name: lambda *a, **kw: None  # type: ignore[attr-defined]
+    capacity_stub.__getattr__ = _stub_attr  # type: ignore[attr-defined]
     sys.modules["planner"] = planner_stub
     sys.modules["planner.capacity_planner"] = capacity_stub
 
@@ -135,7 +150,7 @@ class TestAssertEnvVariantList:
 #: The command the scenario states. Written the way a user would: engine
 #: parameters inline, the per-replica one behind an env var they named.
 DECODE_COMMAND = (
-    "vllm serve $MODEL_SERVE_REF \\\n"
+    "vllm serve $MODEL_NAME \\\n"
     "  --port 8200 \\\n"
     "  --max-model-len $MY_MAX_LEN \\\n"
     "  --block-size 16\n"

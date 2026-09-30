@@ -17,9 +17,7 @@ def _ready_cond(ts):
     return SimpleNamespace(type="Ready", status="True", last_transition_time=ts)
 
 
-def _pod(
-    container_started_at, ready_at, container_name="vllm-standalone-qwen-qwen3-4b"
-):
+def _pod(container_started_at, ready_at, container_name="modelserver"):
     running = SimpleNamespace(started_at=container_started_at)
     state = SimpleNamespace(running=running)
     cs = SimpleNamespace(name=container_name, state=state)
@@ -37,7 +35,7 @@ def _make_info(pod):
         v1=v1,
         namespace="ns",
         pod_name="p",
-        container_name="vllm-standalone-qwen-qwen3-4b",
+        container_name="modelserver",
         timeout=5.0,
     )
 
@@ -52,7 +50,7 @@ def test_returns_elapsed_ready_minus_container_start():
 def test_zero_when_no_running_container():
     ready = datetime(2026, 1, 1, 0, 0, 42, tzinfo=timezone.utc)
     running = SimpleNamespace(running=None)
-    cs = SimpleNamespace(name="vllm-standalone-qwen-qwen3-4b", state=running)
+    cs = SimpleNamespace(name="modelserver", state=running)
     status = SimpleNamespace(container_statuses=[cs], conditions=[_ready_cond(ready)])
     info = _make_info(SimpleNamespace(status=status))
     assert info.get_container_start() == 0.0

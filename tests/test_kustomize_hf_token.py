@@ -31,6 +31,11 @@ if "planner.capacity_planner" not in sys.modules:
 
     class _PermissiveModule(types.ModuleType):
         def __getattr__(self, name: str):  # type: ignore[override]
+            # Dunders must still raise: inspect.getsourcefile() does
+            # `module.__file__.endswith(...)`, so answering `__file__` with a
+            # class breaks an unrelated later collection.
+            if name.startswith("__") and name.endswith("__"):
+                raise AttributeError(name)
             return type(name, (), {})
 
     sys.modules.setdefault("planner", _PermissiveModule("planner"))

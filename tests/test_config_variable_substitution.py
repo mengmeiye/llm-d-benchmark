@@ -50,20 +50,20 @@ class TestSubstituteConfigVariables:
         """Shell variables in an engine command must reach the container intact.
 
         The command is passed through verbatim, so the only thing this pass may
-        touch is a dotted ``${a.b}`` reference. ``$MODEL_SERVE_REF`` (exported
+        touch is a dotted ``${a.b}`` reference. ``$MODEL_NAME`` (exported
         into every serving pod) and ``$LWS_WORKER_INDEX`` (set by LeaderWorkerSet)
         resolve at pod start, not at render time.
         """
         values = {
             "model": {"name": "test-model"},
             "field": (
-                "vllm serve $MODEL_SERVE_REF --served-model-name ${model.name} "
+                "vllm serve $MODEL_NAME --served-model-name ${model.name} "
                 "--data-parallel-rank $LWS_WORKER_INDEX"
             ),
         }
         result = renderer._substitute_config_variables(values)
         assert result["field"] == (
-            "vllm serve $MODEL_SERVE_REF --served-model-name test-model "
+            "vllm serve $MODEL_NAME --served-model-name test-model "
             "--data-parallel-rank $LWS_WORKER_INDEX"
         )
 

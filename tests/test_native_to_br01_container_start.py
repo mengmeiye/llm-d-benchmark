@@ -16,7 +16,7 @@ from llmdbenchmark.analysis.benchmark_report.native_to_br0_1 import import_nop
 def _nop_results(include_container_start=True):
     """Minimal nop results dict carrying one vLLM metric."""
     vllm_metric = {
-        "name": "vllm-standalone-x",
+        "name": "standalone-x",
         "pod_start": 125.0,
         "vllm_start_timestamp": 1000.0,
         "vllm_ready_timestamp": 1079.0,

@@ -504,6 +504,12 @@ cannot cover:
   stack states its own `model.name`; the shared command names the stack.
 - **A value llm-d-benchmark derives, which a scenario therefore cannot write.**
   `model.idLabel` is a `{first8}-{sha8}-{last8}` hash of the model id.
+- **A stack with no engine command at all.** Fast model actuation runs the
+  launcher process as the engine, so there is no `vllm serve` line for the
+  capacity check and the workload profile to read their numbers off. Those
+  stacks state `model.maxModelLen` / `blockSize` / `gpuMemoryUtilization` in
+  the `model:` block and `fma.launcher.options` references them, which is the
+  first case with the direction reversed: the non-command field is the source.
 
 If a reference does not fall into one of those, write the value out instead.
 
@@ -772,10 +778,20 @@ hardware is written out, literally, in a scenario for that hardware
 [examples/cpu.yaml](scenarios/examples/cpu.yaml)). A substitution point per
 difference is how a command stops saying what the engine will do.
 
-| Reference | Resolved | Example |
-|---|---|---|
-| `${dotted.path}` | Render time, against the merged plan | `${model.idLabel}`, `${namespace.name}` |
-| `$(VAR)` / `$VAR` | Pod start, from the container env | `$(POD_IP)`, `$(ENGINE_PORT)`, `$(MODEL_NAME)`, and anything in `extraEnvVars` |
+| Reference | Resolved by | Works without a shell? | Example |
+|---|---|---|---|
+| `${dotted.path}` | llm-d-benchmark, at render time | yes -- it is gone before the pod exists | `${model.idLabel}`, `${namespace.name}` |
+| `$(VAR)` | the kubelet, expanding `args` from the container's own env | yes | `$(POD_IP)`, `$(ENGINE_PORT)`, `$(MODEL_NAME)`, and anything in `extraEnvVars` |
+| `$VAR` | the shell the command runs under | **no** | same variables, but only where `modelCommand` gives the container a shell |
+
+Only the first row is llm-d-benchmark's own: the substitution regex requires at
+least one dot precisely so the other two pass through untouched.
+
+Prefer `$(VAR)` to `$VAR`. Under `modelCommand: imageDefault` -- the distroless
+path, no shell in the image -- `$(VAR)` still expands and `$VAR` reaches the
+engine as those literal characters. And on the shell path the failure is worse
+than silent: a `$(VAR)` the kubelet cannot resolve is left as-is, and the shell
+then reads it as command substitution.
 
 So a NIXL connector, and a ZMQ event publisher whose topic has to identify the
 publishing pod, both come out of one command line:

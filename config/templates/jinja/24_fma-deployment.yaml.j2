@@ -51,10 +51,13 @@ spec:
    `fma.launcher.options`, passed through verbatim, exactly as `engine.command`
    is passed through verbatim everywhere else. Nothing here assembles flags.
 
-   Write the numbers an FMA arm has to share with the arm it is compared against
-   as `${model.maxModelLen}`, `${model.blockSize}`, `${model.gpuMemoryUtilization}`
-   and they cannot desync. There is no command here for those to be read off, so
-   this is the one path that states them in the scenario's `model:` block.
+   There is no command here for `model.maxModelLen`, `model.blockSize` and
+   `model.gpuMemoryUtilization` to be read off, so this is the one path that
+   states them in the scenario's own `model:` block. Write them into the flag
+   string as `${model.maxModelLen}` and friends and that block stays their single
+   source, shared with the pre-deploy capacity check and the workload profile.
+   It does not tie an FMA arm to the arm it is compared against -- those are
+   separate scenario files.
 
    `--model` is the repo ID, not a path: HF_HUB_CACHE above points at the hub
    cache the download job staged on the PVC, so the ID loads those bytes. It has

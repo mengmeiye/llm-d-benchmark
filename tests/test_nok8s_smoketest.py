@@ -25,12 +25,27 @@ from unittest.mock import MagicMock
 
 import pytest
 
+
 # Stub planner so we can import smoketest modules (see
 # test_smoketest_inference.py for the same pattern + rationale).
+def _stub_attr(name: str):
+    """Any real attribute is a no-op callable; dunders must still fail.
+
+    ``inspect.getsourcefile()`` does ``module.__file__.endswith(...)``, and
+    pydantic's docstring extraction walks ``sys.modules`` to get there. A stub
+    that answers ``__file__`` with a callable turns an unrelated later
+    collection into ``AttributeError: 'function' object has no attribute
+    'endswith'`` -- so the suite passes or fails on filename sort order.
+    """
+    if name.startswith("__") and name.endswith("__"):
+        raise AttributeError(name)
+    return lambda *a, **kw: None
+
+
 if "planner" not in sys.modules:
     planner_stub = types.ModuleType("planner")
     capacity_stub = types.ModuleType("planner.capacity_planner")
-    capacity_stub.__getattr__ = lambda name: lambda *a, **kw: None  # type: ignore[attr-defined]
+    capacity_stub.__getattr__ = _stub_attr  # type: ignore[attr-defined]
     sys.modules["planner"] = planner_stub
     sys.modules["planner.capacity_planner"] = capacity_stub
 

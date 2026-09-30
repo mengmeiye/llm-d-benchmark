@@ -31,7 +31,7 @@ def _scalar(value):
 
 def _metrics_metadata(pod_start, container_start):
     return {
-        "name": "vllm-standalone-qwen-qwen3-4b",
+        "name": "standalone-qwen-qwen3-4b",
         "pod_start": _scalar(pod_start),
         "container_start": _scalar(container_start),
         "vllm_start_timestamp": _scalar(0.0),
