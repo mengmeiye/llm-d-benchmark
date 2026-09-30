@@ -81,7 +81,7 @@ def _build_overrides(
     """Build --overrides args for ephemeral curl pods (imagePullSecrets, serviceAccount)."""
     overrides: dict = {}
     if plan_config:
-        pull_secret = plan_config.get("vllmCommon", {}).get("pullSecret", "")
+        pull_secret = plan_config.get("engine", {}).get("pullSecret", "")
         if pull_secret:
             overrides.setdefault("spec", {})["imagePullSecrets"] = [
                 {"name": pull_secret}
@@ -941,9 +941,8 @@ def reset_caches_pods(
     warning.
 
     These reset endpoints only exist when the vLLM server was launched with
-    ``VLLM_SERVER_DEV_MODE=1`` (the repo default via
-    ``vllmCommon.flags.serverDevMode``); a scenario that turns it off gets
-    a 404. All failures here are non-fatal: this returns a list of warning
+    ``VLLM_SERVER_DEV_MODE=1``, which a scenario sets as a role
+    ``extraEnvVars`` entry; a stack that does not set it gets a 404. All failures here are non-fatal: this returns a list of warning
     strings (also logged if *logger* is given) and never raises, so a
     failed reset never aborts a benchmark run.
     """

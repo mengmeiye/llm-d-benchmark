@@ -504,15 +504,23 @@ class CommandExecutor:
                 crash_details = ", ".join(
                     f"{p.name[:30]}={p.summary}" for p in crashing
                 )
+                # The state token says to stop waiting; it does not say what to
+                # fix. These lines name the container, the image and whatever the
+                # kubelet said -- the pod is deleted with the failed deploy, so
+                # this is the only place that evidence survives.
+                reports = [line for pod in crashing for line in pod.crash_report]
                 self.logger.log_error(
                     f"❌ {desc}: pod(s) in terminal failure state: {crash_details}"
                 )
+                for line in reports:
+                    self.logger.log_error(f"   {line}")
                 return CommandResult(
                     command=cmd_repr,
                     exit_code=1,
                     stderr=(
                         f"Pod(s) in terminal failure state: {crash_details}. "
-                        f"Aborting wait for {desc}.{self._restart_budget_note()}"
+                        + (f"{'; '.join(reports)}. " if reports else "")
+                        + f"Aborting wait for {desc}.{self._restart_budget_note()}"
                     ),
                 )
 

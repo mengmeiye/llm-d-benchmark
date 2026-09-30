@@ -55,16 +55,34 @@ The rendered list is passed to the harness pod and saved with the processed
 metrics, so later analysis uses the same selection. Metrics without built-in
 display metadata receive a generated title, filename, and report key.
 
-| Environment Variable | Default | Description |
+Scenario keys that govern collection:
+
+| Scenario key | Default | Description |
 |---|---|---|
-| `LLMDBENCH_VLLM_COMMON_METRICS_SCRAPE_ENABLED` | `false` | Enable/disable metrics collection. Set automatically when `--monitoring` is passed. |
-| `METRICS_COLLECTION_INTERVAL` | `15` | Seconds between collection snapshots |
-| `LLMDBENCH_VLLM_COMMON_METRICS_PORT` | `8200` | Prometheus metrics port (modelservice) |
-| `LLMDBENCH_VLLM_COMMON_INFERENCE_PORT` | `8000` | Fallback port (standalone vLLM) |
-| `LLMDBENCH_VLLM_MONITORING_METRICS_PATH` | `/metrics` | Prometheus endpoint path |
-| `LLMDBENCH_TIME_SERIES_METRICS` | Rendered from config | JSON representation of `monitoring.timeSeriesMetrics` passed to the harness pod |
-| `METRICS_CURL_TIMEOUT` | `30` | Max seconds per curl request |
-| `LLMDBENCH_METRICS_POD_PATTERN` | `decode` | Fallback pod name pattern for discovery |
+| `monitoring.metricsScrapeEnabled` | `false` | Enable/disable metrics collection. Set to `true` automatically when `--monitoring` is passed. |
+| `monitoring.metricsPath` | `/metrics` | Path the engine serves Prometheus metrics on |
+| `monitoring.scrapeInterval` | `30s` | PodMonitor scrape interval |
+| `monitoring.timeSeriesMetrics` | see `defaults.yaml` | Which series are retained, processed and embedded in the report |
+| `monitoring.embedTimeSeries` | `true` | Embed the retained series in the benchmark report |
+| `monitoring.timeSeriesMaxPoints` | `256` | Downsampling ceiling per series |
+| `decode.engine.port` | read from the command | Port a decode pod serves `/metrics` on |
+| `engine.servicePort` | `8000` | Port the harness dials the stack on |
+
+Inside the harness container, the collector reads its own environment. These are
+the container's contract, not scenario keys -- the values come from the keys
+above, rendered into the harness pod by
+[`20_harness_pod.yaml.j2`](../config/templates/jinja/20_harness_pod.yaml.j2):
+
+| Environment Variable | Default | Rendered from |
+|---|---|---|
+| `LLMDBENCH_VLLM_COMMON_METRICS_SCRAPE_ENABLED` | `false` | `monitoring.metricsScrapeEnabled` |
+| `LLMDBENCH_VLLM_COMMON_METRICS_PORT` | `8000` | `decode.engine.port`, falling back to `engine.servicePort` |
+| `LLMDBENCH_VLLM_COMMON_INFERENCE_PORT` | `8000` | `engine.servicePort` |
+| `LLMDBENCH_VLLM_MONITORING_METRICS_PATH` | `/metrics` | `monitoring.metricsPath` |
+| `LLMDBENCH_TIME_SERIES_METRICS` | rendered from config | `monitoring.timeSeriesMetrics`, as JSON |
+| `METRICS_COLLECTION_INTERVAL` | `15` | Not rendered -- set it on the pod to change the snapshot interval |
+| `METRICS_CURL_TIMEOUT` | `30` | Not rendered -- max seconds per curl request |
+| `LLMDBENCH_METRICS_POD_PATTERN` | `decode` | Not rendered -- fallback pod name pattern for discovery |
 
 ## Pod Discovery
 

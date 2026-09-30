@@ -598,8 +598,8 @@ class AdminPrerequisitesStep(Step):
     ):
         """Install LWS only when multinode is enabled and CRDs are missing.
 
-        The bash implementation only installed LWS when
-        LLMDBENCH_VLLM_MODELSERVICE_MULTINODE was true (e.g., wide-ep).
+        LeaderWorkerSet is a multinode-only dependency (``multinode.enabled``,
+        e.g. wide-ep); a single-node stack never needs its CRDs.
         """
         multinode = plan_config.get("multinode", {})
         if not multinode.get("enabled", False):

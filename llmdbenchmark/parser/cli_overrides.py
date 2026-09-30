@@ -504,7 +504,7 @@ def find_broken_parent_paths(
       uses for workload-profile overrides.
     - ``clobbered`` -- ``(path, type_name)`` where the parent *exists* but is
       a list or scalar, so descending into it would silently REPLACE it.
-      ``vllmCommon.volumeMounts.0.mountPath=/x`` would turn a two-element
+      ``engine.volumeMounts.0.mountPath=/x`` would turn a two-element
       list into ``{"0": {...}}``, dropping both mounts. Dotted paths cannot
       index into lists here (unlike workload-profile overrides), so this is
       always a mistake and callers treat it as fatal. Assigning a whole new

@@ -91,9 +91,9 @@ llmdbenchmark --spec guides/pd-disaggregation smoketest -p <namespace>
 Smoketests include three steps:
 - **Step 00** -- Health check: pods running, `/health` responds, `/v1/models` returns expected model, service/gateway/route reachable
 - **Step 01** -- Inference test: sends a sample `/v1/completions` request, logs generated text and a demo curl command
-- **Step 02** -- Config validation: per-scenario checks that compare deployed pod configuration against the rendered scenario config (resources, parallelism, env vars, probes, volumes, security, vLLM flags, etc.)
+- **Step 02** -- Config validation: per-scenario checks that compare deployed pod configuration against the rendered scenario config (resources, parallelism, env vars, probes, volumes, security, and the engine command reaching the container verbatim)
 
-Well-lit-path scenarios (pd-disaggregation, precise-prefix-cache-routing, optimized-baseline, workload-autoscaling, tiered-prefix-cache, wide-ep) have dedicated validators with scenario-specific checks. Other scenarios (including multi-stack scenarios like `multi-model-optimized-baseline`) run steps 00 and 01 only.
+A validator is selected by the stack's own `name`, so `optimized-baseline`, `pd-disaggregation`, `precise-prefix-cache-routing`, `tiered-prefix-cache`, `wide-ep`, `workload-autoscaling`, `epp-keda-saturation`, `fast-model-actuation`, `fast-model-actuation-base`, `fast-model-actuation-keda` and the `cpu-example` / `gpu-example` / `spyre-example` stacks get scenario-specific step-02 checks. A stack whose name has no entry in `llmdbenchmark/smoketests/validators/__init__.py` (including multi-stack scenarios like `multi-model-optimized-baseline`) runs steps 00 and 01 only.
 
 Multi-stack scenarios run smoketest steps sequentially (one stack at a time) regardless of the `--parallel` flag - parallel probes of a shared gateway would be noisy and harder to debug. Each stack's `/health` and `/v1/models` requests are automatically prefixed with its routing path (e.g. `/qwen3-06b/...`) when the scenario uses a shared HTTPRoute.
 

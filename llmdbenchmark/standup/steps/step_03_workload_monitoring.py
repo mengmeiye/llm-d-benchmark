@@ -156,7 +156,7 @@ class WorkloadMonitoringStep(Step):
             context.accelerator_resource = accel_resource
             context.logger.log_info(f"Accelerator resource from plan: {accel_resource}")
 
-        net_resource = plan_config.get("vllmCommon", {}).get("networkResource", "")
+        net_resource = plan_config.get("engine", {}).get("networkResource", "")
         if net_resource:
             context.network_resource = net_resource
             context.logger.log_info(f"Network resource from plan: {net_resource}")
@@ -306,11 +306,10 @@ class WorkloadMonitoringStep(Step):
             if not method_config:
                 continue
 
-            # Skip methods the scenario has explicitly disabled. Previously
-            # we walked every method and relied on ``accelerator.count == 0``
-            # as a de facto skip signal, which produced noisy "Skipping
-            # standalone.acceleratorType validation" logs on modelservice-
-            # only scenarios like ``inference-scheduling``.
+            # Skip methods the scenario has explicitly disabled. A
+            # modelservice-only scenario carries a `standalone` block with
+            # `enabled: false`, and validating its node selectors would only
+            # emit noise about a deployment nobody asked for.
             if method_config.get("enabled") is False:
                 context.logger.log_debug(
                     f"Skipping {method} node-selector validation: "
@@ -323,17 +322,14 @@ class WorkloadMonitoringStep(Step):
                 for key, value in ns.items():
                     selectors.append((f"{method}.nodeSelector", key, str(value)))
 
-            # Resolve the effective accelerator count the same way the
-            # Jinja render pipeline does (see 13_ms-values.yaml.j2:252):
-            #   1. explicit ``<method>.accelerator.count`` wins,
-            #   2. otherwise fall back to ``<method>.parallelism.tensor``
-            #      (the canonical vLLM pattern: tensor-parallel degree
-            #      equals the per-pod GPU count).
-            # Only scenarios that *explicitly* set count to 0 (e.g. the
-            # CPU example) are treated as CPU-only and have their GPU
+            # Resolve the effective accelerator count the same way the Jinja
+            # render pipeline does: the Kubernetes request the role writes
+            # down, else the ``accelerator.count`` shorthand, else the
+            # parallelism the llm-d chart was given. A role whose count is 0
+            # (the CPU example, the simulator) is CPU-only and has its GPU
             # label validation skipped.
             method_accel_count, accel_count_source = effective_accelerator_count(
-                method_config
+                method_config, plan_config
             )
 
             if method_accel_count == 0:

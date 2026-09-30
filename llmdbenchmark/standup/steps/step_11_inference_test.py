@@ -18,6 +18,7 @@ import json
 import time
 from pathlib import Path
 
+from llmdbenchmark.engine import serving_port
 from llmdbenchmark.executor.step import Step, StepResult, Phase
 from llmdbenchmark.executor.context import ExecutionContext
 from llmdbenchmark.executor.command import CommandExecutor
@@ -93,9 +94,7 @@ class InferenceTestStep(Step):
 
         plan_config = self._load_stack_config(stack_path)
         model_name = self._require_config(plan_config, "model", "name")
-        inference_port = self._require_config(
-            plan_config, "vllmCommon", "inferencePort"
-        )
+        inference_port = serving_port(plan_config)
         release = self._require_config(plan_config, "release")
 
         # Discover endpoint (same logic as smoketest)

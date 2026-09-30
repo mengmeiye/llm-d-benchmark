@@ -13,39 +13,79 @@ from typing import Any
 from kubernetes import client as k8s_client
 
 
-def effective_accelerator_count(method_config: dict) -> tuple[int, str]:
-    """Resolve the per-pod accelerator count for a method section.
+def accelerator_resource_name(
+    method_config: dict, plan_config: dict | None = None
+) -> str:
+    """The ``resources.limits`` key that names this role's accelerator.
 
-    Mirrors the fallback chain in ``config/templates/jinja/13_ms-values.yaml.j2``
-    line 252:
+    Per-role ``accelerator.resource`` first, then the plan-wide one. Both are
+    Kubernetes extended-resource names, which is how a scenario says "this is
+    what my hardware is called" once and never again.
+    """
+    for source in (method_config, plan_config or {}):
+        accel = source.get("accelerator") if isinstance(source, dict) else None
+        if isinstance(accel, dict):
+            resource = accel.get("resource")
+            if resource:
+                return str(resource)
+    return "nvidia.com/gpu"
 
-        decode.accelerator.count   (explicit)
-          ↓ (if unset)
-        decode.parallelism.tensor  (canonical vLLM pattern -- TP degree
-                                    equals per-pod GPU count)
+
+def effective_accelerator_count(
+    method_config: dict, plan_config: dict | None = None
+) -> tuple[int, str]:
+    """Resolve how many accelerators one pod of this role is given.
+
+    A device count is a Kubernetes fact, not an engine one: the kubelet grants
+    devices before the engine process exists, so it is stated in Kubernetes'
+    own vocabulary rather than inferred from a launch command. The chain,
+    mirrored by ``config/templates/jinja/13_ms-values.yaml.j2``:
+
+        <role>.resources.limits[<accelerator resource>]   (written as Kubernetes)
+          v (if unset)
+        <role>.accelerator.count                          (shorthand, per role)
+          v (if unset)
+        accelerator.count                                 (shorthand, plan-wide)
+          v (if unset)
+        <role>.parallelism.tensor x dataLocal             (llm-d chart value)
 
     Returns ``(count, source)`` so callers can log which field was consulted.
-    Parsing failures return ``(0, "parse-error")`` so callers treat the method
-    as CPU-only -- the safe choice when the config is unintelligible.
+    Unreadable values return ``(0, "parse-error")`` so callers treat the role as
+    CPU-only -- the safe choice when the config is unintelligible.
 
-    Shared by the resolver (skip ``"auto"`` substitution for CPU-only
-    sections) and ``step_03_workload_monitoring`` (skip node-selector
-    validation for CPU-only sections). Keeping it in one place prevents
-    those two skip paths from drifting.
+    Shared by the resolver (skip ``"auto"`` substitution for CPU-only roles) and
+    ``step_03_workload_monitoring`` (skip node-selector validation for CPU-only
+    roles). Keeping it in one place prevents those two skip paths from drifting.
     """
-    accel = method_config.get("accelerator")
-    if isinstance(accel, dict) and "count" in accel:
+    resource = accelerator_resource_name(method_config, plan_config)
+    limits = (method_config.get("resources") or {}).get("limits")
+    if isinstance(limits, dict) and resource in limits:
         try:
-            return int(accel["count"]), "accelerator.count (explicit)"
+            return int(limits[resource]), f"resources.limits.{resource}"
         except (ValueError, TypeError):
             return 0, "parse-error"
 
+    for source, label in (
+        (method_config.get("accelerator"), "accelerator.count"),
+        ((plan_config or {}).get("accelerator"), "accelerator.count (plan-wide)"),
+    ):
+        if isinstance(source, dict) and "count" in source:
+            try:
+                return int(source["count"]), label
+            except (ValueError, TypeError):
+                return 0, "parse-error"
+
+    # Multi-node serving states its widths because the llm-d chart needs them
+    # (LeaderWorkerSet size, wide-EP layout), so they are also the last honest
+    # answer to "how many devices does one pod hold".
     parallelism = method_config.get("parallelism")
     if isinstance(parallelism, dict) and "tensor" in parallelism:
         try:
-            return int(parallelism["tensor"]), "parallelism.tensor (fallback)"
+            tensor = int(parallelism["tensor"])
+            data_local = int(parallelism.get("dataLocal") or 1)
         except (ValueError, TypeError):
             return 0, "parse-error"
+        return tensor * data_local, "parallelism.tensor x dataLocal"
 
     return 0, "unset"
 
@@ -254,11 +294,11 @@ class ClusterResourceResolver:
         if values.get("accelerator", {}).get("profile") == "auto":
             unresolved.append("accelerator.profile")
 
-        vllm = values.get("vllmCommon", {})
-        if vllm.get("networkResource") == "auto":
-            unresolved.append("vllmCommon.networkResource")
-        if vllm.get("networkNr") == "auto":
-            unresolved.append("vllmCommon.networkNr")
+        engine = values.get("engine", {})
+        if engine.get("networkResource") == "auto":
+            unresolved.append("engine.networkResource")
+        if engine.get("networkNr") == "auto":
+            unresolved.append("engine.networkNr")
 
         if values.get("affinity", {}).get("nodeSelector") == "auto":
             unresolved.append("affinity.nodeSelector")
@@ -620,15 +660,15 @@ class ClusterResourceResolver:
         values: dict,
         unresolved: list[str],
     ) -> None:
-        """``vllmCommon.networkResource: "auto"`` to detected RDMA resource.
+        """``engine.networkResource: "auto"`` to detected RDMA resource.
 
         Also sets ``networkNr`` to ``"1"`` when a network resource is found.
         Network resources are optional -- if none are found on the cluster,
         the fields are cleared (templates will skip the network section).
         """
-        vllm_common = values.get("vllmCommon", {})
-        net_resource = vllm_common.get("networkResource", "")
-        net_nr = vllm_common.get("networkNr", "")
+        engine = values.get("engine", {})
+        net_resource = engine.get("networkResource", "")
+        net_nr = engine.get("networkNr", "")
 
         if net_resource != "auto" and net_nr != "auto":
             return
@@ -638,31 +678,31 @@ class ClusterResourceResolver:
         if net_resource == "auto":
             if resources.network_resources:
                 resolved_resource = resources.network_resources[0]
-                vllm_common["networkResource"] = resolved_resource
+                engine["networkResource"] = resolved_resource
                 self.logger.log_info(
-                    f"Resolved vllmCommon.networkResource: {resolved_resource}"
+                    f"Resolved engine.networkResource: {resolved_resource}"
                 )
                 if net_nr == "auto" or not net_nr:
-                    vllm_common["networkNr"] = "1"
-                    self.logger.log_info("Resolved vllmCommon.networkNr: 1")
+                    engine["networkNr"] = "1"
+                    self.logger.log_info("Resolved engine.networkNr: 1")
             else:
                 # Network resources are optional -- no RDMA/IB is fine
-                vllm_common["networkResource"] = ""
+                engine["networkResource"] = ""
                 self.logger.log_info(
                     "No RDMA/IB network resource found on cluster -- "
                     "network resource disabled"
                 )
                 if net_nr == "auto":
-                    vllm_common["networkNr"] = ""
+                    engine["networkNr"] = ""
 
         elif net_nr == "auto":
             if net_resource:
-                vllm_common["networkNr"] = "1"
+                engine["networkNr"] = "1"
                 self.logger.log_info(
-                    f"Resolved vllmCommon.networkNr: 1 (networkResource={net_resource})"
+                    f"Resolved engine.networkNr: 1 (networkResource={net_resource})"
                 )
             else:
-                vllm_common["networkNr"] = ""
+                engine["networkNr"] = ""
 
     def _resolve_affinity_node_selector(
         self,
@@ -730,7 +770,9 @@ class ClusterResourceResolver:
 
             section_enabled = section_dict.get("enabled") is not False
 
-            accel_count, count_source = effective_accelerator_count(section_dict)
+            accel_count, count_source = effective_accelerator_count(
+                section_dict, values
+            )
             if accel_count == 0:
                 self.logger.log_info(
                     f"Skipping {section}.acceleratorType resolution: "
@@ -794,15 +836,15 @@ class ClusterResourceResolver:
                 unresolved.append(f"{section}.acceleratorType.labelValue")
 
     def _propagate_network_to_methods(self, values: dict) -> None:
-        """Propagate ``vllmCommon`` network settings to per-method sections.
+        """Propagate plan-wide ``engine`` network settings to each role.
 
-        When the per-method ``networkResource`` is ``"auto"`` or empty,
-        inherit from ``vllmCommon``.  Mirrors the bash
+        When a role's ``networkResource`` is ``"auto"`` or empty, inherit the
+        plan-wide value from ``engine``.  Mirrors the bash
         ``propagate_common_to_standup_methods()`` function.
         """
-        vllm_common = values.get("vllmCommon", {})
-        common_net_resource = vllm_common.get("networkResource", "")
-        common_net_nr = vllm_common.get("networkNr", "")
+        engine = values.get("engine", {})
+        common_net_resource = engine.get("networkResource", "")
+        common_net_nr = engine.get("networkNr", "")
 
         for section in ("decode", "prefill", "standalone"):
             section_dict = values.get(section) or {}

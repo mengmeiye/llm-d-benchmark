@@ -12,7 +12,7 @@ This is the same scenario our CI runs on every PR (see [`ci-pr-benchmark.yaml`](
 >
 > - **First-time walkthroughs of the framework** - you can exercise the full `standup -> smoketest -> run -> teardown` lifecycle without any cloud account, cluster access, or GPU hardware.
 > - **Iterating on framework code** - testing your changes to steps, templates, or scenarios locally in a fast feedback loop.
-> - **Reproducing CI failures** - the PR-benchmark workflow uses this exact `cicd/kind` scenario on a Kind cluster, so a local repro is one `./util/test-scenarios.sh` invocation away.
+> - **Reproducing CI failures** - the PR-benchmark workflow uses this exact `cicd/kind` scenario on a Kind cluster, so a local repro is one `./util/test-scenarios.sh --spec cicd/kind` invocation away.
 >
 > Kind is **not** a benchmarking target. It runs a simulated inference engine (`llm-d-inference-sim`) on CPU, so any latency, throughput, or GPU-utilization numbers you collect here are meaningless as performance data. When you have access to a cluster with real accelerators, switch to one of the GPU-backed scenarios under [`config/specification/examples/gpu.yaml.j2`](../config/specification/examples/gpu.yaml.j2) or [`config/specification/guides/`](../config/specification/guides/) and skip steps 1 and 2 of this guide - jump straight to [step 3 (Install llmdbenchmark)](#3-install-llmdbenchmark) and use your existing kubeconfig.
 

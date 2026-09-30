@@ -31,17 +31,16 @@ scenario:
 
       accelerator:
         count: 0
-        # Corresponds to: LLMDBENCH_VLLM_COMMON_ACCELERATOR_MEMORY=24
         # To pass capacity planner sanity checking
         memory: 24
 
       model:
-        name: facebook/opt-125m
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: facebook-opt-125m
-        path: models/facebook/opt-125m
-        huggingfaceId: facebook/opt-125m
         gpuMemoryUtilization: 0
-        # Corresponds to: LLMDBENCH_VLLM_COMMON_MAX_MODEL_LEN=1024
         maxModelLen: 1024
         size: 2Gi
 
@@ -59,19 +58,15 @@ scenario:
           size: 2Gi
           accessMode:
             - ReadWriteOnce
-        uriProtocol: hf
 
-      # NOTE: `images` and `vllmCommon` belong at `common.<key>`, NOT nested
+      # NOTE: `images` and `engine` belong at `common.<key>`, NOT nested
       # inside `common.storage`. One level deeper they parse as
-      # common.storage.images / common.storage.vllmCommon, which nothing reads,
+      # common.storage.images / common.storage.engine, which nothing reads,
       # and the harness silently falls back to images.benchmark from
       # defaults.yaml (ghcr.io/llm-d/llm-d-benchmark) -- an image with no
       # /entrypoint.sh and no /usr/local/bin/run, so the harness container exits
       # 127 within ~20s having produced no task artifacts.
       images:
-        vllmOpenai:
-          repository: ghcr.io/llm-d/llm-d-inference-sim
-          tag: latest
         vllm:
           repository: ghcr.io/llm-d/llm-d-inference-sim
           tag: latest
@@ -85,7 +80,7 @@ scenario:
           tag: v0.1.0
           pullPolicy: IfNotPresent
 
-      vllmCommon:
+      engine:
         shmMemory: 500Mi
         volumes:
           - name: dshm
@@ -97,11 +92,14 @@ scenario:
           - name: dshm
             mountPath: /dev/shm
 
-    # =========================================================================
-    # STANDALONE -- Only applies when standalone.enabled: true
-    # =========================================================================
-    standalone:
-      enabled: false
+    # -------------------------------------------------------------------------
+    # Shared role configuration
+    # Every role in this scenario runs the same sim container with the same
+    # footprint, so the shape is stated once. Each role below carries only what
+    # it does differently -- how its container is launched. A key a role names
+    # for itself wins over the value here.
+    # -------------------------------------------------------------------------
+    roleDefaults:
       replicas: 1
 
       resources:
@@ -118,15 +116,30 @@ scenario:
         dataLocal: 1
         workers: 1
 
-      vllm:
-        modelCommand: imageDefault
+    # =========================================================================
+    # STANDALONE -- Only applies when standalone.enabled: true
+    # =========================================================================
+    standalone:
+      enabled: false
+
+      # llm-d-inference-sim is not an inference engine and takes no `vllm
+      # serve` line: its image entrypoint is the launcher, so this role passes
+      # an argument list instead of a command. `command: ""` is what selects
+      # that -- it drops the inherited default command (an empty string, since a
+      # YAML key with no value would leave the default in place), and
+      # modelCommand resolves to `imageDefault`, which emits `args:` and no
+      # `command:` (a distroless sim image has no shell to exec one in).
+      # ${dotted.path} reads the resolved plan.
+      #
+      # Port 8000, not 8200: a standalone pod has no routing sidecar in front of
+      # it, so it holds the Service port itself.
+      engine:
+        command: ""
         args:
           - "--model"
-          - "/model-cache/$(MODEL_PATH)"
+          - "facebook/opt-125m"
           - "--port"
-          - "$(VLLM_METRICS_PORT)"
-          - "--served-model-name"
-          - "$(MODEL_NAME)"
+          - "8000"
 
     # =========================================================================
     # MODELSERVICE -- Only applies when modelservice.enabled: true
@@ -135,6 +148,13 @@ scenario:
     # =========================================================================
     modelservice:
       enabled: true
+
+      # Where the engine gets the weights. `hf` means no model PVC and no
+      # download Job -- the engine pulls from Hugging Face at pod start, which
+      # is why the launch command below can name the model literally. This key
+      # is read at `modelservice.uriProtocol`; under `storage:` it parses fine
+      # and nothing reads it.
+      uriProtocol: hf
 
       inferenceExtension:
         monitoring:
@@ -157,52 +177,25 @@ scenario:
 
       prefill:
         enabled: true
-        replicas: 1
-
-        parallelism:
-          tensor: 1
-          data: 1
-          dataLocal: 1
-          workers: 1
-
-        resources:
-          limits:
-            memory: 100Mi
-            cpu: "0"
-          requests:
-            memory: 100Mi
-            cpu: "0"
 
         accelerator:
           count: 0
 
-        vllm:
-          modelCommand: imageDefault
-          additionalFlags: []
+        # The sim image launches itself -- see `standalone.engine` above. No
+        # args either: the entrypoint's own default port is 8000, which is what
+        # a prefill pod binds (it never gets a routing sidecar).
+        engine:
+          command: ""
 
       decode:
-        replicas: 1
-
-        parallelism:
-          tensor: 1
-          data: 1
-          dataLocal: 1
-          workers: 1
-
-        resources:
-          limits:
-            memory: 100Mi
-            cpu: "0"
-          requests:
-            memory: 100Mi
-            cpu: "0"
-
         accelerator:
           count: 0
 
-        vllm:
-          modelCommand: imageDefault
-          additionalFlags: []
+        # `routing.proxy.enabled: false` above means no sidecar holds the
+        # Service port in front of decode, so the sim entrypoint's own port
+        # 8000 is the right one and there is nothing to pass.
+        engine:
+          command: ""
 
     # =========================================================================
     # WORKLOAD / HARNESS -- Benchmark execution configuration
@@ -210,9 +203,6 @@ scenario:
 
     # -------------------------------------------------------------------------
     # Harness Configuration
-    # Corresponds to: LLMDBENCH_HARNESS_PVC_SIZE=3Gi
-    #                 LLMDBENCH_HARNESS_CPU_NR=1
-    #                 LLMDBENCH_HARNESS_CPU_MEM=2Gi
     # -------------------------------------------------------------------------
     harness:
       name: eval-containers

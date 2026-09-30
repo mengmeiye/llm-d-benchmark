@@ -70,27 +70,29 @@ class OptimizedBaselineValidator(WvaSmoketestMixin, BaseSmoketest):
             pod = decode_pods[0]
             ports = self.get_container_ports(pod)
 
-            # Scenario-specific: metrics port from config
-            expected_vllm_port = _nested_get(config, "decode", "vllm", "port")
-            if expected_vllm_port is not None:
-                expected_vllm_port = int(expected_vllm_port)
+            # Scenario-specific: the engine also serves /metrics on the port it
+            # binds, which is whatever its command's --port said (recorded by
+            # resolve_engines as decode.engine.port).
+            expected_port = _nested_get(config, "decode", "engine", "port")
+            if expected_port is not None:
+                expected_port = int(expected_port)
                 has_metrics = any(
                     p.get("name") == "metrics"
-                    or p.get("containerPort") == expected_vllm_port
+                    or p.get("containerPort") == expected_port
                     for p in ports
                 )
                 report.add(
                     CheckResult(
                         "metrics_port",
                         has_metrics,
-                        expected=str(expected_vllm_port),
-                        message=f"Metrics port {expected_vllm_port} {'present' if has_metrics else 'not found'}",
+                        expected=str(expected_port),
+                        message=f"Metrics port {expected_port} {'present' if has_metrics else 'not found'}",
                     )
                 )
 
         if decode_pods:
             # Shared memory volume -- only check if scenario defines it
-            configured_volumes = _nested_get(config, "vllmCommon", "volumes") or []
+            configured_volumes = _nested_get(config, "engine", "volumes") or []
             configured_vol_names = [
                 v.get("name", "") for v in configured_volumes if isinstance(v, dict)
             ]

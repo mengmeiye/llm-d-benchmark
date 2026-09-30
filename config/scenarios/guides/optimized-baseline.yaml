@@ -1,5 +1,4 @@
 # OPTIMIZED BASELINE WELL LIT PATH for LLM-D Deployment
-# Migrated from bash environment variables to YAML format
 # Based on https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline
 
 scenario:
@@ -34,20 +33,42 @@ scenario:
       #     # cloud.google.com/gke-accelerator: nvidia-h100-80gb  # GKE
 
       model:
-        name: Qwen/Qwen3-32B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen3-32b
-        path: models/Qwen/Qwen3-32B
-        huggingfaceId: Qwen/Qwen3-32B
         size: 1Ti
-        maxModelLen: 16000
-        blockSize: 64
-        gpuMemoryUtilization: 0.95
+        # maxModelLen / blockSize / gpuMemoryUtilization are deliberately NOT
+        # set here: they are pure engine parameters, so they are stated in the
+        # launch command below and read back out for the capacity planner.
+        #
+        # The one exception is the TensorRT-LLM alternative command further
+        # down: TRT-LLM has no CLI flag for its KV page size, so that engine
+        # needs the number stated here as well. Uncomment with it.
+        # @engine trtllm
+        # blockSize: 32
 
       storage:
         modelPvc:
           size: 1Ti
 
-      vllmCommon:
+      # Where the harness scrapes the engine's Prometheus endpoint. /metrics is
+      # the default and is right for vLLM and SGLang; uncomment with the
+      # TensorRT-LLM command below, which mounts its exposition elsewhere.
+      # @engine trtllm
+      # monitoring:
+      #   metricsPath: /prometheus/metrics
+
+      # Pod infrastructure, not engine parameters: the volumes every role
+      # mounts and the port the Service exposes. Engine parameters are stated
+      # once, in decode.engine.command below.
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the network facts only the
+        # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+        # library path. Engine commands never mention it.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
   #      priorityClassName: nightly-gpu-critical
         volumes:
           - name: shared-config
@@ -74,7 +95,7 @@ scenario:
     # defined ENTIRELY by the guide's own manifests:
     #
     #   * EVERYTHING ELSE in this scenario is IGNORED -- model, modelservice,
-    #     standalone, decode/prefill, vllmCommon, storage, harness model, etc.
+    #     standalone, decode/prefill, engine, storage, harness model, etc.
     #   * `-m/--models` and all other CLI/scenario tuning are ignored.
     #   * DoE `experiment` SETUP sweeps do NOT alter a kustomize deploy
     #     (only run/workload treatments still apply).
@@ -275,25 +296,158 @@ scenario:
           imagePullPolicy: Always
         replicas: 2
   #      replicas: 8
-        vllm:
-          customCommand: |
-            ${accelerator.runtimePreamble}
-            vllm serve $MODEL_SERVE_REF \
+        # The launch command, verbatim -- the same line you would run by hand,
+        # or the one already in the llm-d guide. It is rendered into the
+        # container unchanged, so every flag here is read by vLLM and none of
+        # them by llm-d-benchmark, which reads only what decides Kubernetes
+        # objects: `--port` (container port, probes, the routing sidecar's
+        # upstream) and the capacity numbers the pre-deploy check needs.
+        #
+        # Decode binds 8200, not 8000: the routing sidecar the chart injects on
+        # decode pods owns `engine.servicePort` (8000) and forwards here. In
+        # direct mode (`gateway.className: none`) there is no sidecar -- bind
+        # 8000 then.
+        #
+        # Every flag is written out, with the value the engine will receive.
+        # This command is the CUDA one, because that is what this guide is
+        # validated on; hardware that needs a different command gets its own
+        # scenario file rather than a substitution point per difference
+        # (config/scenarios/examples/{intel-xpu,spyre,cpu}.yaml).
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3-32B \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_METRICS_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
-            ${accelerator.dtypeArgs} \
-            ${accelerator.executionArgs} \
+            --port 8200 \
+            --max-model-len 16000 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 1 \
+            --block-size 64 \
+            --gpu-memory-utilization 0.95 \
+            --dtype bfloat16 \
             --no-enable-log-requests \
             --disable-uvicorn-access-log \
             --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
             --no-enable-prefix-caching
+
+        # ---------------------------------------------------------------------
+        # SAME GUIDE, ANOTHER ENGINE
+        #
+        # The command above is the only vLLM-specific text in this file. Comment
+        # it out and uncomment one block below -- strip the `# ` prefix, which
+        # leaves the lines at the indentation they need -- and the rendered plan
+        # changes in two places: the launch line, and the container image the
+        # launcher selects (`images.sglang` / `images.trtllm`, neither named
+        # anywhere here). Replicas, PVCs, probes, resources, the routing sidecar,
+        # the EPP config and the gateway are engine-neutral and stay as they are.
+        #
+        # Flag spellings follow the llm-d guide, which publishes this same well
+        # lit path once per engine under
+        # guides/optimized-baseline/modelserver/gpu/{vllm,sglang,trtllm}. The
+        # values are this file's own, not that guide's: port 8200 (the sidecar
+        # owns 8000), 16000 context, 0.95 of device memory, one device.
+        #
+        # `-t kustomize` applies those upstream manifests instead of rendering
+        # this scenario, so in that mode also set the matching directory:
+        #   kustomize.acceleratorBackend: gpu/sglang   (or gpu/trtllm)
+        #
+        # The `# @engine <name>` line above each commented group is not
+        # decoration: it is what makes these alternatives testable while they
+        # are still comments. util/scenario-inventory.py reads the tags,
+        # performs the uncommenting itself and renders the result, so
+        #
+        #   ./util/test-scenarios.sh --plan --engine sglang
+        #   ./util/test-scenarios.sh --plan --engine trtllm
+        #
+        # fail if a block here drifts -- wrong indentation, a flag the reader
+        # no longer understands, or a companion key left behind. Keep the tag
+        # on every group that moves together (TRT-LLM has four).
+        #
+        # ---------------------------------------------------------------------
+        # SGLang. Nothing outside this block changes -- `--context-length`,
+        # `--page-size` and `--mem-fraction-static` are read as the capacity
+        # numbers in SGLang's own spelling, and /metrics needs
+        # `--enable-metrics` (SGLang serves nothing without it).
+        #
+        # `--mem-fraction-static` is 0.88 where vLLM above is given 0.95, and
+        # that is not a transcription slip: the two flags divide device memory
+        # differently, so the same number means different things.
+        #   vLLM   --gpu-memory-utilization  "the fraction of GPU memory to be
+        #          used for the model executor" -- the engine's whole budget,
+        #          weights and activations and KV cache together.
+        #   SGLang --mem-fraction-static  "the fraction of the memory used for
+        #          static allocation (model weights and KV cache memory pool)"
+        #          -- activations and CUDA graph buffers come on *top* of it.
+        # So 0.95 here reserves 95% for weights plus KV and then asks for
+        # activations out of the remaining 5%, which on one 80GiB device with
+        # Qwen3-32B dies mid-forward with `torch.OutOfMemoryError: CUDA out of
+        # memory. Tried to allocate 800.00 MiB`. 0.88 leaves SGLang the same
+        # KV pool vLLM ends up with at 0.95 (~61GiB of bf16 weights, ~8GiB of
+        # KV) and ~9GiB for activations. Raise it only with the context length
+        # and the device count in view.
+        # ---------------------------------------------------------------------
+
+          # @engine sglang
+          # command: |
+          #   python3 -m sglang.launch_server \
+          #   --model-path Qwen/Qwen3-32B \
+          #   --host 0.0.0.0 \
+          #   --port 8200 \
+          #   --tp-size 1 \
+          #   --context-length 16000 \
+          #   --page-size 64 \
+          #   --mem-fraction-static 0.88 \
+          #   --max-running-requests 256 \
+          #   --max-prefill-tokens 256 \
+          #   --dtype bfloat16 \
+          #   --enable-metrics \
+          #   --uvicorn-access-log-exclude-prefixes /metrics /health
+
+        # ---------------------------------------------------------------------
+        # TensorRT-LLM. This one is NOT a pure swap: three keys elsewhere move
+        # with it, so uncomment all four blocks or none -- they are the four
+        # groups tagged `# @engine trtllm`.
+        #
+        #   1. `model.blockSize: 32` in the model section above. TRT-LLM has no
+        #      CLI flag for its KV page size -- `tokens_per_block` lives in the
+        #      --extra_llm_api_options file the command writes below -- so the
+        #      number cannot be read back off the command and the capacity check
+        #      silently skips its KV arithmetic without it.
+        #   2. `monitoring.metricsPath: /prometheus/metrics` under `common`.
+        #      TRT-LLM's Prometheus exposition is mounted there; its /metrics
+        #      route serves iteration-stats JSON instead. (The PodMonitor the
+        #      chart renders already follows the engine; this key is what the
+        #      harness scrapes.)
+        #   3. `LD_LIBRARY_PATH` in `decode.extraEnvVars` below, as the llm-d
+        #      TRT-LLM guide sets it -- the image does not.
+        #
+        # `--kv_cache_free_gpu_memory_fraction` is the spelling that guide uses;
+        # `--free_gpu_memory_fraction` is the same option and reads the same.
+        #
+        # It keeps 0.95 where SGLang above needed 0.88, because this is a third
+        # denominator again: TRT-LLM measures the fraction against memory that
+        # is *free after the weights are loaded and peak activation has been
+        # profiled* (`free_mem, _ = torch.cuda.mem_get_info()` then
+        # `free_gpu_memory_fraction * free_mem`, _torch/pyexecutor/_util.py),
+        # so 0.95 claims most of what is left over rather than most of the
+        # device. Three engines, three meanings for one number -- which is why
+        # each command states its own and the harness only reads them.
+        # ---------------------------------------------------------------------
+
+          # @engine trtllm
+          # command: |
+          #   mkdir -p /tmp/trtllm ;
+          #   printf 'return_perf_metrics: true\nenable_iter_perf_stats: true\nkv_cache_config:\n  tokens_per_block: ${model.blockSize}\n' > /tmp/trtllm/llm_api_options.yaml ;
+          #   trtllm-serve serve Qwen/Qwen3-32B \
+          #   --host 0.0.0.0 \
+          #   --port 8200 \
+          #   --backend pytorch \
+          #   --tp_size 1 \
+          #   --max_seq_len 16000 \
+          #   --max_batch_size 256 \
+          #   --max_num_tokens 256 \
+          #   --kv_cache_free_gpu_memory_fraction 0.95 \
+          #   --extra_llm_api_options /tmp/trtllm/llm_api_options.yaml
 
         initContainers:
           - name: preprocess
@@ -304,12 +458,6 @@ scenario:
               - name: shared-config
                 mountPath: /shared-config
 
-        parallelism:
-          tensor: 1
-          data: 1
-          dataLocal: 1
-          workers: 1
-
         # Resource configuration
         resources:
           limits:
@@ -319,15 +467,23 @@ scenario:
             memory: 64Gi
             cpu: "16"
 
-        # No customCommand -- the vLLM serve command is auto-generated
-        # from model.*, vllmCommon.flags.*, and decode.vllm.additionalFlags.
         # -----------------------------------------------------------------------
         # Extra Environment Variables
-        # No custom env vars for this scenario -- uses default ENVVARS_TO_YAML
-        # mechanism. Auto-populated vars (UCX_TLS, VLLM_NIXL_*, etc.) are set
-        # by the preprocess script at pod runtime.
+        # No environment variables for this scenario. Nothing is auto-populated:
+        # whatever the engine -- or a library beneath it (UCX_*, NCCL_*,
+        # VLLM_NIXL_*, ...) -- needs must be listed here, the same way the
+        # engine command lists its own flags.
+        #
+        # The TensorRT-LLM alternative command needs one, exactly as the llm-d
+        # TRT-LLM guide sets it -- the image does not put its own libraries on
+        # the loader path. With that command, replace the empty list below with
+        # the three commented lines under it.
         # -----------------------------------------------------------------------
         extraEnvVars: []
+        # @engine trtllm
+        # extraEnvVars:
+        #   - name: LD_LIBRARY_PATH
+        #     value: /usr/local/tensorrt/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib64
 
         # -----------------------------------------------------------------------
         # Additional Volume Mounts

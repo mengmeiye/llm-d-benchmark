@@ -1,6 +1,4 @@
 # Kind Simulated Accelerators CI/CD Scenario
-# Migrated from bash environment variables to YAML format
-# Based on scenarios/cicd/kind_sim_fb.sh
 #
 # CI/CD scenario for Kind clusters using llm-d-inference-sim.
 # No GPU required -- runs inference simulation on CPU-only nodes.
@@ -12,15 +10,18 @@
 #   name and returns an empty accelerator resource, so no GPU limits/requests
 #   are added to the pod spec.  This allows the sim to run on CPU-only nodes.
 #
-#   The routing proxy sidecar is still injected into decode pods (it is never
-#   injected into prefill pods).  There is no port conflict because the chart
-#   shifts the vLLM listen port when the proxy is present:
+#   The routing proxy sidecar is injected into decode pods only (never into
+#   prefill pods), and it owns the Service port 8000, so a decode engine that
+#   runs behind it has to listen somewhere else -- the llm-d convention is
+#   8200.  Which port a role listens on is stated by that role, not inferred:
+#   a role with a command says so with `--port`, and a role running the image's
+#   own entrypoint takes whatever port that entrypoint binds.
 #
-#     decode  (proxy enabled):  vLLM listens on 8200, proxy on 8000
-#     prefill (no proxy):       vLLM listens on 8000
-#
-#   Therefore routing.proxy.enabled does NOT need to be disabled for sim
-#   scenarios -- the chart handles the port assignment automatically.
+#   This scenario turns the sidecar off (`routing.proxy.enabled: false`), which
+#   is what lets every role here keep the sim entrypoint's own port 8000 and
+#   pass no arguments at all.  Leaving the sidecar on would mean giving decode
+#   an explicit `--port 8200`, which the sim's `args` list can do but its bare
+#   entrypoint cannot.
 
 scenario:
   - name: "kind-sim-cicd"
@@ -43,10 +44,11 @@ scenario:
 
       # Model
       model:
-        name: facebook/opt-125m
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: facebook-opt-125m
-        path: models/facebook/opt-125m
-        huggingfaceId: facebook/opt-125m
         maxModelLen: 1024
         gpuMemoryUtilization: 0
 
@@ -66,15 +68,12 @@ scenario:
 
       # Override images for simulation
       images:
-        vllmOpenai:
-          repository: ghcr.io/llm-d/llm-d-inference-sim
-          tag: v0.8.2
         vllm:
           repository: ghcr.io/llm-d/llm-d-inference-sim
           tag: v0.8.2
 
       # Minimal resources for Kind cluster
-      vllmCommon:
+      engine:
         shmMemory: 500Mi
 
       # Install Prometheus CRDs on Kind (no Prometheus Operator by default)
@@ -84,10 +83,14 @@ scenario:
       control:
         waitTimeout: 20
 
-    # Standalone deployment config (disabled -- deploy method is modelservice)
-    # Standalone config is kept as fallback for standalone testing
-    standalone:
-      enabled: false
+    # -------------------------------------------------------------------------
+    # Shared role configuration
+    # Every role in this scenario runs the same sim container with the same
+    # footprint, so the shape is stated once. Each role below carries only what
+    # it does differently -- how its container is launched. A key a role names
+    # for itself wins over the value here.
+    # -------------------------------------------------------------------------
+    roleDefaults:
       replicas: 1
 
       resources:
@@ -98,15 +101,24 @@ scenario:
           memory: 100Mi
           cpu: "0"
 
-      vllm:
-        modelCommand: imageDefault
+    # Standalone deployment config (disabled -- deploy method is modelservice)
+    # Standalone config is kept as fallback for standalone testing
+    standalone:
+      enabled: false
+
+      # llm-d-inference-sim, not a real engine: the image entrypoint is the
+      # launcher, so this role passes an argument list instead of a command.
+      # `command: ""` is what selects that -- it drops the inherited default
+      # `vllm serve` line, and modelCommand resolves to `imageDefault`, which
+      # emits `args:` with no `command:` (a distroless sim image has no shell
+      # to exec one in). ${dotted.path} reads the resolved plan.
+      engine:
+        command: ""
         args:
           - "--model"
-          - "/model-cache/$(MODEL_PATH)"
+          - "facebook/opt-125m"
           - "--port"
-          - "$(VLLM_INFERENCE_PORT)"
-          - "--served-model-name"
-          - "$(MODEL_NAME)"
+          - "8000"
 
     # Modelservice configuration
     modelservice:
@@ -159,30 +171,22 @@ scenario:
 
       # Decode configuration -- use image's default entrypoint (inference-sim)
       decode:
-        replicas: 1
-
         parallelism:
           tensor: 0
           data: 1
           dataLocal: 1
           workers: 1
 
-        resources:
-          limits:
-            memory: 100Mi
-            cpu: "0"
-          requests:
-            memory: 100Mi
-            cpu: "0"
-
-        vllm:
-          modelCommand: imageDefault
-          additionalFlags: []
+        # The sim image launches itself -- see `standalone.engine` above.
+        # No args either: the entrypoint's own defaults serve on 8000, which is
+        # what this stack needs, since `routing.proxy.enabled: false` means
+        # there is no sidecar holding the Service port in front of decode.
+        engine:
+          command: ""
 
       # Prefill configuration -- use image's default entrypoint (inference-sim)
       prefill:
         enabled: true
-        replicas: 1
 
         parallelism:
           tensor: 0
@@ -190,17 +194,10 @@ scenario:
           dataLocal: 1
           workers: 1
 
-        resources:
-          limits:
-            memory: 100Mi
-            cpu: "0"
-          requests:
-            memory: 100Mi
-            cpu: "0"
-
-        vllm:
-          modelCommand: imageDefault
-          additionalFlags: []
+        # The sim image launches itself; its default port is 8000, which is
+        # what a prefill pod binds (it never gets a routing sidecar).
+        engine:
+          command: ""
 
     # Workload -- minimal resources for Kind
     harness:

@@ -89,7 +89,7 @@ class PdDisaggregationValidator(BaseSmoketest):
 
         if decode_pods and not is_kustomize:
             # Shared memory volume -- only check if scenario defines it
-            configured_volumes = _nested_get(config, "vllmCommon", "volumes") or []
+            configured_volumes = _nested_get(config, "engine", "volumes") or []
             configured_vol_names = [
                 v.get("name", "") for v in configured_volumes if isinstance(v, dict)
             ]

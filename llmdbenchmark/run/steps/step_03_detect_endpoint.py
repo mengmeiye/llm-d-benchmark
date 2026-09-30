@@ -75,7 +75,7 @@ class DetectEndpointStep(Step):
         is_fma = is_fma_only_mode(context)
         inference_port = self._resolve(
             plan_config,
-            "vllmCommon.inferencePort",
+            "engine.servicePort",
             default=8000,
         )
         release = self._resolve(

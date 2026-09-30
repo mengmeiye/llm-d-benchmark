@@ -28,6 +28,7 @@ import yaml
 from jinja2 import Environment
 
 from llmdbenchmark.executor.command import CommandResult
+from llmdbenchmark.engine import serving_port
 from llmdbenchmark.executor.step import Step, StepResult, Phase
 from llmdbenchmark.executor.context import ExecutionContext, is_fma_only_mode
 from llmdbenchmark.utilities.kube_helpers import (
@@ -983,9 +984,7 @@ class DeployHarnessStep(Step):
                 f"'{spec.group}'; its {len(batch)} concurrent treatments do not "
                 f"each start cold"
             )
-        inference_port = (
-            (spec.plan_config or {}).get("vllmCommon", {}).get("inferencePort", 8000)
-        )
+        inference_port = serving_port(spec.plan_config or {})
         return reset_caches_pods(
             spec.cmd,
             spec.deploy_namespace or spec.harness_ns,

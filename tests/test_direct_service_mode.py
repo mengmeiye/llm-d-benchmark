@@ -20,6 +20,57 @@ from llmdbenchmark.utilities.endpoint import (
 
 _REPO = Path(__file__).resolve().parents[1]
 
+_GPU_SCENARIO = _REPO / "config/scenarios/examples/gpu.yaml"
+
+
+def _branch(node: dict, key: str) -> dict:
+    """setdefault that also replaces an explicit `key:` with no value."""
+    child = node.get(key)
+    if not isinstance(child, dict):
+        child = {}
+        node[key] = child
+    return child
+
+
+def _gpu_scenario_in_direct_mode(
+    tmp_path: Path,
+    *,
+    service_port: int = 8000,
+    gateway_namespace: str | None = None,
+) -> Path:
+    """Write a copy of the GPU example that is coherent without a sidecar.
+
+    The shipped scenario runs the llm-d `epponly` topology, where the routing
+    sidecar holds ``engine.servicePort`` on each decode pod and decode's command
+    binds 8200. Direct mode deletes that sidecar, so the engine has to bind the
+    Service port itself -- which means editing the command, the one place a port
+    is stated. That edit is the fixture: nothing rewrites the user's command on
+    their behalf any more, so a test for direct mode has to make it too.
+
+    The fixture is built by editing the parsed scenario, not its text. A string
+    patch silently no-ops when the scenario is re-indented, which leaves the test
+    asserting against an unmodified scenario.
+    """
+    document = yaml.safe_load(_GPU_SCENARIO.read_text(encoding="utf-8"))
+    stack = document["scenario"][0]
+    common = _branch(stack, "common")
+    _branch(common, "engine")["servicePort"] = service_port
+
+    section = _branch(stack, "modelservice")
+    gateway = _branch(section, "gateway")
+    gateway["className"] = "none"
+    if gateway_namespace is not None:
+        gateway["namespace"] = gateway_namespace
+
+    decode_engine = _branch(_branch(section, "decode"), "engine")
+    command = decode_engine["command"]
+    assert "--port 8200" in command, command
+    decode_engine["command"] = command.replace("--port 8200", f"--port {service_port}")
+
+    scenario_file = tmp_path / "scenario.yaml"
+    scenario_file.write_text(yaml.dump(document, sort_keys=False), encoding="utf-8")
+    return scenario_file
+
 
 def _renderer() -> RenderPlans:
     renderer = RenderPlans.__new__(RenderPlans)
@@ -46,19 +97,70 @@ def test_direct_mode_disables_per_pod_routing_proxy() -> None:
     assert result["routing"]["proxy"]["enabled"] is False
 
 
-def test_direct_mode_retargets_custom_decode_command_to_service_port() -> None:
+def test_direct_mode_leaves_the_decode_command_alone() -> None:
+    """Direct mode must not rewrite the port inside the user's command.
+
+    It used to: the renderer swapped the decode command's port for the Service
+    port so the baseline worked without the sidecar. That silently made the
+    running engine disagree with the command the user wrote and read back in
+    the plan, and it only ever worked because the port was an env var
+    llm-d-benchmark itself defined. A pasted `--port 8200` would have been
+    rewritten too, or (with any other spelling) missed entirely.
+
+    The command is now the authority. Direct mode turns the sidecar off and
+    nothing else; when the command binds the wrong port,
+    ``_validate_engine_ports`` says so instead of papering over it.
+    """
+    command = "vllm serve model --port 8200"
     values = {
         "gateway": {"className": "none"},
         "modelservice": {"enabled": True},
-        "decode": {
-            "vllm": {"customCommand": "vllm serve model --port $VLLM_METRICS_PORT"}
-        },
+        "engine": {"servicePort": 8000},
+        "decode": {"replicas": 1, "engine": {"command": command, "port": 8200}},
     }
 
     result = RenderPlans._normalize_direct_service_mode(values)
 
-    command = result["decode"]["vllm"]["customCommand"]
-    assert command == "vllm serve model --port $VLLM_INFERENCE_PORT"
+    assert result["decode"]["engine"]["command"] == command
+    assert result["routing"]["proxy"]["enabled"] is False
+
+
+def test_direct_mode_reports_a_decode_command_that_misses_the_service_port() -> None:
+    """The error has to name the port to change, and where to change it.
+
+    Without the sidecar nothing bridges 8000 to 8200, so this stack comes up
+    green and answers nothing -- the failure mode that makes this an error
+    rather than a warning.
+    """
+    values = {
+        "gateway": {"className": "none"},
+        "modelservice": {"enabled": True},
+        "engine": {"servicePort": 8000},
+        "decode": {"replicas": 1, "engine": {"command": "...", "port": 8200}},
+    }
+    RenderPlans._normalize_direct_service_mode(values)
+
+    errors = RenderPlans._validate_engine_ports(values, "stack")
+
+    assert len(errors) == 1, errors
+    assert "routing sidecar is disabled" in errors[0]
+    assert "decode.engine.command" in errors[0]
+    assert "8000" in errors[0]
+
+
+def test_direct_mode_accepts_a_decode_command_that_binds_the_service_port() -> None:
+    values = {
+        "gateway": {"className": "none"},
+        "modelservice": {"enabled": True},
+        "engine": {"servicePort": 8000},
+        "decode": {
+            "replicas": 1,
+            "engine": {"command": "vllm serve model --port 8000", "port": 8000},
+        },
+    }
+    RenderPlans._normalize_direct_service_mode(values)
+
+    assert RenderPlans._validate_engine_ports(values, "stack") == []
 
 
 def test_direct_mode_rejects_prefill_routing() -> None:
@@ -192,12 +294,15 @@ def test_direct_mode_skips_router_deployment(tmp_path: Path) -> None:
 
 
 def test_gpu_example_renders_plain_service_without_router(tmp_path: Path) -> None:
+    """Direct mode: one Helm release, a plain Service, no Gateway or EPP."""
+    scenario_file = _gpu_scenario_in_direct_mode(tmp_path)
+    output_dir = tmp_path / "rendered"
     logger = MagicMock()
     result = RenderPlans(
         template_dir=_REPO / "config/templates/jinja",
         defaults_file=_REPO / "config/templates/values/defaults.yaml",
-        scenarios_file=_REPO / "config/scenarios/examples/gpu.yaml",
-        output_dir=tmp_path,
+        scenarios_file=scenario_file,
+        output_dir=output_dir,
         logger=logger,
         version_resolver=_passthrough_version_resolver(),
         cluster_resource_resolver=ClusterResourceResolver(logger=logger, dry_run=True),
@@ -205,7 +310,7 @@ def test_gpu_example_renders_plain_service_without_router(tmp_path: Path) -> Non
     ).eval()
 
     assert not result.has_errors, result.to_dict()
-    stack_dirs = [path.parent for path in tmp_path.rglob("config.yaml")]
+    stack_dirs = [path.parent for path in output_dir.rglob("config.yaml")]
     assert len(stack_dirs) == 1
     stack_dir = stack_dirs[0]
 
@@ -245,38 +350,32 @@ def test_gpu_example_renders_plain_service_without_router(tmp_path: Path) -> Non
         (stack_dir / "13_ms-values.yaml").read_text(encoding="utf-8")
     )
     assert modelservice_values["routing"]["proxy"]["enabled"] is False
+
+    # The command reaches the container verbatim: the port the scenario wrote is
+    # the port the engine binds, and it is the Service's target. Nothing
+    # substitutes a benchmark-owned variable in for it.
     command = modelservice_values["decode"]["containers"][0]["args"][0]
-    assert "--port $VLLM_INFERENCE_PORT" in command
-    assert "$VLLM_METRICS_PORT" not in command
+    assert "--port 8000" in command
+    assert "VLLM_" not in command
 
 
 def test_direct_service_uses_gateway_namespace_and_decode_target_port(
     tmp_path: Path,
 ) -> None:
-    # Build the fixture by editing the parsed scenario, not its text. A
-    # string patch silently no-ops when the scenario is re-indented, which
-    # leaves the test asserting against an unmodified scenario.
-    document = yaml.safe_load(
-        (_REPO / "config/scenarios/examples/gpu.yaml").read_text(encoding="utf-8")
+    """The Service lands beside the model and targets the engine's own port.
+
+    ``routing.servicePort`` is what clients dial; ``engine.servicePort`` is what
+    the pod listens on, which in direct mode is the port decode's command binds.
+    They are allowed to differ, so the template has to read each from its own
+    place rather than assume one number.
+    """
+    scenario_file = _gpu_scenario_in_direct_mode(
+        tmp_path,
+        service_port=8100,
+        gateway_namespace="model-serving",
     )
-
-    def _branch(node: dict, key: str) -> dict:
-        """setdefault that also replaces an explicit `key:` with no value."""
-        child = node.get(key)
-        if not isinstance(child, dict):
-            child = {}
-            node[key] = child
-        return child
-
-    stack = document["scenario"][0]
-    section = _branch(stack, "modelservice")
-    gateway = _branch(section, "gateway")
-    gateway["className"] = "none"
-    gateway["namespace"] = "model-serving"
-    _branch(_branch(section, "decode"), "vllm")["servicePort"] = 8100
-    _branch(section, "routing")["servicePort"] = 8000
-
-    scenario_file = tmp_path / "scenario.yaml"
+    document = yaml.safe_load(scenario_file.read_text(encoding="utf-8"))
+    _branch(document["scenario"][0]["modelservice"], "routing")["servicePort"] = 8000
     scenario_file.write_text(yaml.dump(document, sort_keys=False), encoding="utf-8")
     output_dir = tmp_path / "rendered"
     logger = MagicMock()

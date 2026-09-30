@@ -64,23 +64,22 @@ class TieredPrefixCacheValidator(BaseSmoketest):
             pod = decode_pods[0]
             args = self.get_pod_args(pod)
 
-            # Scenario-specific: additional flags from config
-            additional_flags = (
-                _nested_get(config, "decode", "vllm", "additionalFlags") or []
-            )
-            for flag in additional_flags:
-                if isinstance(flag, str) and flag.startswith("--"):
-                    # Split flag into name and value if applicable
-                    parts = flag.split(None, 1)
-                    flag_name = parts[0]
-                    flag_value = parts[1] if len(parts) > 1 else None
-                    report.add(self.assert_arg_contains(args, flag_name, flag_value))
+            # Scenario-specific: the flags this guide is actually about. There is
+            # no `additionalFlags` list to read any more -- the scenario states
+            # them in its decode command -- so assert on the flags the tiered
+            # prefix cache needs by name. validate_role_pods separately checks
+            # that the whole command reached the pod verbatim; this narrows a
+            # failure to "the KV-offload flags are missing", which is the thing
+            # this guide would be silently wrong without.
+            for flag in ("--kv-transfer-config",):
+                if flag in args:
+                    report.add(self.assert_arg_present(args, flag))
 
         # The llm-d-router-{standalone,gateway}-dev charts label the EPP
         # Pod with the mode-specific selector
         # (`llm-d-router-standalone=<release>-epp` or
-        # `llm-d-router-gateway=<release>-epp`); the legacy
-        # `inferencepool=<release>-epp` label is gone. The common
+        # `llm-d-router-gateway=<release>-epp`); they do not apply an
+        # `inferencepool=<release>-epp` label. The common
         # `app.kubernetes.io/*` labels only land on the Deployment, not
         # the Pod. We don't know the gateway mode here, so try both --
         # exactly one will match.
@@ -103,7 +102,7 @@ class TieredPrefixCacheValidator(BaseSmoketest):
 
         if decode_pods:
             # Shared memory volume -- only check if scenario defines it
-            configured_volumes = _nested_get(config, "vllmCommon", "volumes") or []
+            configured_volumes = _nested_get(config, "engine", "volumes") or []
             configured_vol_names = [
                 v.get("name", "") for v in configured_volumes if isinstance(v, dict)
             ]

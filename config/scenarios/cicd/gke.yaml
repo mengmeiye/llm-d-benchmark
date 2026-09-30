@@ -1,5 +1,4 @@
 # GKE H100 CI/CD Scenario
-# Based on scenarios/cicd/gke_H100_fb.sh
 #
 # CI/CD scenario for Google Kubernetes Engine clusters with H100 GPUs.
 # Uses the default model (facebook/opt-125m) for fast validation.
@@ -19,10 +18,11 @@ scenario:
           cloud.google.com/gke-accelerator: nvidia-h100-80gb
       # Model
       model:
-        name: facebook/opt-125m
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: facebook-opt-125m
-        path: models/facebook/opt-125m
-        huggingfaceId: facebook/opt-125m
       # Storage
       storage:
         modelPvc:
@@ -34,29 +34,19 @@ scenario:
         benchmark:
           repository: ghcr.io/llm-d/llm-d-benchmark
           tag: nightly
-      vllmCommon:
+      engine:
         priorityClassName: nightly-gpu-critical
 
     # Standalone with GKE LD_LIBRARY_PATH (nvidia path, not cuda compat)
     standalone:
       enabled: false
-      vllm:
-        customCommand: |
-          export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
-          export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-          vllm serve $MODEL_SERVE_REF \
-          --host 0.0.0.0 \
-          --served-model-name $MODEL_NAME \
-          --port $VLLM_INFERENCE_PORT \
-          --block-size $VLLM_BLOCK_SIZE \
-          --max-model-len $VLLM_MAX_MODEL_LEN \
-          --max-num-seq $VLLM_MAX_NUM_SEQ \
-          --load-format $VLLM_LOAD_FORMAT \
-          --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
-          --max-num-seqs $VLLM_MAX_NUM_SEQ \
-          --tensor-parallel-size $VLLM_TENSOR_PARALLELISM \
-          --disable-uvicorn-access-log \
-          --no-enable-prefix-caching
+      # No engine.command: `-t standalone` inherits decode's line below, which
+      # is the same engine serving the same model without the router in front
+      # of it. The copy that used to live here had already drifted from decode's
+      # -- it still passed `--load-format auto` and `--max-num-seqs 256`, and
+      # had lost the `--no-enable-log-requests` that decode carries.
+      # The `--port 8200` it inherits needs no rewriting: the Service targets
+      # whatever the command binds.
 
     # Deployment method
     modelservice:
@@ -76,18 +66,19 @@ scenario:
             labelKey: cloud.google.com/gke-accelerator
             labelValue: nvidia-h100-80gb
         replicas: 1
-        vllm:
-          customCommand: |
+        # --port 8200: the routing sidecar owns the Service port (8000) on a
+        # decode pod and forwards here.
+        engine:
+          command: |
             export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
             export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-            vllm serve $MODEL_SERVE_REF \
+            vllm serve facebook/opt-125m \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_METRICS_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+            --port 8200 \
+            --block-size 16 \
+            --max-model-len 4096 \
+            --tensor-parallel-size 1 \
+            --gpu-memory-utilization 0.95 \
             --no-enable-log-requests \
             --disable-uvicorn-access-log \
             --no-enable-prefix-caching
@@ -96,18 +87,19 @@ scenario:
       prefill:
         enabled: true
         replicas: 1
-        vllm:
-          customCommand: |
+        # A prefill pod never gets a routing sidecar, so it binds the
+        # Service port (8000) itself.
+        engine:
+          command: |
             export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
             export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-            vllm serve $MODEL_SERVE_REF \
+            vllm serve facebook/opt-125m \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_INFERENCE_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+            --port 8000 \
+            --block-size 16 \
+            --max-model-len 4096 \
+            --tensor-parallel-size 1 \
+            --gpu-memory-utilization 0.95 \
             --no-enable-log-requests \
             --disable-uvicorn-access-log \
             --no-enable-prefix-caching

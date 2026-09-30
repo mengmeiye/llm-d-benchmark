@@ -916,15 +916,39 @@ Unit tests live under `tests/` and run with `pytest`:
 pytest tests/ -v
 ```
 
-For integration testing against a live cluster, `util/test-scenarios.sh` runs standup/teardown cycles across scenarios:
+For integration testing, `util/test-scenarios.sh` validates scenarios -- by rendering them (no cluster) or by running standup/teardown cycles against a live one:
 
 ```bash
-util/test-scenarios.sh --stable     # Run known-stable scenarios
-util/test-scenarios.sh --trouble    # Run scenarios that have had issues
-util/test-scenarios.sh --all        # Run all scenarios
-util/test-scenarios.sh --ms-only    # Modelservice scenarios only
-util/test-scenarios.sh --sa-only    # Standalone scenarios only
+util/test-scenarios.sh --plan --all         # render every scenario -- no cluster needed
+util/test-scenarios.sh --list --all         # what would run, with the engine of each
+util/test-scenarios.sh "$NS"                # standup/teardown, curated default set
+util/test-scenarios.sh --engine sglang "$NS"        # scenarios that run SGLang
+util/test-scenarios.sh --engine trtllm "$NS"        # ... or TensorRT-LLM
+util/test-scenarios.sh --method kustomize --engine sglang "$NS"  # llm-d guides, SGLang backend
+util/test-scenarios.sh --spec guides/pd-disaggregation "$NS"
+util/test-scenarios.sh --plan --engine trtllm       # incl. commented-in TensorRT-LLM
 ```
+
+What runs is read from `config/scenarios/` rather than from lists kept in the
+script, so a new scenario or a new engine needs no edit there. `--plan` is the
+fast pre-flight: it renders every template without touching a cluster.
+`util/scenario-inventory.py` prints the same inventory on its own
+(which engine each role launches, which deploy methods each scenario supports).
+Run `util/test-scenarios.sh --help` for the full set of selectors.
+
+A scenario may also carry another engine's launch command as a comment, for you
+to switch in -- `config/scenarios/examples/engines.yaml` and
+`config/scenarios/guides/optimized-baseline.yaml` offer SGLang and TensorRT-LLM
+that way. Each such group is tagged `# @engine <name>`, and `llmdbenchmark
+--engine <name>` performs the uncommenting into the workspace (never into the
+repo) and renders that:
+
+```bash
+llmdbenchmark standup --spec examples/engines --engine sglang -p "$NS"
+```
+
+`util/test-scenarios.sh --engine <name>` selects by that too, so those blocks are
+held to the same standard as a live command instead of rotting quietly.
 
 See [tests/README.md](tests/README.md) for unit test details.
 

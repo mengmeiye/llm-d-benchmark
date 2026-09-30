@@ -1,5 +1,4 @@
 # PREDICTED LATENCY ROUTING WELL LIT PATH for LLM-D Deployment
-# Migrated from bash environment variables to YAML format
 # Based on https://github.com/llm-d/llm-d/tree/main/guides/predicted-latency-routing
 #
 # Notes:
@@ -32,14 +31,15 @@ scenario:
       # Model Configuration
       # -------------------------------------------------------------------------
       model:
-        name: Qwen/Qwen3-32B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen3-32b
-        path: models/Qwen/Qwen3-32B
-        huggingfaceId: Qwen/Qwen3-32B
         size: 1Ti
-        maxModelLen: 16000
-        blockSize: 64
-        gpuMemoryUtilization: 0.95
+        # maxModelLen / blockSize / gpuMemoryUtilization are deliberately NOT
+        # set here: they are pure engine parameters, so they are stated in the
+        # launch command below and read back out for the capacity planner.
 
       # -------------------------------------------------------------------------
       # Storage Configuration
@@ -48,7 +48,12 @@ scenario:
         modelPvc:
           size: 1Ti
 
-      vllmCommon:
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the network facts only the
+        # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+        # library path. Engine commands never mention it.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
         volumes:
           - name: shared-config
             type: emptyDir
@@ -74,7 +79,7 @@ scenario:
     # defined ENTIRELY by the guide's own manifests:
     #
     #   * EVERYTHING ELSE in this scenario is IGNORED -- model, modelservice,
-    #     standalone, decode/prefill, vllmCommon, storage, harness model, etc.
+    #     standalone, decode/prefill, engine, storage, harness model, etc.
     #   * `-m/--models` and all other CLI/scenario tuning are ignored.
     #   * DoE `experiment` SETUP sweeps do NOT alter a kustomize deploy
     #     (only run/workload treatments still apply).
@@ -134,6 +139,30 @@ scenario:
       router:
         latencyPredictor:
           enabled: true
+          # The training and prediction servers run as sidecars on the router
+          # pod. The chart (v0.10.0) points both at
+          # ghcr.io/llm-d/llm-d-latency-predictor-{training,prediction}-server
+          # at its own version, v0.10.0 -- a tag neither repository publishes.
+          # Inherited, they leave the router pod in ImagePullBackOff and the
+          # stack never comes up.
+          #
+          # v0.8.0 is the tag to pin, not the higher-numbered 0.9.0 those
+          # repositories also carry. The chart hardcodes the prediction
+          # sidecar's launch line as `uvicorn
+          # llm_d_latency_predictor.prediction_server:app` with no values hook,
+          # and only the v0.8.x images ship that module path -- 0.9.0, latest
+          # and main are a separate lineage that still spells it
+          # `prediction.prediction_server`, so they pull fine and then exit 1.
+          # v0.8.0 is also what the chart's next release (v0.11.0-rc.2)
+          # defaults both sidecars to, so this is the pin catching up with the
+          # chart rather than diverging from it. Delete both blocks once
+          # chartVersions.llmDRouter moves past v0.10.0.
+          trainingServer:
+            image:
+              tag: "v0.8.0"
+          predictionServers:
+            image:
+              tag: "v0.8.0"
         extraServicePorts:
           - name: http
             port: 80
@@ -253,20 +282,35 @@ scenario:
       # -------------------------------------------------------------------------
       decode:
         replicas: 2
-        vllm:
-          customCommand: |
-            export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
-            export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-            vllm serve $MODEL_SERVE_REF \
+        # The launch command, verbatim -- the same line you would run by hand, or
+        # the one already in the llm-d guide. It is rendered into the container
+        # unchanged, so every flag here is read by vLLM and none of them by
+        # llm-d-benchmark, which reads only what decides Kubernetes objects:
+        # `--port` (container port, probes, the routing sidecar's upstream) and
+        # the capacity numbers the pre-deploy check needs.
+        #
+        # Decode binds 8200, not 8000: the routing sidecar the chart injects on
+        # decode pods owns `engine.servicePort` (8000) and forwards here. In
+        # direct mode (`gateway.className: none`) there is no sidecar -- bind
+        # 8000 then.
+        #
+        # Every flag is written out, with the value the engine will receive.
+        # This command is the CUDA one, because that is what this guide is
+        # validated on; hardware that needs a different command gets its own
+        # scenario file rather than a substitution point per difference
+        # (config/scenarios/examples/{intel-xpu,spyre,cpu}.yaml).
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3-32B \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_METRICS_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+            --port 8200 \
+            --max-model-len 16000 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 1 \
+            --block-size 64 \
+            --gpu-memory-utilization 0.95 \
+            --dtype bfloat16 \
             --no-enable-log-requests \
             --disable-uvicorn-access-log \
             --disable-access-log-for-endpoints=/health,/metrics,/v1/models
@@ -280,11 +324,6 @@ scenario:
               - name: shared-config
                 mountPath: /shared-config
 
-        parallelism:
-          tensor: 1
-          data: 1
-          dataLocal: 1
-          workers: 1
 
         # Resource configuration
         resources:
@@ -295,13 +334,12 @@ scenario:
             memory: 64Gi
             cpu: "16"
 
-        # No customCommand -- the vLLM serve command is auto-generated
-        # from model.*, vllmCommon.flags.*, and decode.vllm.additionalFlags.
         # -----------------------------------------------------------------------
         # Extra Environment Variables
-        # No custom env vars for this scenario -- uses default ENVVARS_TO_YAML
-        # mechanism. Auto-populated vars (UCX_TLS, VLLM_NIXL_*, etc.) are set
-        # by the preprocess script at pod runtime.
+        # No environment variables for this scenario. Nothing is auto-populated:
+        # whatever the engine -- or a library beneath it (UCX_*, NCCL_*,
+        # VLLM_NIXL_*, ...) -- needs must be listed here, the same way the
+        # engine command lists its own flags.
         # -----------------------------------------------------------------------
         extraEnvVars: []
 

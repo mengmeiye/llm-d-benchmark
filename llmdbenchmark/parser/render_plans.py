@@ -29,6 +29,11 @@ from llmdbenchmark.parser.cli_overrides import (
     selectors_for_stack,
     validate_selectors,
 )
+from llmdbenchmark.engine import (
+    MODEL_READS,
+    model_id_from_commands,
+    resolve_engines,
+)
 from llmdbenchmark.parser.config_schema import validate_config
 from llmdbenchmark.parser.render_result import StackErrors, RenderResult
 from llmdbenchmark.utilities.container_host import (
@@ -317,12 +322,12 @@ class RenderPlans:
 
     @staticmethod
     def _model_id_label_filter(model_name: str, namespace: str = "") -> str:
-        """Generate a hashed model ID label matching the bash implementation.
+        """Generate a hashed model ID label.
 
         Takes a model name like 'Qwen/Qwen3-32B' and a namespace, produces
-        a DNS-safe label in the format: {first8}-{hash8}-{last8}.
-
-        This matches the bash model_attribute() function in setup/functions.py.
+        a DNS-safe label in the format: {first8}-{hash8}-{last8}. The hash
+        covers the sanitized model id and the namespace, so two stacks serving
+        the same model in different namespaces get distinct labels.
         """
 
         if not model_name:
@@ -576,26 +581,120 @@ class RenderPlans:
 
         return result
 
-    def _warn_custom_command_conflicts(self, values: dict) -> None:
-        """Warn when CLI overrides won't propagate into hardcoded customCommands.
+    #: ``model:`` fields that follow the model id. Each is filled from the id
+    #: the launch command names only while it still holds the value
+    #: ``defaults.yaml`` supplies -- a value nobody chose. A scenario that
+    #: states one (a ``shortName`` that keeps pod names readable, a ``path``
+    #: pointing at an existing PVC directory) keeps it.
+    _MODEL_ID_DERIVED = ("name", "huggingfaceId", "path", "shortName")
 
-        customCommand is a verbatim string -- CLI flags like --models only
-        update the config dict (model.name, etc.) but cannot modify the
-        hardcoded values inside customCommand.  Emit a warning so users
-        know to update the customCommand manually.
+    def _adopt_model_from_command(self, values: dict, defaults: dict) -> dict:
+        """Name the plan's model after the model the launch command serves.
+
+        A scenario names its model once, where a user would: in the engine
+        command. Everything outside the engine is keyed off ``model.*`` though,
+        so the id is read back out of the command here instead of being typed a
+        second time under ``model:``.
+
+        Only fills in what nobody chose. A ``model.name`` set by the scenario, a
+        treatment or ``-m/--models`` stands, and if the command then serves a
+        different model ``resolve_engines`` says so -- the command is never
+        rewritten and a stated value is never overwritten.
+        """
+        if self.cli_model:
+            # `-m/--models` is the most explicit statement of all, and
+            # `_warn_custom_command_conflicts` already reports a command that
+            # cannot follow it.
+            return values
+
+        model_config = values.get("model")
+        if not isinstance(model_config, dict):
+            return values
+
+        default_model = defaults.get("model")
+        default_model = default_model if isinstance(default_model, dict) else {}
+        unchosen = {
+            key
+            for key in self._MODEL_ID_DERIVED
+            if model_config.get(key) in (None, "", default_model.get(key))
+        }
+        if "name" not in unchosen:
+            return values
+
+        model_id = model_id_from_commands(values)
+        if not model_id or model_id == model_config.get("name"):
+            return values
+
+        model_config["name"] = model_id
+        if "huggingfaceId" in unchosen:
+            model_config["huggingfaceId"] = model_id
+        if "path" in unchosen:
+            model_config["path"] = f"models/{model_id}"
+        if "shortName" in unchosen:
+            namespace = (values.get("namespace") or {}).get(
+                "name", self.DEFAULT_NAMESPACE
+            )
+            model_config["shortName"] = self._generate_short_name(model_id, namespace)
+
+        self.logger.log_info(
+            f"Model from engine command: {model_id} "
+            f"(shortName={model_config.get('shortName')})"
+        )
+        return values
+
+    @staticmethod
+    def _sync_routing_target_port(values: dict) -> dict:
+        """Point the routing sidecar at the port decode's command actually binds.
+
+        The sidecar terminates the Service port and forwards upstream; upstream
+        is the engine. ``routing.proxy.targetPort`` is only a chart value, so it
+        has to follow ``decode.engine.port`` -- otherwise changing ``--port`` in
+        the command silently breaks every request while the pod stays healthy.
+        An explicitly set ``targetPort`` is left alone.
+        """
+        routing = values.get("routing")
+        if not isinstance(routing, dict):
+            return values
+        proxy = routing.setdefault("proxy", {})
+        if not isinstance(proxy, dict):
+            return values
+        if proxy.get("targetPort"):
+            return values
+        engine_port = ((values.get("decode") or {}).get("engine") or {}).get("port")
+        if engine_port:
+            proxy["targetPort"] = int(engine_port)
+        return values
+
+    def _warn_custom_command_conflicts(self, values: dict) -> None:
+        """Warn when ``-m/--models`` cannot reach into an engine command.
+
+        The engine command is rendered verbatim, so a model id hardcoded in it is
+        invisible to ``--models``: the flag would move ``model.name`` (and with
+        it the PVC, the pod labels and the harness target) while the engine kept
+        serving the model the command names. A command that writes the model as
+        ``${model.name}`` follows the flag instead -- substitution runs after
+        ``--models`` has been applied -- and so does one that leaves it to the
+        container's ``$MODEL_NAME``.
         """
         if not self.cli_model:
             return
 
-        for role in ("decode", "prefill"):
-            cmd = values.get(role, {}).get("vllm", {}).get("customCommand")
-            if cmd:
-                self.logger.log_warning(
-                    f"CLI --models override ({self.cli_model}) will not "
-                    f"propagate into {role}.vllm.customCommand. "
-                    f"Update the customCommand in your scenario to match, "
-                    f"or remove customCommand to use the auto-generated command."
-                )
+        for role in ("decode", "prefill", "standalone", "nok8s"):
+            role_cfg = values.get(role)
+            if not isinstance(role_cfg, dict):
+                continue
+            engine_cfg = role_cfg.get("engine")
+            cmd = engine_cfg.get("command") if isinstance(engine_cfg, dict) else None
+            if not isinstance(cmd, str) or not cmd.strip():
+                continue
+            if any(ref in cmd for ref in ("$MODEL_NAME", "${model.name}")):
+                continue
+            self.logger.log_warning(
+                f"CLI --models override ({self.cli_model}) will not propagate "
+                f"into {role}.engine.command, which is rendered verbatim. Write "
+                "the model as `${model.name}` there so the command follows "
+                "--models."
+            )
 
     def _resolve_monitoring(self, values: dict) -> dict:
         """Override monitoring based on ``--monitoring`` / ``--no-monitoring``.
@@ -917,18 +1016,11 @@ class RenderPlans:
             routing = values.setdefault("routing", {})
             routing.setdefault("proxy", {})["enabled"] = False
 
-            # Accelerator-neutral guides may provide a custom command that
-            # binds decode vLLM to the proxy backend port. Direct mode has no
-            # proxy, so make the custom command follow the chart's normal
-            # proxy-disabled behavior and listen on the Service port instead.
-            decode_vllm = values.setdefault("decode", {}).get("vllm") or {}
-            custom_command = decode_vllm.get("customCommand")
-            if isinstance(custom_command, str):
-                decode_vllm["customCommand"] = custom_command.replace(
-                    "$VLLM_METRICS_PORT",
-                    "$VLLM_INFERENCE_PORT",
-                )
-                values["decode"]["vllm"] = decode_vllm
+            # The engine command is not rewritten here: it is the user's text
+            # and the port inside it is what the engine will actually bind.
+            # Direct mode has no sidecar bridging servicePort -> engine port,
+            # so the command has to bind servicePort itself.
+            # _validate_direct_service_constraints reports it when it does not.
         return values
 
     @staticmethod
@@ -967,6 +1059,69 @@ class RenderPlans:
             )
         return errors
 
+    @staticmethod
+    def _validate_engine_ports(values: dict, stack_name: str) -> list[str]:
+        """Check each role's engine port against who else holds it on that pod.
+
+        The engine's port comes from its command and nothing rewrites it, so the
+        only thing left to check is whether the pod can actually serve on it:
+
+        - Decode with the routing sidecar: the sidecar owns ``servicePort`` and
+          forwards upstream, so the engine must bind something else. Binding the
+          same port means two listeners on one pod -- one of them loses.
+        - Decode without the sidecar (``gateway.className=none``): nothing
+          bridges, so the engine must bind ``servicePort`` itself.
+        - Prefill: never gets a sidecar, so the same rule applies -- and the
+          decode sidecar reaches prefill on ``servicePort`` for P/D.
+
+        Errors, not warnings: each one is a stack that comes up green and
+        answers nothing.
+        """
+        if not (values.get("modelservice") or {}).get("enabled", True):
+            return []
+        service_port = (values.get("engine") or {}).get("servicePort")
+        if not service_port:
+            return []
+        service_port = int(service_port)
+
+        routing_proxy = (values.get("routing") or {}).get("proxy") or {}
+        sidecar_on = bool(routing_proxy.get("enabled", True))
+
+        errors: list[str] = []
+        for role, has_sidecar in (("decode", sidecar_on), ("prefill", False)):
+            role_cfg = values.get(role) or {}
+            if not role_cfg.get("enabled", True):
+                continue
+            if int(role_cfg.get("replicas", 0) or 0) < 1:
+                continue
+            engine_cfg = role_cfg.get("engine") or {}
+            port = engine_cfg.get("port")
+            if not port:
+                continue
+            port = int(port)
+            if has_sidecar and port == service_port:
+                errors.append(
+                    f"[{stack_name}] {role}.engine.command binds {port}, which "
+                    f"is engine.servicePort -- the routing sidecar on the same "
+                    f"pod already listens there. Give the command a different "
+                    f"--port (8200 is the llm-d convention), or disable the "
+                    f"sidecar with routing.proxy.enabled=false."
+                )
+            elif not has_sidecar and port != service_port:
+                reason = (
+                    "the routing sidecar is disabled"
+                    if role == "decode"
+                    else "prefill pods never get a routing sidecar"
+                )
+                errors.append(
+                    f"[{stack_name}] {role}.engine.command binds {port} but "
+                    f"{reason}, so nothing bridges engine.servicePort "
+                    f"({service_port}) to it and every request would reach a "
+                    f"port no one listens on. Change --port to {service_port} "
+                    f"in {role}.engine.command."
+                )
+        return errors
+
     def _log_image_overrides(self, values: dict) -> None:
         """Log images that have been explicitly set (not 'auto').
 
@@ -983,7 +1138,9 @@ class RenderPlans:
                         f"Image override: {key} pinned to {repo}:{tag}"
                     )
 
-        standalone_img = values.get("standalone", {}).get("image", {})
+        standalone_img = (values.get("standalone", {}).get("engine") or {}).get(
+            "image", {}
+        )
         if isinstance(standalone_img, dict):
             tag = standalone_img.get("tag", "auto")
             repo = standalone_img.get("repository", "")
@@ -991,6 +1148,93 @@ class RenderPlans:
                 self.logger.log_info(
                     f"Image override: standalone pinned to {repo}:{tag}"
                 )
+
+    #: How many trailing segments of ``model.path`` the model id occupies under
+    #: ``pvc+hf``. The llm-d modelservice chart reads the model id off the last
+    #: two segments of the uri path and the hub cache off everything between the
+    #: claim name and those two, so ``models/Qwen/Qwen3-32B`` means an id of
+    #: ``Qwen/Qwen3-32B`` cached under ``<mountPath>/models``.
+    _MODEL_ID_SEGMENTS = 2
+
+    @staticmethod
+    def _uri_protocol(values: dict) -> str:
+        """The configured model-artifact protocol (``pvc+hf`` when unset)."""
+        modelservice = values.get("modelservice")
+        if not isinstance(modelservice, dict):
+            return "pvc+hf"
+        return str(modelservice.get("uriProtocol") or "pvc+hf")
+
+    def _resolve_model_hub_cache(self, values: dict) -> dict:
+        """Compute ``model.hubCacheSubdir`` -- where the HF hub cache sits.
+
+        Under ``pvc+hf`` the PVC holds a Hugging Face *hub cache*
+        (``models--<org>--<model>/snapshots/<sha>/...``) rather than a flat copy
+        of one model's files, and the engine is given the plain model id. The id
+        resolves against the cache through ``HF_HUB_CACHE``, which is what makes
+        ``vllm serve Qwen/Qwen3-32B`` read staged weights instead of reaching for
+        the Hub.
+
+        It is derived, not configured, because the modelservice chart derives the
+        same thing from the same uri: everything between the claim name and the
+        two segments of the model id. Deriving it here keeps the download Job
+        that *writes* the cache and the chart that *reads* it from being two
+        places to keep in step.
+
+        Relative to the volume root, never absolute: every container that touches
+        the cache mounts that volume somewhere else, so each composes
+        ``HF_HUB_CACHE`` from its own mount path and this. An absolute directory
+        computed here would be right for exactly one of them.
+
+        Left unset for every other protocol: ``hf`` has no PVC, and ``pvc``
+        points at a raw weights directory that no cache layout applies to.
+        """
+        model = values.get("model")
+        if not isinstance(model, dict):
+            return values
+
+        model["hubCacheSubdir"] = None
+        if self._uri_protocol(values) != "pvc+hf":
+            return values
+
+        path = str(model.get("path") or "").strip("/")
+        segments = [seg for seg in path.split("/") if seg]
+        if len(segments) <= self._MODEL_ID_SEGMENTS:
+            # Validated (and reported) by _validate_model_uri.
+            return values
+
+        model["hubCacheSubdir"] = "/".join(segments[: -self._MODEL_ID_SEGMENTS])
+        return values
+
+    def _validate_model_uri(self, values: dict, stack_name: str) -> list[str]:
+        """Check ``model.path`` against the protocol that has to interpret it.
+
+        ``pvc+hf`` is the chart's "the PVC holds a hub cache" protocol: it reads
+        the model id off the last two segments of the uri path. A ``model.path``
+        that cannot supply them (a single-segment directory name, an id with no
+        org) leaves the engine serving a nonsense id against an empty cache --
+        green pod, 404 on every request -- so it is an error with the fix in it.
+        """
+        if self._uri_protocol(values) != "pvc+hf":
+            return []
+        model = values.get("model")
+        if not isinstance(model, dict):
+            return []
+
+        path = str(model.get("path") or "").strip("/")
+        segments = [seg for seg in path.split("/") if seg]
+        if len(segments) > self._MODEL_ID_SEGMENTS:
+            return []
+
+        return [
+            f"[{stack_name}] model.path '{path}' cannot be served over "
+            "modelservice.uriProtocol 'pvc+hf', which reads the model id off "
+            f"its last {self._MODEL_ID_SEGMENTS} segments and needs at least "
+            "one more for the cache directory (models/<org>/<model>). Either "
+            "give model.path that shape, or -- if the PVC holds a raw weights "
+            "directory rather than a Hugging Face cache -- set "
+            "modelservice.uriProtocol: pvc and name the directory in the engine "
+            "command, with --served-model-name for the id clients ask for."
+        ]
 
     # Sentinel values indicating no real HF token has been configured
     def _resolve_model_id_label(self, values: dict) -> dict:
@@ -1074,10 +1318,10 @@ class RenderPlans:
         return values
 
     # nok8s host ports that must be unique across every nok8s stack on the
-    # host: config path -> whether the value is a base for `vllm.replicas`
+    # host: config path -> whether the value is a base for `engine.replicas`
     # consecutive ports.
     _NOK8S_HOST_PORTS: tuple[tuple[tuple[str, ...], bool], ...] = (
-        (("nok8s", "vllm", "hostPort"), True),
+        (("nok8s", "engine", "hostPort"), True),
         (("nok8s", "envoy", "listenPort"), False),
         (("nok8s", "envoy", "adminPort"), False),
         (("nok8s", "epp", "grpcPort"), False),
@@ -1099,8 +1343,9 @@ class RenderPlans:
         names are checked in ``_validate_nok8s_host_claims``.
 
         Skipped for single-stack scenarios (matching
-        ``_resolve_per_stack_identity``) so the shipped names ``vllm-0`` /
-        ``epp`` / ``envoy`` and ``~/.llmdbench/nok8s`` stay stable.
+        ``_resolve_per_stack_identity``) so the shipped names
+        ``modelserver-0`` / ``epp`` / ``envoy`` and ``~/.llmdbench/nok8s``
+        stay stable.
 
         Host ports are NOT derived here: binding a port the author never
         wrote is worse than refusing to render. See
@@ -1135,7 +1380,7 @@ class RenderPlans:
         exits immediately with ``unable to bind domain socket with
         base_id=0, id=0, errno=98``. It never binds its listener, so the
         only symptom the CLI sees is a readiness timeout on a port whose
-        vLLM behind it is perfectly healthy.
+        engine behind it is perfectly healthy.
 
         Applied to every stack, not just multi-stack scenarios (unlike
         ``_resolve_nok8s_stack_scope``): the Envoy this one collides with
@@ -1203,7 +1448,7 @@ class RenderPlans:
 
         errors: list[str] = []
         nok8s = values["nok8s"]
-        replicas = nok8s.get("vllm", {}).get("replicas", 1)
+        replicas = nok8s.get("engine", {}).get("replicas", 1)
         if isinstance(replicas, str) and replicas.strip().isdigit():
             # `replicas: "2"` fails the render on its own (the container
             # template does arithmetic on it), but coerce it here anyway so
@@ -1222,7 +1467,7 @@ class RenderPlans:
         # ``nok8s.nameSuffix`` can be shared outright, so the resolved name
         # is what gets checked.
         suffix = str(nok8s.get("nameSuffix") or "")
-        names = [f"vllm-{i}{suffix}" for i in range(replicas)]
+        names = [f"modelserver-{i}{suffix}" for i in range(replicas)]
         names += [f"epp{suffix}", f"envoy{suffix}"]
         for name in names:
             owner = self._nok8s_name_claims.setdefault(name, stack_name)
@@ -1245,7 +1490,7 @@ class RenderPlans:
                 continue
             if isinstance(base, str) and base.strip().isdigit():
                 base = int(base.strip())
-            # Only `vllm.hostPort` is used in template arithmetic, so a bad
+            # Only `engine.hostPort` is used in template arithmetic, so a bad
             # value there fails the render on its own. The other five are
             # interpolated verbatim: they would render a nonsense port into
             # the Envoy bootstrap and the endpoint URL, exit 0, and only fail
@@ -1274,7 +1519,7 @@ class RenderPlans:
                         f"[{stack_name}] nok8s host port {port} ({key}) is already "
                         f"used by stack '{owner}'. Every nok8s stack on a host needs "
                         f"its own ports; give this stack distinct "
-                        f"nok8s.vllm.hostPort, nok8s.envoy.listenPort, "
+                        f"nok8s.engine.hostPort, nok8s.envoy.listenPort, "
                         f"nok8s.envoy.adminPort and nok8s.epp.* values."
                     )
                 elif owner_key != key:
@@ -1318,10 +1563,11 @@ class RenderPlans:
     #: Genuine renames, where the shared spelling and the per-method spelling
     #: differ so the link cannot be derived from key names. Keep this small:
     #: anything whose names already agree is handled automatically.
-    _COMMON_ALIASES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-        # the vLLM serving image; standalone/fma call it `image`
-        (("images", "vllmOpenai"), ("standalone", "image")),
-    )
+    #: Currently empty: every serving image is now selected the same way, by
+    #: ``images.<engine>`` under ``common:`` flowing into each role's
+    #: ``engine.image`` (see ``engine/resolver.py::_resolve_image``), so there
+    #: is no spelling left to bridge.
+    _COMMON_ALIASES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = ()
 
     def _method_owned_keys(self, defaults: dict) -> dict[str, tuple[str, ...]]:
         """Map ``key -> sections that own it``, read from ``defaults.yaml``.
@@ -1397,6 +1643,174 @@ class RenderPlans:
                 }
 
         return self.deep_merge(result, common)
+
+    # Role sections one shared `roleDefaults:` block may seed. `nok8s` is not
+    # among them: it shares only `enabled` and `engine` with these, and the rest
+    # of it -- ssh transport, runtime, connection -- does not describe a pod.
+    _ROLE_DEFAULT_SECTIONS = ("decode", "prefill", "standalone")
+
+    def _expand_role_defaults(self, values: dict, defaults: dict | None = None) -> dict:
+        """Seed every role section in one scenario layer from ``roleDefaults``.
+
+        decode and prefill are the same pod -- same container, same probes,
+        same volumes, same accelerator arithmetic -- so a scenario that
+        configured both stated everything twice and the copies drifted.
+        ``roleDefaults:`` states the shared shape once; each role then carries
+        only what it does differently.
+
+        Precedence is ``defaults.yaml < common < roleDefaults < the role's own
+        block``, so naming a key under ``decode:`` always wins. Expansion runs
+        on the scenario layer rather than on the merged config for the same
+        reason :meth:`_expand_stack_common` does: absence here genuinely means
+        "the author did not set this", whereas after the merge every role key is
+        already present from defaults.yaml and a seed could never win.
+
+        A key is seeded into a section only where defaults.yaml models it --
+        ``shm`` reaches decode but not prefill, and standalone models neither
+        ``autoscaling`` nor ``monitoring``. A key no role models at all is a
+        typo, and raises rather than vanishing.
+
+        Values replace rather than combine, lists included: a role that names
+        ``extraEnvVars`` replaces the shared list instead of appending to it.
+        Plumbing every role must keep therefore belongs in ``roleDefaults``
+        alone, not in both.
+
+        Read at the layer root and under ``modelservice:``, since role blocks
+        are written in both places and hoisting runs later. A no-op when absent,
+        so a scenario with no ``roleDefaults`` renders exactly as before.
+        """
+        result = deepcopy(values)
+        nested = result.get("modelservice")
+        nested = nested if isinstance(nested, dict) else None
+
+        base = result.pop("roleDefaults", None) or {}
+        if nested is not None:
+            # The nested spelling wins, as it does for hoisted sections.
+            base = self.deep_merge(base, nested.pop("roleDefaults", None) or {})
+        if not base:
+            return result
+        if not isinstance(base, dict):
+            raise TypeError("'roleDefaults' must be a mapping when present")
+
+        if defaults:
+            modelled: set[str] = set()
+            for section in self._ROLE_DEFAULT_SECTIONS:
+                modelled |= set((defaults.get(section) or {}).keys())
+            unknown = sorted(key for key in base if key not in modelled)
+            if unknown:
+                raise ValueError(
+                    "roleDefaults names "
+                    + ", ".join(unknown)
+                    + ", which no role section defines. Valid keys are: "
+                    + ", ".join(sorted(modelled))
+                )
+
+        for container in (result, nested):
+            if container is None:
+                continue
+            for section in self._ROLE_DEFAULT_SECTIONS:
+                if section not in container:
+                    continue
+                block = container[section]
+                if block is None:
+                    block = {}
+                elif not isinstance(block, dict):
+                    continue  # let schema validation report the wrong shape
+                allowed = (defaults or {}).get(section) or {}
+                seed = {
+                    key: deepcopy(value)
+                    for key, value in base.items()
+                    if not allowed or key in allowed
+                }
+                container[section] = self.deep_merge(seed, block)
+
+        return result
+
+    # What `standalone` takes from `decode` when it states none of its own.
+    #
+    # `standalone.engine.command` already inherits decode's line (see
+    # _COMMAND_INHERITS_FROM in llmdbenchmark/engine/resolver.py): standalone is
+    # decode without the router in front of it, so it serves the same model with
+    # the same engine and the same flags. These are the keys that line cannot be
+    # correct without -- the pod it needs in order to run:
+    #
+    #   resources      the memory and CPU the engine needs to load the model
+    #                  the command names. A command that serves a 32B checkpoint
+    #                  against defaults.yaml's 40Gi floor is OOMKilled at load.
+    #   parallelism     the device count the kubelet grants, which has to agree
+    #                  with the width the command asks the engine for
+    #                  (`--tensor-parallel-size`, `--tp-size`, `--tp_size`).
+    #                  Inheriting `--tp_size 4` onto a one-device pod cannot work.
+    #   extraEnvVars   libraries and tuning the command relies on but does not
+    #                  state (LD_LIBRARY_PATH, UCX_*, NCCL_*, VLLM_*).
+    #
+    # Deliberately not here: probes, replicas, autoscaling, nodeSelector,
+    # volumes. Those describe how the deployment is driven rather than what the
+    # command needs, and standalone legitimately differs (it has no router, no
+    # InferencePool, and its own probe defaults).
+    _STANDALONE_INHERITS_FROM_DECODE = ("resources", "parallelism", "extraEnvVars")
+
+    def _inherit_standalone_resources(self, values: dict) -> dict:
+        """Give ``standalone`` decode's pod shape where it states none.
+
+        Runs on the scenario layer, for the same reason
+        :meth:`_expand_role_defaults` does: absence here genuinely means "the
+        author did not set this", whereas after the merge with defaults.yaml
+        every one of these keys is already present and inheritance could never
+        fire.
+
+        A key is inherited whole, not deep-merged -- the same convention
+        ``roleDefaults`` uses. Naming ``standalone.resources`` at all therefore
+        opts that key out of inheritance completely, so a scenario that wants
+        decode's CPU with its own memory states both.
+
+        Ordering: this runs after ``roleDefaults`` and ``common`` expansion, so
+        a key either of those seeded into ``standalone`` is already stated and
+        wins. The precedence is then
+
+            defaults.yaml < decode (inherited) < common < roleDefaults
+                          < standalone's own block
+
+        Reads ``decode`` at the layer root and under ``modelservice:``, since
+        role blocks are written in both places and hoisting runs later. Writes
+        ``standalone`` at the layer root only, which is where every template and
+        resolver reads it. A no-op when the layer has no decode block or when
+        standalone states everything, so scenarios that already restate these by
+        hand (examples/spyre-s390x.yaml) render unchanged.
+        """
+        result = deepcopy(values)
+
+        decode = result.get("decode")
+        nested = result.get("modelservice")
+        if isinstance(nested, dict):
+            nested_decode = nested.get("decode")
+            if isinstance(nested_decode, dict):
+                # The nested spelling wins, as it does for hoisted sections.
+                decode = self.deep_merge(
+                    decode if isinstance(decode, dict) else {}, nested_decode
+                )
+        if not isinstance(decode, dict):
+            return result
+
+        inheritable = {
+            key: decode[key]
+            for key in self._STANDALONE_INHERITS_FROM_DECODE
+            if decode.get(key) is not None
+        }
+        if not inheritable:
+            return result
+
+        standalone = result.get("standalone")
+        if standalone is None:
+            standalone = {}
+        elif not isinstance(standalone, dict):
+            return result  # let schema validation report the wrong shape
+
+        for key, value in inheritable.items():
+            standalone.setdefault(key, deepcopy(value))
+        result["standalone"] = standalone
+
+        return result
 
     # Sections a scenario may nest under `modelservice:` for clarity. They
     # are consumed only on the modelservice path (see step_07_deploy_router
@@ -1665,11 +2079,11 @@ class RenderPlans:
                     match_labels["llm-d.ai/model"] = str(model_id_label)
                 model_servers["matchLabels"] = match_labels
         if not model_servers.get("targetPorts"):
-            decode_port = ((values.get("decode") or {}).get("vllm") or {}).get(
-                "servicePort"
-            )
-            if decode_port:
-                model_servers["targetPorts"] = [{"number": decode_port}]
+            # The port the model-server Service exposes, not the port the
+            # engine binds: the router talks to the Service.
+            service_port = (values.get("engine") or {}).get("servicePort")
+            if service_port:
+                model_servers["targetPorts"] = [{"number": service_port}]
 
         # --- 8. Mirror the metrics-reader Secret name into the path the
         # router chart actually reads.
@@ -1738,44 +2152,76 @@ class RenderPlans:
     # Matches ${dotted.path} but NOT ${SHELL_VAR} (no dots).
     _CONFIG_VAR_RE = re.compile(r"\$\{([\w]+(?:\.[\w]+)+)\}")
 
-    def _substitute_config_variables(self, values: dict) -> dict:
+    #: Paths the first pass leaves alone. These are the numbers the engine
+    #: commands state and ``resolve_engines`` reads back, so whatever is in the
+    #: values tree before the commands are read is at best a fallback -- an
+    #: accelerator overlay's page size, a scenario's own declaration. Resolving
+    #: them early would stamp that fallback into a router plugin config while
+    #: the engine went on receiving the flag from its command, which is the one
+    #: desync the read exists to prevent.
+    _DEFERRED_VAR_PATHS: frozenset[str] = frozenset(
+        f"model.{metric}" for metric in MODEL_READS
+    )
+
+    def _substitute_config_variables(
+        self, values: dict, warn: bool = True, defer: frozenset[str] | None = None
+    ) -> dict:
         """Replace ``${dotted.path}`` references in string values with resolved config values.
 
         Walks the config dict recursively. For every string value, substitutes
         ``${model.name}``-style references with the corresponding value from
-        the config. Shell variables like ``$VLLM_PORT`` or ``${SINGLE_WORD}``
-        are left untouched because the regex requires at least one dot.
+        the config. Shell variables like ``$ENGINE_PORT`` or
+        ``${LWS_WORKER_INDEX:-0}`` are left untouched because the regex requires
+        at least one dot -- they resolve in the pod, not here.
+
+        This runs twice. The first pass (``warn=False``, ``defer`` set) feeds
+        engine resolution, which has to read commands with their real values; the
+        paths in ``defer`` are the ones the commands themselves decide, so they
+        pass through untouched. The second pass, after engine resolution,
+        resolves those -- ``${model.blockSize}``, ``${model.maxModelLen}`` -- and
+        is the one that reports a reference nothing could resolve.
         """
         result = deepcopy(values)
-        self._substitute_recursive(result, result)
+        self._substitute_recursive(result, result, warn, defer or frozenset())
         return result
 
-    def _substitute_recursive(self, node: Any, root: dict) -> None:
+    def _substitute_recursive(
+        self, node: Any, root: dict, warn: bool, defer: frozenset[str]
+    ) -> None:
         """Recursively substitute config variable references in place."""
         if isinstance(node, dict):
             for key, value in node.items():
                 if isinstance(value, str):
-                    node[key] = self._substitute_string(value, root)
+                    node[key] = self._substitute_string(value, root, warn, defer)
                 elif isinstance(value, (dict, list)):
-                    self._substitute_recursive(value, root)
+                    self._substitute_recursive(value, root, warn, defer)
         elif isinstance(node, list):
             for i, item in enumerate(node):
                 if isinstance(item, str):
-                    node[i] = self._substitute_string(item, root)
+                    node[i] = self._substitute_string(item, root, warn, defer)
                 elif isinstance(item, (dict, list)):
-                    self._substitute_recursive(item, root)
+                    self._substitute_recursive(item, root, warn, defer)
 
-    def _substitute_string(self, text: str, root: dict) -> str:
+    def _substitute_string(
+        self,
+        text: str,
+        root: dict,
+        warn: bool = True,
+        defer: frozenset[str] = frozenset(),
+    ) -> str:
         """Replace all ``${dotted.path}`` patterns in a single string."""
 
         def _replace(match: re.Match) -> str:
             path = match.group(1)
+            if path in defer:
+                return match.group(0)
             value = self._resolve_dotted_path(path, root)
             if value is None:
-                self.logger.log_warning(
-                    f"⚠️  Config variable '${{{path}}}' could not be resolved, "
-                    "leaving as-is"
-                )
+                if warn:
+                    self.logger.log_warning(
+                        f"⚠️  Config variable '${{{path}}}' could not be "
+                        "resolved, leaving as-is"
+                    )
                 return match.group(0)
             return str(value)
 
@@ -2193,10 +2639,24 @@ class RenderPlans:
         stack_errors = StackErrors()
         result.stacks[stack_name] = stack_errors
 
-        stack_config = self._expand_stack_common(
-            {k: v for k, v in stack.items() if k != "name"}, defaults
+        # roleDefaults is expanded first: `common` seeds a per-method key only
+        # where the layer has not set it, so seeding the roles beforehand keeps
+        # the documented precedence common < roleDefaults < the role's own block.
+        # standalone's inheritance from decode runs last, so anything either of
+        # those seeded into `standalone:` counts as stated and wins over it.
+        stack_config = self._inherit_standalone_resources(
+            self._expand_stack_common(
+                self._expand_role_defaults(
+                    {k: v for k, v in stack.items() if k != "name"}, defaults
+                ),
+                defaults,
+            )
         )
-        shared_config = self._expand_stack_common(shared or {}, defaults)
+        shared_config = self._inherit_standalone_resources(
+            self._expand_stack_common(
+                self._expand_role_defaults(shared or {}, defaults), defaults
+            )
+        )
         # Merge order: defaults -> shared (scenario-wide) -> stack -> CLI/setup
         # overrides. Per-stack always wins so a stack can opt out of any
         # shared value by setting it explicitly.
@@ -2278,6 +2738,7 @@ class RenderPlans:
             total_stacks=total_stacks,
             stack_name=stack.get("name", ""),
         )
+        merged_values = self._adopt_model_from_command(merged_values, defaults)
         self._warn_custom_command_conflicts(merged_values)
         merged_values = self._resolve_deploy_method(merged_values)
         merged_values = self._resolve_gateway_class(merged_values)
@@ -2287,6 +2748,7 @@ class RenderPlans:
         merged_values = self._resolve_epp_keda_saturation(merged_values)
         merged_values = self._resolve_hf_token(merged_values)
         merged_values = self._resolve_model_id_label(merged_values)
+        merged_values = self._resolve_model_hub_cache(merged_values)
         merged_values = self._resolve_per_stack_identity(
             merged_values, total_stacks=total_stacks
         )
@@ -2296,19 +2758,27 @@ class RenderPlans:
         merged_values = self._resolve_inference_pool_host(merged_values)
         merged_values = self._normalize_direct_service_mode(merged_values)
         merged_values = self._normalize_router_block(merged_values)
+        merged_values = self._substitute_config_variables(
+            merged_values, warn=False, defer=self._DEFERRED_VAR_PATHS
+        )
+
+        # Engine resolution, after substitution so a command written with a
+        # `${...}` fragment (an `${accelerator.*}` in a flag value, a
+        # `${namespace.name}` inside a connector payload) is read with its real
+        # values. Everything the manifests need that the command decides -- the
+        # port the probes and the sidecar follow, the image, the health and
+        # metrics paths, the context length and the KV page size -- is settled
+        # here and recorded under `<role>.engine` or `model.*`.
+        for warning in resolve_engines(merged_values):
+            self.logger.log_warning(f"[{stack_name}] {warning}")
+        merged_values = self._sync_routing_target_port(merged_values)
+
+        # Second pass: resolve what engine resolution just read back off the
+        # commands -- the `_DEFERRED_VAR_PATHS` the first pass stepped over -- so
+        # `${model.blockSize}` in a router plugin config is the KV page size the
+        # engine was actually told to use. This is the pass that reports a
+        # reference nothing resolved -- by now everything is in place.
         merged_values = self._substitute_config_variables(merged_values)
-        # Runtime fragments are renderer-only source text. Commands reference
-        # them during substitution; they must not leak to chart values.
-        accelerator = merged_values.get("accelerator") or {}
-        for runtime_key in (
-            "runtimePreamble",
-            "dtypeArgs",
-            "executionArgs",
-            "blockSizeArgs",
-            "memoryUtilizationArgs",
-            "kvBufferDeviceJson",
-        ):
-            accelerator.pop(runtime_key, None)
 
         merged_values["siblingStacks"] = sibling_stacks or []
         merged_values["stackIndex"] = stack_index
@@ -2321,6 +2791,14 @@ class RenderPlans:
             stack_name=stack_name,
         )
         for msg in epponly_errors:
+            self.logger.log_error(msg)
+            stack_errors.render_errors.append(msg)
+
+        for msg in self._validate_engine_ports(merged_values, stack_name):
+            self.logger.log_error(msg)
+            stack_errors.render_errors.append(msg)
+
+        for msg in self._validate_model_uri(merged_values, stack_name):
             self.logger.log_error(msg)
             stack_errors.render_errors.append(msg)
 

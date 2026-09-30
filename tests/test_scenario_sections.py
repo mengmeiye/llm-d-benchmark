@@ -32,7 +32,7 @@ class TestExpandStackCommon:
             "common": {
                 "model": {"name": "org/model"},
                 "storage": {"modelPvc": {"size": "200Gi"}},
-                "vllmCommon": {"inferencePort": 9000},
+                "engine": {"servicePort": 9000},
             },
         }
         before = deepcopy(values)
@@ -43,7 +43,7 @@ class TestExpandStackCommon:
             "modelservice": {"enabled": True},
             "model": {"name": "org/model"},
             "storage": {"modelPvc": {"size": "200Gi"}},
-            "vllmCommon": {"inferencePort": 9000},
+            "engine": {"servicePort": 9000},
         }
         assert values == before
 

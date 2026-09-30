@@ -55,7 +55,7 @@ oc get svc -n <NS> -l app.kubernetes.io/name=llm-d-infra -o jsonpath='{.items[0]
 
 # Standalone -- get the standalone service URL
 oc get svc -n <NS> -l app.kubernetes.io/managed-by=llm-d-benchmark -o jsonpath='{.items[0].metadata.name}'
-# Typically: http://vllm-standalone-<model-id>.<NS>.svc.cluster.local:8000
+# Typically: http://standalone-<model-id>.<NS>.svc.cluster.local:80
 
 # OpenShift route (external access)
 oc get route -n <NS> -o jsonpath='{.items[0].spec.host}'

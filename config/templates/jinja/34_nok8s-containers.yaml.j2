@@ -1,11 +1,16 @@
 {% if nok8s.enabled %}
 {# ============================================================================
    nok8s container-launch spec.  This is NOT a Kubernetes object — it is an
-   authored manifest describing which containers step_06_nok8s_deploy.py must
+   authored manifest describing which containers step_05_nok8s_deploy.py must
    launch (and step_06_nok8s_teardown.py must remove), plus the readiness
    probes and the endpoint URL the run phase benchmarks against.  Rendering the
    launch surface as data (rather than argv strings) keeps dry-run readable and
    lets the step build docker vs podman commands correctly.
+
+   The engine worker's launch line is carried here verbatim, exactly as the
+   scenario wrote it, and the step writes it to a file the container runs. That
+   is what lets nok8s run any engine with any flags: neither this template nor
+   the step has to know the spelling of either.
    ============================================================================ #}
 runtime: {{ nok8s.runtime }}
 {# Where the containers run, and how they are reached. "localhost" keeps every
@@ -21,7 +26,7 @@ sshIdentity: "{{ nok8s.sshIdentity | default('') }}"
 sshArgs: [{% for a in nok8s.sshArgs | default([]) %}"{{ a }}"{% if not loop.last %}, {% endif %}{% endfor %}]
 workspaceHostDir: "{{ nok8s.workspaceHostDir }}"
 hfTokenEnv: {{ nok8s.hfTokenEnv }}
-hfCacheDir: "{{ nok8s.vllm.hfCacheDir }}"
+hfCacheDir: "{{ nok8s.engine.hfCacheDir }}"
 model: {{ model.name }}
 {# Two endpoints, because two different machines dial the front door:
    `endpoint` is used from *inside* the daemon host -- the harness container
@@ -32,23 +37,38 @@ model: {{ model.name }}
 endpoint: "http://localhost:{{ nok8s.envoy.listenPort }}"
 clientEndpoint: "http://{{ nok8s.clientHost | default('localhost') }}:{{ nok8s.envoy.listenPort }}"
 readiness:
-  vllmPorts: [{% for i in range(nok8s.vllm.replicas) %}{{ nok8s.vllm.hostPort + i }}{% if not loop.last %}, {% endif %}{% endfor %}]
+  enginePorts: [{% for i in range(nok8s.engine.replicas) %}{{ nok8s.engine.hostPort + i }}{% if not loop.last %}, {% endif %}{% endfor %}]
   envoyPort: {{ nok8s.envoy.listenPort }}
 containers:
-{% for i in range(nok8s.vllm.replicas) %}
-  - name: vllm-{{ i }}{{ nok8s.nameSuffix }}
-    kind: vllm
-    image: "{{ nok8s.vllm.image }}:{{ nok8s.vllm.tag }}"
-    hostPort: {{ nok8s.vllm.hostPort + i }}
-    containerPort: {{ nok8s.vllm.containerPort }}
-    accelerator: {{ nok8s.vllm.accelerator | default('nvidia') }}
-    gpus: "{{ nok8s.vllm.gpus }}"
-    deviceArgs: [{% for a in nok8s.vllm.deviceArgs | default([]) %}"{{ a }}"{% if not loop.last %}, {% endif %}{% endfor %}]
-    shmSize: "{{ nok8s.vllm.shmSize }}"
-    tensorParallel: {{ nok8s.vllm.tensorParallel }}
-    replicas: {{ nok8s.vllm.replicas }}
+{% for i in range(nok8s.engine.replicas) %}
+{# llm-d's engine-neutral container name: a worker running SGLang should not be
+   called vllm-0. #}
+  - name: modelserver-{{ i }}{{ nok8s.nameSuffix }}
+    kind: engine
+    engine: {{ nok8s.engine.name | default('vllm', true) }}
+    image: "{{ nok8s.engine.image.repository }}:{{ nok8s.engine.image.tag }}"
+{# The command the container runs, byte-for-byte what the scenario wrote. The
+   step writes it to <workspaceHostDir>/launch-<name>.sh and bind-mounts that,
+   rather than inlining it in the `docker run` line: the command legitimately
+   contains quotes and newlines (a --kv-transfer-config JSON blob, say), and
+   under the ssh transport the whole run command is re-quoted once more. #}
+    shell: {{ engine.shell }}
+    command: |
+{{ (nok8s.engine.command | default('', true) | trim) | indent(6, true) }}
+    hostPort: {{ nok8s.engine.hostPort + i }}
+{# The port the engine binds inside the container: its command's --port. #}
+    containerPort: {{ nok8s.engine.port | default(engine.servicePort, true) }}
+    accelerator: {{ nok8s.engine.accelerator | default('nvidia') }}
+    gpus: "{{ nok8s.engine.gpus }}"
+    deviceArgs: [{% for a in nok8s.engine.deviceArgs | default([]) %}"{{ a }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+    shmSize: "{{ nok8s.engine.shmSize }}"
+{# Devices one worker is given, as stated in `nok8s.engine.acceleratorCount`
+   -- the runtime pins them before the engine exists, so the count is not read
+   out of the command. With replicas > 1 the step uses it to pin worker i to its
+   own contiguous slice of the host's devices. #}
+    acceleratorCount: {{ nok8s.engine.acceleratorCount | default(1, true) }}
+    replicas: {{ nok8s.engine.replicas }}
     replicaIndex: {{ i }}
-    extraArgs: [{% for a in nok8s.vllm.extraArgs %}"{{ a }}"{% if not loop.last %}, {% endif %}{% endfor %}]
 {% endfor %}
   - name: epp{{ nok8s.nameSuffix }}
     kind: epp

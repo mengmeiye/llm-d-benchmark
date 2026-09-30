@@ -11,11 +11,18 @@ _anchors:
   model_name: &model_name facebook/opt-125m
   model_short_name: &model_short_name facebook-opt-125m
   model_path: &model_path models/facebook/opt-125m
-  model_cache_base: &model_cache_base /model-cache
 
-  # Common ports
-  vllm_port: &vllm_port 8200
-  vllm_service_port: &vllm_service_port 8000
+  # Common ports.
+  #   service_port  the port the Service/gateway exposes. Pure infrastructure:
+  #                 no engine ever sees it. On decode pods the routing sidecar
+  #                 listens here and forwards to the engine's port. A prefill
+  #                 pod gets no sidecar, so its command binds this port itself.
+  #
+  # There is deliberately no anchor for the port an *engine* binds: that number
+  # lives in the role's command (`--port 8200`) and nowhere else, so it cannot
+  # drift from what the process actually listens on. 8200 is the llm-d
+  # convention for a decode pod, because the sidecar already holds 8000 there.
+  service_port: &service_port 8000
   ext_proc_port: &ext_proc_port 9002
   zmq_port: &zmq_port 5557
   rsync_port: &rsync_port 20873
@@ -44,34 +51,42 @@ _anchors:
   gpu_label_value: &gpu_label_value auto
   gpu_memory_util: &gpu_memory_util 0.95
 
-  # Common vLLM settings
-  block_size: &block_size 64
-  max_model_len: &max_model_len 16384
-  worker_method: &worker_method spawn
-  logging_level: &logging_level INFO
+  # Container filesystem locations. Engine-neutral: every engine honours
+  # HOME and HF_HOME, and nothing here is an engine parameter.
   container_home: &container_home /tmp
   hf_home: &hf_home /tmp/huggingface
 
-  # vLLM KV Transfer config
-  kv_connector: &kv_connector NixlConnector
-  kv_role: &kv_role kv_both
+  # Shell used to exec a role's engine command.
+  engine_shell: &engine_shell "/bin/bash"
 
-  # Common probe settings
+  # Common probe settings. No `path` here: a probe path is engine knowledge, so
+  # it comes from the engine's own spec (llmdbenchmark/engine/spec.py, published
+  # as `<role>.engine.healthPath`). Set `<role>.probes.<probe>.path` only for a
+  # server that answers on neither its engine's path nor /health.
+  #
+  # `timeoutSeconds` is stated on every probe on purpose. Omitting it does not
+  # mean "no deadline" -- the kubelet then applies its own default of 1 second,
+  # and a health endpoint is not required to be that cheap: SGLang's /health
+  # runs a real 64-token generation, so a one-second deadline turns the Ready
+  # transition into a lottery (observed: the engine serving at t+179s while the
+  # pod stayed NotReady until t+387s, and a 900s standup timeout on the next
+  # run of the same scenario). 15s is the deadline the modelservice path has
+  # always used; every role uses it now.
   probe_startup: &probe_startup
-    path: /health
     failureThreshold: 60
     initialDelaySeconds: 30
     periodSeconds: 30
-    timeoutSeconds: 5
+    timeoutSeconds: 15
 
   probe_liveness: &probe_liveness
-    failureThreshold: 3
+    failureThreshold: 10
     periodSeconds: 5
+    timeoutSeconds: 15
 
   probe_readiness: &probe_readiness
-    path: /health
-    failureThreshold: 3
+    failureThreshold: 10
     periodSeconds: 5
+    timeoutSeconds: 15
 
   # Common parallelism
   parallelism_single: &parallelism_single
@@ -115,6 +130,17 @@ _anchors:
   router_chart_version:              &router_chart_version              v0.11.0
   modelservice_chart_version:        &modelservice_chart_version        v0.4.16
   vllm-openai_version:               &vllm-openai_version               v0.30.0
+  # Engine image pins for the non-vLLM engines, kept equal to what the llm-d
+  # guides pin so a command copied from a guide runs against the image the
+  # guide was written for:
+  #   SGLang   guides/recipes/modelserver/components/images/gpu-sglang/release
+  #   TRT-LLM  guides/recipes/modelserver/components/images/gpu-trtllm/release
+  # TRT-LLM is a release candidate on purpose: the iteration-state gauges the
+  # router's load-aware scorers read (trtllm_num_requests_waiting / _running,
+  # trtllm_kv_cache_utilization) landed in 1.3.0rc12 and are absent from 1.2.x,
+  # and there is no 1.3.0 GA yet.
+  sglang_version:                    &sglang_version                    v0.5.19
+  trtllm_version:                    &trtllm_version                    1.3.0rc23
   llm-d-router-endpoint-picker_version: &llm-d-router-endpoint-picker_version v0.11.0
   llm-d-routing-sidecar_version:     &llm-d-routing-sidecar_version     v0.11.0
   # Just use vllm-openai image for tokenizer
@@ -241,10 +267,30 @@ common: {}
 # For subchart usage
 modelservice:
   enabled: true
-  # URI protocol for model artifacts: "pvc" (default) or "hf" (HuggingFace)
-  # When "hf", modelArtifacts.uri becomes hf://<model.huggingfaceId>
-  # When "pvc", modelArtifacts.uri becomes pvc://<storage.modelPvc.name>/<model.path>
-  uriProtocol: pvc
+  # Where the weights come from, and what the engine's model argument therefore
+  # looks like. One of:
+  #
+  #   pvc+hf  (default) A download Job stages a Hugging Face *hub cache* onto the
+  #           model PVC, and the engine's model argument is the plain model id.
+  #           uri: pvc+hf://<storage.modelPvc.name>/<model.path>
+  #           The chart resolves that to the id plus HF_HUB_CACHE, so the command
+  #           reads exactly as it would outside Kubernetes:
+  #             vllm serve Qwen/Qwen3-32B
+  #
+  #   hf      No PVC and no download Job -- the engine pulls from the Hub at pod
+  #           start. Same command, same plain id.
+  #           uri: hf://<model.huggingfaceId>
+  #
+  #   pvc     The PVC holds a raw weights directory rather than a hub cache (one
+  #           staged out of band, or a layout Hugging Face did not produce). The
+  #           engine's model argument is then a path, so the command states the
+  #           path and names the model with `--served-model-name`:
+  #             vllm serve /model-cache/Kimi-K3 --served-model-name moonshotai/Kimi-K3
+  #           uri: pvc://<storage.modelPvc.name>/<model.path>
+  #
+  # `pvc+hf` requires `model.path` to end in the two segments of the model id
+  # (`models/Qwen/Qwen3-32B`); anything else is a `pvc` layout.
+  uriProtocol: pvc+hf
 
 # Override service account name (optional)
 serviceAccountOverride: ""
@@ -265,16 +311,60 @@ namespace:
 # ============================================================================
 # MODEL CONFIGURATION
 # ============================================================================
+# What is served, and where it comes from. None of these are engine
+# parameters: they name the model to everything *outside* the engine -- the
+# model PVC path, pod labels, the HTTPRoute, the harness target.
+#
+# The model is named once, and normally that is in the launch command, as the
+# serve target a user writes anyway:
+#
+#     vllm serve Qwen/Qwen3-32B --port 8200
+#
+# `name`, `huggingfaceId` and `path` below are then filled in from that one
+# literal, so no scenario types the id a second time. (Under `uriProtocol: pvc`
+# the serve target is a directory instead of an id, so the id is read off
+# `--served-model-name` there.)
+#
+# Naming it here instead is for when the command must not carry a literal id:
+# `-m/--models` replaces the model at plan time, and one `shared:` command can
+# serve stacks that differ only in which model they load. Both write the serve
+# target as `${model.name}`, which resolves before anything is rendered. A name
+# stated anywhere (scenario, treatment, `-m`) wins, and a command that then
+# serves a different model is reported as a mismatch rather than overriding it.
+#
+# `shortName` is worth writing down. It is the Kubernetes name prefix for the
+# stack; left unset it derives as a `{first8}-{sha8}-{last8}` hash, so stating
+# it is what keeps pod names readable.
 model:
   name: *model_name
   shortName: *model_short_name
   path: *model_path
   huggingfaceId: *model_name
   size: 1Ti
-  maxModelLen: *max_model_len
-  blockSize: *block_size
-  gpuMemoryUtilization: *gpu_memory_util
-  cacheBase: *model_cache_base
+
+  # Read out of the engine command -- NOT rendered into anything. Three numbers
+  # that something outside the engine needs and the command already states:
+  #
+  #   maxModelLen, gpuMemoryUtilization  the pre-deploy capacity check's KV-cache
+  #                                      arithmetic, and the harness workload
+  #                                      profile's context length
+  #   blockSize                          the router's prefix-cache index, which
+  #                                      has to hash on the same page boundaries
+  #                                      the engine writes
+  #
+  # Whichever flag your engine spells them with sets these:
+  #   vLLM    --max-model-len  / --gpu-memory-utilization      / --block-size
+  #   SGLang  --context-length / --mem-fraction-static         / --page-size
+  #   TRT-LLM --max_seq_len    / --free_gpu_memory_fraction    / (none)
+  #
+  # Set one here only when the command cannot state it: an image whose entrypoint
+  # carries the flag, or a value the engine has no CLI flag for at all (TRT-LLM
+  # takes its page size as `tokens_per_block` inside an options file). A value
+  # nothing states stays unknown, and whatever needed it turns itself off.
+  maxModelLen: null
+  gpuMemoryUtilization: null
+  blockSize: null
+
 
 # ============================================================================
 # MODEL ARTIFACTS CONFIGURATION
@@ -313,13 +403,12 @@ storage:
   # Extra PVC - only created when name is non-empty.
   # Mirrors bash LLMDBENCH_VLLM_COMMON_EXTRA_PVC_NAME.
   # The PVC is NOT automatically mounted; scenarios must also add matching
-  # entries to vllmCommon.volumes/volumeMounts to wire it into pods.
+  # entries to engine.volumes/volumeMounts to wire it into pods.
   extraPvc:
     name: ""          # Empty = skip creation (default)
     size: 10Gi
     accessModes:
       - ReadWriteMany
-    volumeMode: Filesystem
     storageClassName: *storage_class
 
   # HostPath-backed model storage (opt-in).
@@ -396,11 +485,27 @@ images:
     pullPolicy: *pull_always
     sourceRepo: https://github.com/vllm-project/vllm
 
-  vllmOpenai:
-    repository: docker.io/vllm/vllm-openai
-    tag: *vllm-openai_version
+  # One entry per inference engine. `engine.name` (or the launcher detected in
+  # the command) picks which one a role's container image defaults to, so a
+  # scenario that switches engine does not have to restate the image. Override
+  # per role with `<role>.engine.image.{repository,tag,pullPolicy}`.
+  sglang:
+    repository: docker.io/lmsysorg/sglang
+    tag: *sglang_version
     pullPolicy: *pull_always
-    sourceRepo: https://github.com/vllm-project/vllm
+    sourceRepo: https://github.com/sgl-project/sglang
+
+  trtllm:
+    repository: nvcr.io/nvidia/tensorrt-llm/release
+    tag: *trtllm_version
+    pullPolicy: *pull_always
+    sourceRepo: https://github.com/NVIDIA/TensorRT-LLM
+
+  llmdInferenceSim:
+    repository: ghcr.io/llm-d/llm-d-inference-sim
+    tag: *llm-d-inference-sim_version
+    pullPolicy: *pull_always
+    sourceRepo: https://github.com/llm-d/llm-d-inference-sim
 
   prism:
     repository: ghcr.io/llm-d/llm-d-prism
@@ -466,17 +571,16 @@ helmRepositories:
   # OCI registries directly in the helmfile templates (no `url` needed for
   # `helm repo add`). They live here so the SBOM can find the source repo.
   #
-  # `llmDRouter` is the chart family that replaced the GAIE-published
-  # `inferencepool` and `standalone` charts. The benchmark always uses
+  # `llmDRouter` is the chart family the benchmark deploys, in place of the
+  # GAIE-published `inferencepool` and `standalone` charts. It always uses
   # `llm-d-router-gateway-dev` (or `-standalone-dev` when
   # gateway.className=epponly), so only the source repo metadata is held
   # here. The chart URLs themselves are constructed in
   # `config/templates/jinja/10_helmfile-main.yaml.j2`.
   llmDRouter:
     sourceRepo: https://github.com/llm-d/llm-d-router
-  # Retained for backwards-compat metadata (SBOM) but no longer used to
-  # construct chart URLs. The GAIE `inferencepool` / `standalone` charts
-  # were superseded by `llmDRouter` above.
+  # Source-repo metadata only, for the SBOM. Chart URLs come from
+  # `llmDRouter` above.
   inferencePool:
     sourceRepo: https://github.com/kubernetes-sigs/gateway-api-inference-extension
   gaie:
@@ -493,12 +597,10 @@ chartVersions:
   llmDInfra: auto
   llmDModelservice: *modelservice_chart_version
   # llm-d-router chart version (used by the standalone and gateway
-  # variants). Replaces the legacy `inferencePool` (GAIE chart) entry
-  # below for the EPP/router deploy.
+  # variants). This is the chart the EPP/router deploy uses.
   llmDRouter: *router_chart_version
-  # Retained for backwards compatibility; no longer consumed by the helmfile
-  # template after the migration to `llmDRouter`. Kept so any scenario or
-  # downstream tooling still reading the legacy key continues to resolve.
+  # Not consumed by the helmfile template; kept so a scenario or downstream
+  # tool that reads this key still resolves.
   inferencePool: *gaie_version
   agentgateway: *agentgateway_version
   lws: *lws_version
@@ -524,7 +626,12 @@ monitoring:
   prometheusCrdUrls:
     - https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
     - https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
-  metricsPath: /metrics
+  # Override only. Where an engine serves metrics is engine knowledge, so it
+  # normally comes from the resolved spec (`<role>.engine.metricsPath`): vLLM and
+  # SGLang serve /metrics, TRT-LLM serves /prometheus/metrics. Left as a default
+  # here it would win over that and point every PodMonitor at /metrics whatever
+  # the role launches. Set it to pin a path the spec gets wrong.
+  metricsPath: null
   scrapeInterval: "30s"
   metricsScrapeEnabled: false
   # Embed downsampled per-timestamp series into the report's
@@ -578,17 +685,14 @@ accelerator:
   # Resource name for the accelerator used in limits/requests
   # Override for non-NVIDIA GPUs (e.g. habana.ai/gaudi, amd.com/gpu)
   resource: "nvidia.com/gpu"
-  # Runtime command fragments consumed by accelerator-neutral guide commands.
-  # Hardware profiles use these to avoid duplicating guides; a profile may
-  # additionally provide a fitting model, resource sizing, and storage defaults.
-  runtimePreamble: |
-    export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
-    export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-  dtypeArgs: "--dtype bfloat16"
-  executionArgs: ""
-  blockSizeArgs: "--block-size $VLLM_BLOCK_SIZE"
-  memoryUtilizationArgs: "--gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL"
-  kvBufferDeviceJson: ""
+  # There are deliberately no command fragments here. An engine command states
+  # its own flags, literally, so what the engine parses is what the file says.
+  # A scenario for hardware that needs different flags is its own scenario file
+  # (config/scenarios/examples/{intel-xpu,spyre,cpu}.yaml), not a guide with
+  # substitution points. The one runtime detail that genuinely cannot be written
+  # down at render time -- where the injected CUDA driver library landed -- is
+  # emitted into /shared-config/llmdbench_env.sh by the preprocess script and is
+  # self-guarding on nodes that have none.
   # Resource names for different accelerator types (optional override)
   # DRA drivers are tracked separately as accelerator.draDriver and are not
   # rendered into container resource limits or requests.
@@ -798,7 +902,7 @@ router:
 # ============================================================================
 routing:
   # Service port (matches routing.servicePort in helm chart)
-  servicePort: *vllm_service_port
+  servicePort: *service_port
   connector: nixlv2
   debugLevel: 3
   secure: false
@@ -809,7 +913,11 @@ routing:
   proxy:
     enabled: true
     imagePullPolicy: *pull_always
-    targetPort: *vllm_port
+    # Where the sidecar forwards. Left null and filled in from
+    # `decode.engine.port` -- the --port in decode's engine command -- because
+    # the sidecar has to point at wherever the engine actually listens. Set it
+    # only for an engine whose entrypoint binds a port the command does not say.
+    targetPort: null
     # TLS configuration (optional)
     # prefillerUseTLS: false
     # certPath: "/certs"
@@ -841,34 +949,86 @@ httpRoute:
   backendRequestTimeout: "0s"
 
 # ============================================================================
-# VLLM COMMON CONFIGURATION
+# ENGINE CONFIGURATION
+#
+# llm-d-benchmark does not model inference-engine parameters. A role states its
+# launch command verbatim -- the same line you would run by hand, or the one
+# already in your llm-d guide -- and the command is rendered into the container
+# unchanged:
+#
+#   decode:
+#     engine:
+#       command: |
+#         vllm serve meta-llama/Llama-3.1-70B-Instruct \
+#           --port 8200 \
+#           --tensor-parallel-size 4 \
+#           --gpu-memory-utilization 0.95
+#
+# Switching engine is switching the command:
+#
+#   decode:
+#     engine:
+#       command: |
+#         python3 -m sglang.launch_server --model-path meta-llama/Llama-3.1-70B-Instruct \
+#           --port 8200 --tp-size 4 --mem-fraction-static 0.9 --enable-metrics
+#
+# The command is read once, only for the handful of facts that decide
+# Kubernetes objects rather than engine behaviour: which engine it launches
+# (hence the default image, health path and metrics path), the model it serves,
+# the port it binds (hence the container port, probes and the routing sidecar's
+# upstream), and the context length and memory fraction the pre-deploy capacity
+# check sizes KV cache against. Everything else in the command is passed through
+# untouched -- llm-d-benchmark never needs to know what a flag means.
+#
+# What the command cannot answer is stated in Kubernetes' vocabulary instead.
+# How many devices a pod holds is the clearest case: the kubelet grants
+# accelerators before the engine process exists, so the count comes from the pod
+# spec (`<role>.resources.limits.<accelerator resource>`, or the
+# `accelerator.count` / `<role>.parallelism` shorthands) and has to agree with
+# the width the command gives the engine.
+#
+# This section holds what is left: the pod- and cluster-level settings that
+# belong to no engine. Nothing here is an engine parameter.
 # ============================================================================
-vllmCommon:
-  # Inference port used by all vLLM pods (decode, prefill, standalone).
-  # Steps reference this as the canonical port for smoketests, routes, etc.
-  # Matches bash LLMDBENCH_VLLM_COMMON_INFERENCE_PORT.
-  inferencePort: *vllm_service_port
-  host: "0.0.0.0"
+engine:
+  # Default engine for every role. Left unset on purpose: the command's own
+  # launcher (`vllm serve`, `python3 -m sglang.launch_server`, `trtllm-serve`,
+  # `llm-d-inference-sim`) identifies it, and a role with no command at all
+  # falls back to vLLM. Naming an engine here is a *declaration*, checked
+  # against what each role's command actually launches -- so a value inherited
+  # by every scenario would contradict the first SGLang command anyone writes.
+  # Set it (here or on one role) only when a role has no command, because its
+  # image's entrypoint launches the server, and the image, health path and
+  # metrics path must still be picked. Known: vllm, sglang, trtllm, sim.
+  name: null
+
+  # Fallback command for roles that do not state their own. Leave null and put
+  # the command under `decode.engine.command` / `prefill.engine.command` etc.:
+  # decode and prefill rarely want the same line.
+  command: null
+
+  # Fallback for roles that state no `engine.extraArgs` of their own (see
+  # `decode.engine.extraArgs` for what those are). A role's own list replaces
+  # this one rather than adding to it, the same as `command`.
+  extraArgs: []
+
+  # Name of the serving container. llm-d uses the engine-neutral `modelserver`
+  # so manifests, `kubectl logs` and `kubectl exec` read the same whichever
+  # engine runs.
+  containerName: modelserver
+
+  # Shell used to exec a role's engine command. Override to /bin/sh for an
+  # image without bash.
+  shell: *engine_shell
+
+  # Script run before the engine starts, inside the same container.
   preprocessScript: *preprocess_script
-  kvTransfer:
-    enabled: false
-    connector: *kv_connector
-    role: *kv_role
-    # Extra config passed as kv_connector_extra_config in --kv-transfer-config JSON.
-    # Used by connectors like OffloadingConnector (e.g. {num_cpu_blocks: 5000}).
-    # extraConfig:
-    #   num_cpu_blocks: 5000
-    #   cpu_bytes_to_use: 1000000000
-  # KV Events Configuration (for precise prefix cache aware routing)
-  # When enabled, adds --kv-events-config to vllm serve command
-  # Generates endpoint: tcp://<serviceName>.<namespace>.svc.cluster.local:<port>
-  # Generates topic: <topicPrefix>@$(POD_IP):$(VLLM_INFERENCE_PORT)@<model.name>
-  kvEvents:
-    enabled: false  # Set to true in scenario to enable
-    publisher: zmq
-    port: 5557
-    topicPrefix: kv
-    # serviceName: null  # Defaults to model.shortName if not specified
+
+  # Port the Service/gateway exposes. Infrastructure, not an engine parameter:
+  # the engine's own port comes from its command's --port. Steps reference this
+  # as the canonical endpoint port for smoketests and routes.
+  servicePort: *service_port
+
   # PriorityClassName for pod scheduling priority (optional)
   # Set to a valid PriorityClass name on the cluster, or leave empty/"none" to skip.
   # Applied to standalone, decode, and prefill pods unless overridden per-section.
@@ -890,53 +1050,15 @@ vllmCommon:
   ephemeralStorageResource: "ephemeral-storage"
   ephemeralStorage: ""
 
-  # Shell used to exec the vLLM startup command in every vLLM container
-  # (decode, prefill, standalone, launcher). Renders into the `command:` field
-  # of 13_ms-values.yaml.j2 and 14_standalone-deployment_yaml.j2. Override
-  # per-scenario to e.g. /bin/sh if the image lacks bash.
-  shell: "/bin/bash"
-
-  # NIXL side channel port for ZMQ-based KV transfer communication.
-  nixlSideChannelPort: "5557"
-
-  # UCX transport layer configuration for NCCL inter-node communication.
-  ucxTls: "sm,cuda_ipc,cuda_copy,tcp"
-
-  # UCX socket address transport priority.
-  ucxSockaddrTlsPriority: "tcp"
-
-  # Network device(s) UCX may use for the NIXL KV-transfer data plane, e.g.
-  # "eth0" or "mlx5_1:1". Empty means UCX auto-selects, which is right on a
-  # pod with one interface. Pin it when secondary networks are attached (a
-  # k8s.v1.cni.cncf.io/networks annotation): UCX then picks among every
-  # attached interface independently of VLLM_NIXL_SIDE_CHANNEL_HOST (the pod
-  # IP), and a rail that cannot carry the traffic makes the NIXL handshake
-  # time out -- which surfaces as a request that hangs, not as an error.
-  ucxNetDevices: ""
-
   # Network resource (RDMA/InfiniBand) for pod limits/requests (optional)
   # Only added to pod specs when both networkResource and networkNr are non-empty.
-  # Equivalent to bash LLMDBENCH_VLLM_COMMON_NETWORK_RESOURCE / _NR.
   networkResource: ""
   networkNr: ""
-
-  flags:
-    enforceEager: true
-    disableLogRequests: true
-    disableUvicornAccessLog: true
-    allowLongMaxModelLen: "1"
-    serverDevMode: "1"
-    # chatTemplate: null
-    # chatTemplateContentFormat: null # Format for inline chat template: string, leave null for file
-    # Additional vLLM flags (optional)
-    # enableChunkedPrefill: false
-    # maxNumBatchedTokens: null
 
   # Volume configurations -- no defaults.
   # Each scenario defines its own volumes and volumeMounts explicitly.
   # Common volumes like dshm (shared memory) and shared-config (preprocess output)
   # should be defined in the scenario YAML, not inherited from defaults.
-  # This matches the bash implementation where EXTRA_VOLUMES defaults to [].
   volumes: []
   volumeMounts: []
 
@@ -959,13 +1081,13 @@ decode:
   # Scheduler name override global schedulerName (optional)
   # schedulerName: default-scheduler
 
-  # PriorityClassName override (optional - inherits from vllmCommon if not set)
+  # PriorityClassName override (optional - inherits from engine if not set)
   # priorityClassName: ""
 
-  # Ephemeral storage override (optional - inherits from vllmCommon if not set)
+  # Ephemeral storage override (optional - inherits from engine if not set)
   # ephemeralStorage: ""
 
-  # Network resource override (optional - inherits from vllmCommon if not set)
+  # Network resource override (optional - inherits from engine if not set)
   # networkResource: ""
   # networkNr: ""
 
@@ -1002,30 +1124,89 @@ decode:
   # Probe configuration
   probes:
     startup: *probe_startup
-    liveness:
-      <<: *probe_liveness
-      failureThreshold: 10
-      timeoutSeconds: 15
-    readiness:
-      <<: *probe_readiness
-      failureThreshold: 10
-      timeoutSeconds: 15
+    liveness: *probe_liveness
+    readiness: *probe_readiness
 
-  # vLLM configuration
-  vllm:
-    port: *vllm_port
-    servicePort: *vllm_service_port
-    workerMultiprocMethod: *worker_method
-    loggingLevel: *logging_level
+  # Inference engine. `command` is the launch line, verbatim -- see the ENGINE
+  # CONFIGURATION section above. Everything else here is optional.
+  engine:
+    # Engine name. Detected from the command; set it only when there is no
+    # command (the image's entrypoint launches the server).
+    name: null
+
+    # The launch command, exactly as you would run it. A scenario that states
+    # one replaces this line wholesale -- nothing here is merged into it, and
+    # no flag below is special to llm-d-benchmark.
+    #
+    # This is the smallest command that serves the configured model, so a
+    # scenario that says nothing about the engine still stands up. Two things
+    # are worth knowing when you write your own:
+    #
+    #   ${model.name}    the serve target. A command you write names the model
+    #                    the way you would on a node -- `vllm serve
+    #                    Qwen/Qwen3-32B` -- and `model.name` is read off it.
+    #                    This default cannot, because it has to serve whatever
+    #                    model the scenario or `-m/--models` picked, so it
+    #                    points back at `model.name` instead. Either way the id
+    #                    is written once. No `--served-model-name`: every engine
+    #                    advertises whatever it was asked to serve.
+    #   --port 8200      the llm-d convention on a decode pod: the routing
+    #                    sidecar owns `engine.servicePort` (8000) and forwards
+    #                    here. In direct mode (`gateway.className: none`) there
+    #                    is no sidecar, so bind 8000 instead.
+    command: |
+      vllm serve ${model.name} \
+        --port 8200
+
+    # Words appended to the command above, verbatim and unexamined. Empty here
+    # and rarely set: a single-stack scenario just writes the flag into its own
+    # command, where the whole launch line is visible in one place.
+    #
+    # What this is for is the multi-model shape -- several stacks behind one
+    # gateway, sharing ONE command, where a few models differ in a flag or two.
+    # Repeating a flag the command already carries overrides it, because every
+    # engine's argument parser keeps the last occurrence of a flag, and the
+    # reader that pulls --max-model-len / --block-size / --gpu-memory-utilization
+    # back out reads the same way -- so the numbers the capacity check and the
+    # router's prefix-cache index use are the ones the engine actually gets:
+    #
+    #   shared:
+    #     modelservice:
+    #       decode:
+    #         engine:
+    #           command: |
+    #             vllm serve ${model.name} \
+    #               --port 8200 --max-model-len 8192 --tensor-parallel-size 1
+    #   scenario:
+    #     - name: small          # nothing to say: the shared command is right
+    #       ...
+    #     - name: big
+    #       modelservice:
+    #         decode:
+    #           engine:
+    #             extraArgs: ["--max-model-len", "4096", "--tensor-parallel-size", "2"]
+    #
+    # Nothing is parsed and no flag is named, so this stays engine-agnostic. Two
+    # limits are worth knowing: the words are appended at the END, so they cannot
+    # change the serve target itself (that positional is what ${model.name} is
+    # for), and a role's own list replaces a plan-wide `engine.extraArgs` rather
+    # than adding to it.
+    extraArgs: []
+
+    # Port the engine binds. Normally read from the command's --port; set it
+    # only for an image whose entrypoint fixes the port.
+    port: null
+
+    # Command run before the engine, in the same container. Overrides
+    # engine.preprocessScript for this role.
+    preprocessCommand: null
+
     imagePullPolicy: *pull_if_not_present
-    customCommand: null
-    customPreprocessCommand: null
-    # Use these if wanted to use default command but add additional
-    # flags
-    additionalFlags: []
-      # - "--no-enable-log-requests"
-      # - "--max-model-len 16000"
-      # - "--tensor-parallel-size 1"
+
+    # Per-role image override. What you omit comes from `images.<engine>`.
+    # image:
+    #   repository: quay.io/my-org/vllm
+    #   tag: nightly
 
   # Mount model volume
   mountModelVolume: true
@@ -1088,7 +1269,9 @@ decode:
     podmonitor:
       enabled: false
       portName: "metrics"
-      path: "/metrics"
+      # No `path`: it comes from the engine's own spec, published as
+      # `<role>.engine.metricsPath` (TRT-LLM, for one, serves
+      # /prometheus/metrics). Set `path` here only to override that.
       interval: "30s"
       # scrapeTimeout: "10s"
       labels: {}
@@ -1115,13 +1298,13 @@ prefill:
   # Scheduler name override global schedulerName (optional)
   # schedulerName: default-scheduler
 
-  # PriorityClassName override (optional - inherits from vllmCommon if not set)
+  # PriorityClassName override (optional - inherits from engine if not set)
   # priorityClassName: ""
 
-  # Ephemeral storage override (optional - inherits from vllmCommon if not set)
+  # Ephemeral storage override (optional - inherits from engine if not set)
   # ephemeralStorage: ""
 
-  # Network resource override (optional - inherits from vllmCommon if not set)
+  # Network resource override (optional - inherits from engine if not set)
   # networkResource: ""
   # networkNr: ""
 
@@ -1148,21 +1331,36 @@ prefill:
     liveness: *probe_liveness
     readiness: *probe_readiness
 
-  # vLLM configuration
-  vllm:
-    port: *vllm_port
-    servicePort: *vllm_service_port
-    workerMultiprocMethod: *worker_method
-    loggingLevel: *logging_level
+  # Inference engine. `command` is the launch line, verbatim -- see the ENGINE
+  # CONFIGURATION section above. Everything else here is optional.
+  engine:
+    # Engine name. Detected from the command; set it only when there is no
+    # command (the image's entrypoint launches the server).
+    name: null
+
+    # The launch command, exactly as you would run it. Same contract as
+    # decode's (see above); the one difference is the port. A prefill pod
+    # never gets a routing sidecar -- the chart injects it only on decode --
+    # so prefill binds `engine.servicePort` (8000) itself, which is also where
+    # the decode sidecar reaches it for P/D.
+    command: |
+      vllm serve ${model.name} \
+        --port 8000
+
+    # Port the engine binds. Normally read from the command's --port; set it
+    # only for an image whose entrypoint fixes the port.
+    port: null
+
+    # Command run before the engine, in the same container. Overrides
+    # engine.preprocessScript for this role.
+    preprocessCommand: null
+
     imagePullPolicy: *pull_if_not_present
-    # Use these if wanted to use default command but add additional
-    # flags
-    additionalFlags: []
-      # - "--no-enable-log-requests"
-      # - "--max-model-len 16000"
-      # - "--tensor-parallel-size 1"
-    customCommand: null
-    customPreprocessCommand: null
+
+    # Per-role image override. What you omit comes from `images.<engine>`.
+    # image:
+    #   repository: quay.io/my-org/vllm
+    #   tag: nightly
 
   # Mount model volume
   mountModelVolume: true
@@ -1191,7 +1389,9 @@ prefill:
     podmonitor:
       enabled: false
       portName: "metrics"
-      path: "/metrics"
+      # No `path`: it comes from the engine's own spec, published as
+      # `<role>.engine.metricsPath` (TRT-LLM, for one, serves
+      # /prometheus/metrics). Set `path` here only to override that.
       interval: "30s"
       labels: {}
       annotations: {}
@@ -1209,7 +1409,7 @@ standalone:
 
   # Deployment naming
   deployment:
-    name: null  # Auto-generated if null: vllm-standalone-<model.shortName>
+    name: null  # Auto-generated if null: standalone-<model.shortName>
 
   # Service configuration
   service:
@@ -1244,13 +1444,13 @@ standalone:
   # Scheduler name override global schedulerName (optional)
   schedulerName: default-scheduler
 
-  # PriorityClassName override (optional - inherits from vllmCommon if not set)
+  # PriorityClassName override (optional - inherits from engine if not set)
   # priorityClassName: ""
 
-  # Ephemeral storage override (optional - inherits from vllmCommon if not set)
+  # Ephemeral storage override (optional - inherits from engine if not set)
   # ephemeralStorage: ""
 
-  # Network resource override (optional - inherits from vllmCommon if not set)
+  # Network resource override (optional - inherits from engine if not set)
   # networkResource: ""
   # networkNr: ""
 
@@ -1267,17 +1467,30 @@ standalone:
     #   - NVIDIA-H100-80GB-HBM3
     #   - NVIDIA-A100-SXM4-80GB
 
-  # Image configuration (inherits from images.vllm if not specified)
-  image:
-    repository: docker.io/vllm/vllm-openai
-    tag: *vllm-openai_version
-    pullPolicy: Always
+  # The three keys below are the pod the inherited command needs in order to
+  # run, and a scenario that states them for `decode` gets them here too: when
+  # `standalone` names none of its own, `decode`'s are used
+  # (_STANDALONE_INHERITS_FROM_DECODE in llmdbenchmark/parser/render_plans.py).
+  # Standalone is decode without the router in front of it, so it serves the
+  # same model with the same engine -- and a command inherited from decode while
+  # the pod around it falls back to the floors below cannot work: a 32B
+  # checkpoint under 40Gi is OOMKilled at load, and a `--tp_size 4` command on a
+  # one-device pod never starts.
+  #
+  # What follows is therefore a floor for a scenario that configures neither
+  # role, not a value standalone normally runs at. Each key is inherited whole,
+  # so naming `standalone.resources` at all opts it out of inheritance
+  # completely -- state both limits and requests, not just the one you change.
 
-  # Parallelism configuration
+  # Parallelism widths the llm-d chart needs as chart values, stated -- not read
+  # out of the command. They decide the pod's accelerator request, which the
+  # kubelet grants before the engine process exists, so they have to agree with
+  # whatever width the command gives the engine (`--tensor-parallel-size`,
+  # `--tp-size`, `--tp_size`, ...). This is the single-device floor.
   parallelism:
     tensor: 1
 
-  # Resource configuration (inherits from decode if not specified)
+  # Resource configuration
   resources:
     limits:
       memory: 40Gi
@@ -1286,48 +1499,76 @@ standalone:
       memory: 40Gi
       cpu: "4"
 
-  # Probe configuration
+  # Probe configuration. The anchors, not a copy of them: the copy that used to
+  # live here is how standalone came to run its readiness probe on the kubelet's
+  # 1s default while decode ran on 15s.
   probes:
-    startup:
-      failureThreshold: 60
-      initialDelaySeconds: 30
-      periodSeconds: 30
-      timeoutSeconds: 5
-    liveness:
-      failureThreshold: 3
-      periodSeconds: 5
-    readiness:
-      failureThreshold: 3
-      periodSeconds: 5
+    startup: *probe_startup
+    liveness: *probe_liveness
+    readiness: *probe_readiness
 
-  # vLLM configuration
-  vllm:
-    port: 8000
-    loadFormat: auto
-    modelLoaderExtraConfig: "{}"
-    workerMultiprocMethod: spawn
-    loggingLevel: INFO
-    enablePrefixCaching: false
-    preprocessCommand: /bin/true
-    customPreprocessCommand: null
-    customCommand: null
-    # How the container is launched. Mirrors decode/prefill `vllm.modelCommand`
-    # on the modelservice path.
-    #   custom       -- render `command: [<vllmCommon.shell>, -c]` plus the
-    #                   generated (or customCommand) shell script. Requires a
-    #                   shell in the server image.
+  # Inference engine. Same contract as decode/prefill: `command` is the launch
+  # line verbatim. See the ENGINE CONFIGURATION section above.
+  engine:
+    name: null
+
+    # There is deliberately no command here. Standalone serves the same model
+    # with the same engine as decode does -- it just drops the router in front
+    # of it -- so it inherits `decode.engine.command` when it states none of
+    # its own, and `-t standalone` runs the line the scenario already
+    # documents. A default here would instead name an engine the scenario
+    # never mentioned: every scenario that does not write a standalone block
+    # would silently serve whatever this line said.
+    #
+    # The resolution order is therefore:
+    #   standalone.engine.command   stated here      -- used as written
+    #   standalone.engine.command: ""  stated empty  -- image entrypoint, and
+    #                                                   decode is NOT inherited
+    #   (absent)                                     -- decode.engine.command
+    #   (absent, and decode has none)                -- image entrypoint
+    #
+    # Only state one when standalone genuinely differs from decode -- a
+    # different image whose entrypoint takes different flags, for instance
+    # (examples/launcher.yaml). Restating decode's line here just to change
+    # `--port` is not a difference: the Service targets whatever the command
+    # binds (see standalone.service in 15_standalone-service_yaml.j2), so a
+    # command that binds 8200 works unchanged.
+    # command: |
+    #   vllm serve my-org/my-model \
+    #     --port 8000
+
+    # Port the engine binds. Normally read from the command's --port.
+    port: null
+
+    preprocessCommand: null
+
+    imagePullPolicy: Always
+
+    # Per-role image override; what you omit comes from `images.<engine>`,
+    # so switching engine switches the image without restating it.
+    # image:
+    #   repository: quay.io/my-org/vllm
+    #   tag: nightly
+
+    # How the container is launched. Resolved automatically -- `custom` when
+    # this role has a command, `imageDefault` when it has none. A role drops
+    # the inherited command with `command: ""`; an empty string, not `null`,
+    # because a YAML key with no value never clobbers a default.
+    #   custom       -- render `command: [<engine.shell>, -c]` plus the
+    #                   command above. Requires a shell in the server image.
     #   imageDefault -- emit no `command:`; the image entrypoint runs and
     #                   `args` below is passed verbatim. Required for
     #                   distroless images, which have no shell to exec --
     #                   e.g. llm-d-inference-sim v0.9+ ships only
     #                   /app/llm-d-inference-sim (v0.8.2 still had bash).
-    modelCommand: custom
-    # Argument list for `modelCommand: imageDefault`. Ignored when
-    # modelCommand is `custom`. Supports ${dotted.path} substitution.
-    # Rendered as `args:`, so the image ENTRYPOINT supplies argv[0] (both
-    # server images have one: vllm-openai is `vllm serve`, inference-sim is
-    # /app/llm-d-inference-sim). For a CMD-only image with no ENTRYPOINT,
-    # make the binary the first element -- `args` replaces CMD outright.
+    # modelCommand: imageDefault
+
+    # Argument list for `modelCommand: imageDefault`. Ignored when the role has
+    # a command. Supports ${dotted.path} substitution. Rendered as `args:`, so
+    # the image ENTRYPOINT supplies argv[0] (both server images have one:
+    # vllm-openai is `vllm serve`, inference-sim is /app/llm-d-inference-sim).
+    # For a CMD-only image with no ENTRYPOINT, make the binary the first
+    # element -- `args` replaces CMD outright.
     args: []
     # Example:
     # args:
@@ -1337,16 +1578,9 @@ standalone:
     #   - "8000"
     #   - "--served-model-name"
     #   - "${model.name}"
-    # Use these if wanted to use default command but add additional
-    # flags
-    additionalFlags: []
-    # Example:
-    # additionalFlags:
-    #   - "--enable-chunked-prefill"
-    #   - "--max-num-batched-tokens 8192"
 
   # Model volume configuration
-  # NOTE: The model PVC is standalone-specific (not in vllmCommon.volumes)
+  # NOTE: The model PVC is standalone-specific (not in engine.volumes)
   # because modelservice handles its own model volume via the Helm chart.
   mountModelVolume: true
   modelMountPath: /model-cache
@@ -1360,10 +1594,10 @@ standalone:
     port: 8001
     vllmPort: 8002
     imagePullPolicy: Always
-    # Image defaults to standalone.image if not specified
+    # Image defaults to standalone.engine.image if not specified
     image:
-      repository: null  # null = inherit from standalone.image
-      tag: null          # null = inherit from standalone.image
+      repository: null  # null = inherit from standalone.engine.image
+      tag: null          # null = inherit from standalone.engine.image
     customPreprocessCommand: null
     # Custom args for the launcher. null = use default uvicorn command.
     args: null
@@ -1469,7 +1703,7 @@ nok8s:
   # gets a per-stack subdirectory appended so stacks never overwrite each
   # other's staged configs.
   workspaceHostDir: "~/.llmdbench/nok8s"
-  # Appended to every container name (vllm-N, epp, envoy). Filled in
+  # Appended to every container name (modelserver-N, epp, envoy). Filled in
   # automatically with "-<stack>" when a scenario has more than one stack, so
   # sibling stacks on one host don't share (and delete) each other's
   # containers. An explicit value is preserved, but two stacks resolving to
@@ -1477,31 +1711,47 @@ nok8s:
   # the bare names.
   nameSuffix: ""
 
-  # vLLM inference worker(s)
-  vllm:
-    image: docker.io/vllm/vllm-openai
-    tag: *vllm-openai_version
+  # Inference engine worker(s). Same contract as the Kubernetes roles: state
+  # the launch command verbatim and it runs inside the container unchanged.
+  #   nok8s:
+  #     engine:
+  #       command: |
+  #         vllm serve ${model.name} --port 8000 --tensor-parallel-size 2
+  engine:
+    name: null
+    command: null
+    # Port the engine binds inside the container. Read from the command's
+    # --port; stated here only when the command cannot say.
+    port: null
+    # Per-engine image default comes from `images.<engine>`; override here.
+    # image:
+    #   repository: docker.io/vllm/vllm-openai
+    #   tag: v0.26.0
     hostPort: 8000          # worker i is published on hostPort + i
-    containerPort: 8000
-    tensorParallel: 1       # accelerators to shard each worker across
     # Accelerator preset for exposing the device to the container:
     #   nvidia | amd | intel | gaudi | cpu | spyre
     # Only NVIDIA is validated end-to-end; others follow each backend's
-    # documented device flags. Change `image` to the matching vLLM backend.
+    # documented device flags. Point `image` at the matching engine backend.
     accelerator: nvidia
     gpus: "all"             # nvidia only: docker --gpus value (podman uses CDI)
     # Raw runtime device flags; overrides the accelerator preset entirely.
     # Use for IBM Spyre/AIU or any custom device wiring, e.g.
     #   deviceArgs: ["--device", "/dev/kfd", "--device", "/dev/dri"]
     deviceArgs: []
-    shmSize: "20g"          # required for NCCL/RCCL when tensorParallel > 1
+    shmSize: "20g"          # required for NCCL/RCCL when sharding across devices
     hfCacheDir: "~/.cache/huggingface"
-    # Number of independent vLLM workers (EPP load-balances across them). With
-    # replicas > 1 each worker is pinned to its own slice of `tensorParallel`
-    # GPU indices (replica i -> devices i*TP .. i*TP+TP-1) via the accelerator's
-    # visible-devices env. Total GPUs used = replicas * tensorParallel.
+    # Devices one worker is given. The nok8s counterpart of a Kubernetes role's
+    # `parallelism.tensor`: the container runtime pins devices before the engine
+    # process exists, so the count is stated here rather than read out of the
+    # command -- it has to agree with the width the command gives the engine
+    # (e.g. `--tensor-parallel-size 2` -> 2).
+    acceleratorCount: 1
+    # Number of independent workers (EPP load-balances across them). With
+    # replicas > 1 each worker is pinned to its own contiguous slice of the
+    # host's devices (replica i -> devices i*acceleratorCount ..
+    # i*acceleratorCount+acceleratorCount-1) via the accelerator's
+    # visible-devices env. Total devices needed = replicas * acceleratorCount.
     replicas: 1
-    extraArgs: []           # appended after `serve <MODEL> --tensor-parallel-size=N`
 
   # Endpoint Picker (router brain), file-discovery mode
   epp:
@@ -1560,7 +1810,7 @@ fma:
 
   # Deployment naming
   deployment:
-    name: null  # Auto-generated if null: vllm-standalone-<model.shortName>
+    name: null  # Auto-generated if null: standalone-<model.shortName>
 
   # Labels applied to deployment and service
   labels:
@@ -1581,48 +1831,47 @@ fma:
       pullPolicy: IfNotPresent
     probePort: 8080
     spiPort: 8081
-    readinessProbeInitialDelay: 5
-    readinessProbePeriod: 10
     limitsGPU: 1
     limitsCPU: 1
     limitsMemory: 250Mi
 
   launcher:
     maxInstances: 4
-    # Opt-in: pass the download job's staged local copy
-    # (<modelMountPath>/<model.path>, a complete copy by construction) as
-    # the launcher's --model instead of the repo ID. The repo ID resolves
-    # through the HF hub cache -- a second, network-dependent copy that,
-    # when partial or the PVC is full, re-downloads and can fill the disk
-    # at weight load (#1822). Off by default so this changes no existing
-    # behavior; the model name itself must stay a clean repo ID regardless
-    # -- it feeds the derived Helm release name, and a path mangles that
-    # into an invalid (leading-dash) release name.
-    loadModelFromLocalDir: false
-    # Launcher vLLM flags. Leave null/false to inherit the keys the baseline
-    # (non-FMA) chart reads (vllmCommon.flags.*, model.blockSize) so an FMA arm
-    # tracks the arm it is compared against; set them only to diverge on purpose.
-    disableLogRequests: null
-    disableUvicornAccessLog: null
-    blockSize: null
-    # null inherits vllmCommon.flags.noPrefixCaching (the baseline's key), so
-    # caching is ON unless the baseline turns it off. true/false forces either way.
-    disablePrefixCaching: null
-    # Tensor parallelism for models that do not fit on a single GPU (e.g.
-    # Qwen3-32B on an 80GB H100). > 1 feeds --tensor-parallel-size and, since
-    # TP workers exchange over a shared-memory message queue, provisions a
-    # 16Gi in-memory /dev/shm on the launcher (the pod default 64Mi crashes
-    # NCCL at init). Pair with fma.requester.limitsGPU so the requester
-    # reserves matching GPUs. Default 1 leaves single-GPU runs unchanged (#1853).
+    # The FMA launcher process IS the vLLM entrypoint -- it owns sleep mode --
+    # so this path has no `vllm serve` line: the LauncherConfig CRD takes a flag
+    # string. `options` is that string, verbatim, exactly as `engine.command` is
+    # verbatim elsewhere. Nothing assembles it flag by flag, so nothing here has
+    # to be taught a new vLLM flag.
+    #
+    # Numbers an FMA arm must share with the arm it is compared against go in as
+    # references, and then they cannot desync:
+    #
+    #   options: >-
+    #     --model ${model.name}
+    #     --enable-sleep-mode
+    #     --max-model-len ${model.maxModelLen}
+    #     --gpu-memory-utilization ${model.gpuMemoryUtilization}
+    #     --block-size ${model.blockSize}
+    #
+    # `--model` is the repo ID, and it loads the weights the download job already
+    # staged: the launcher pod gets HF_HUB_CACHE pointed at that staged hub cache,
+    # so the ID resolves locally rather than re-resolving over the network and
+    # filling the PVC with a second copy at weight load (#1822).
+    #
+    # It has to stay an ID rather than a path regardless: it feeds the derived
+    # Helm release name, which a path mangles into an invalid (leading-dash) name.
+    #
+    # This is also the one path with no command for `model.maxModelLen`,
+    # `model.blockSize` and `model.gpuMemoryUtilization` to be read off, so a
+    # scenario using them states them in its own `model:` block.
+    options: "--model ${model.name} --enable-sleep-mode"
+    # Tensor-parallel width, stated because it is a pod-spec fact and not only a
+    # flag: TP workers exchange over a shared-memory message queue, so > 1
+    # provisions a 16Gi in-memory /dev/shm on the launcher (the pod default 64Mi
+    # crashes NCCL at init). Write the same width in `options`, and pair it with
+    # fma.requester.limitsGPU so the requester reserves matching GPUs. Default 1
+    # leaves single-GPU runs unchanged (#1853).
     tensorParallelSize: 1
-    # Opt-in: skip torch.compile + CUDA-graph capture on the launcher's vLLM
-    # child. Binds faster on cold boot at the cost of steady-state serving
-    # performance -- every request then runs unoptimized kernels (and small/
-    # low-concurrency requests also pay per-step kernel-launch overhead that
-    # graph replay would have avoided). Off by default so serving deployments
-    # keep the optimized path; useful for actuation-timing runs, where boot
-    # latency matters and serving throughput is not measured.
-    enforceEager: false
     image:
       repository: ghcr.io/llm-d-incubation/llm-d-fast-model-actuation/launcher
       tag: v0.6.5
@@ -1776,10 +2025,8 @@ wva:
           - type: Percent
             value: 100
             periodSeconds: 15
-  vllmService:
+  engineService:
     enabled: true
-    nodePortMin: 30000
-    nodePortMax: 32767
     interval: 15s
     scheme: http
 
@@ -1814,7 +2061,6 @@ eppKedaSaturation:
     port: 9091
   epp:
     poolName: ""                # InferencePool name; defaults to model_id_label
-    serviceLabelSelector: {}    # matchLabels for EPP Service selector
     metricsPortName: http-metrics
     metricsPort: 9090
     prometheusServiceAccount: thanos-querier
@@ -1932,7 +2178,6 @@ harness:
 # ============================================================================
 experiment:
   resultsDir: /requests
-  analyzeLocally: false
   workspaceDir: /workspace
   datasetUrl: ""
   datasetDir: ""
@@ -1949,7 +2194,6 @@ description:
 # ============================================================================
 control:
   waitTimeout: 900
-  waitPeriod: 10
   ignoreFailedValidation: true    # When true, capacity planner failures are warnings (deployment continues). Matches bash default.
   # Name of the K8s Secret that holds the kubeconfig for in-cluster pods.
   # Matches bash LLMDBENCH_VLLM_COMMON_CONTEXT_SECRET_NAME default.
@@ -1960,24 +2204,3 @@ control:
 # ============================================================================
 release: llmdbench
 
-# ============================================================================
-# OPENSHIFT MONITORING
-# ============================================================================
-openshiftMonitoring:
-  userWorkloadMonitoringNamespace: openshift-user-workload-monitoring
-
-# ============================================================================
-# IDLE CLEANUP (Experimental)
-# Automatic GPU reclamation - scales down idle model deployments to 0 replicas
-# when no inference requests are observed over a configurable window.
-#
-# Deploys a namespace-scoped CronJob with its own ServiceAccount + RBAC.
-# Must be explicitly enabled per scenario.
-# ============================================================================
-idleCleanup:
-  enabled: false                  # Experimental: must be explicitly enabled
-  schedule: "0 * * * *"           # Cron schedule (default: hourly)
-  idleWindow: "24h"               # Scale down if zero requests in this window
-  dryRun: false                   # Log decisions without actually scaling
-  prometheusUrl: ""               # Auto-detected for OpenShift; set manually for GKE/other
-  image: ""                       # Container image for CronJob; empty = python:3.11-slim

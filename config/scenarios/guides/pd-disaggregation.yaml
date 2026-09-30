@@ -1,6 +1,5 @@
 # P/D DISAGGREGATION WELL LIT PATH
 # Based on https://github.com/llm-d/llm-d/tree/main/guides/pd-disaggregation/README.md
-# Migrated from bash environment variables to YAML format
 #
 # Notes:
 # - Removed pod monitoring; can be added using decode.extraContainerConfig / prefill.extraContainerConfig
@@ -48,27 +47,26 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Model Configuration
-      # Alternative models (commented out in original):
-      #   - Qwen/Qwen3-0.6B
-      #   - facebook/opt-125m
-      #   - meta-llama/Llama-3.1-8B-Instruct
-      #   - meta-llama/Llama-3.1-70B-Instruct
-      #   - deepseek-ai/DeepSeek-R1-0528
+      # The model is named in the launch commands below and nowhere else. To
+      # serve a different one, edit the commands and the shortName here; the
+      # PVC path, pod labels, HTTPRoute and harness target all follow.
+      # Models this guide has been run with: Qwen/Qwen3-0.6B, facebook/opt-125m, meta-llama/Llama-3.1-8B-Instruct,
+      #   meta-llama/Llama-3.1-70B-Instruct, deepseek-ai/DeepSeek-R1-0528,
+      #   openai/gpt-oss-120b.
       # -------------------------------------------------------------------------
       model:
-        name: Qwen/Qwen3-32B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen3-32b
-        path: models/Qwen/Qwen3-32B
-        huggingfaceId: Qwen/Qwen3-32B
-  #      name: openai/gpt-oss-120b
-  #      shortName: openai-gpt-oss-120b
-  #      path: models/openai/gpt-oss-120b
-  #      huggingfaceId: openai/gpt-oss-120b
         size: 1Ti
-        maxModelLen: 16384
-        blockSize: 128
-        gpuMemoryUtilization: 0.90
-        cacheBase: /model-cache
+        # maxModelLen, gpuMemoryUtilization and blockSize are deliberately NOT
+        # set here: they are engine parameters, so they are stated in the launch
+        # commands below -- `--max-model-len`, `--gpu-memory-utilization`,
+        # `--block-size` -- and read back out of them for the pre-deploy
+        # capacity check and for anything that has to index the engine's KV
+        # pages.
 
       # -------------------------------------------------------------------------
       # Storage Configuration
@@ -81,18 +79,21 @@ scenario:
           # storageClassName: shared-vast
           # storageClassName: ocs-storagecluster-cephfs
 
-      vllmCommon:
-        # ---- RDMA / RoCE data plane ---------------------------------------------
-        # Transports UCX may use for the KV transfer. "rc" (reliable connection)
-        # is the RDMA transport; the others serve as fallbacks on nodes with no
-        # RDMA device.
-        ucxTls: "rc,sm,cuda_ipc,cuda_copy,tcp"
-        # Rails to pin the KV transfer to, in HCA form <device>:<port>. Device
-        # numbers are a property of the nodes -- list yours with `ibstat -l` /
-        # `show_gids.sh`. Empty lets the preprocess init container select the
-        # devices; pin a subset per run with
-        #   --set 'vllmCommon.ucxNetDevices="mlx5_1:1,mlx5_3:1"'
-        ucxNetDevices: ""
+      # Everything under `engine` is infrastructure the POD needs, not a
+      # parameter the engine process takes: RDMA device limits, volumes, the
+      # Service port. Engine parameters are stated once, in the launch command
+      # each role below carries verbatim.
+      #
+      # The RDMA/RoCE data plane is not here either: UCX reads it from the
+      # container environment, so `UCX_TLS` and `UCX_NET_DEVICES` are set in
+      # `roleDefaults.extraEnvVars` below, where every other environment
+      # variable this stack needs already lives.
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the network facts only the
+        # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+        # library path. Engine commands never mention it.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
         networkResource: "auto"   # auto-detect from cluster nodes
         networkNr: "1"            # number of network devices
 
@@ -117,21 +118,21 @@ scenario:
 # VLLM_NIXL_SIDE_CHANNEL_HOST (which is pinned to the pod IP). If a rail cannot
 # carry that traffic the handshake fails (NIXL_ERR_REMOTE_DISCONNECT /
 # NIXL_ERR_NOT_FOUND) and requests hang or 500 rather than erroring cleanly, so
-# vllmCommon.ucxNetDevices above narrows the choice. The right value depends on
-# which transport you want, and the device names are a property of your cluster's
-# hardware -- there is no portable default:
+# `UCX_NET_DEVICES` in roleDefaults.extraEnvVars below narrows the choice. The
+# right value depends on which transport you want, and the device names are a
+# property of your cluster's hardware -- there is no portable default:
 #
-#   * TCP over the pod network (simplest): leave ucxTls as shipped and set
-#     ucxNetDevices: "eth0". KV transfer ignores the secondary rails.
+#   * TCP over the pod network (simplest): drop "rc" from UCX_TLS and set
+#     UCX_NET_DEVICES: "eth0". KV transfer ignores the secondary rails.
 #   * TCP over the secondary rails: netdev names, e.g. "net1-0,net1-1,...".
-#   * RDMA/RoCE: add "rc" to ucxTls AND give ucxNetDevices HCA names in
+#   * RDMA/RoCE: keep "rc" in UCX_TLS AND give UCX_NET_DEVICES HCA names in
 #     <device>:<port> form, e.g. "mlx5_1:1,mlx5_3:1". "eth0" is NOT an RDMA
 #     device, so pinning it silently keeps you on TCP.
 #
-# ucxNetDevices ships empty, which lets the preprocess init container auto-detect
-# the RoCE devices. That works when every rail exposes its GID at the same index;
-# pin the list explicitly if you see "HCA IDs selected: []" in the init
-# container log, or to hold the KV transfer to a subset of the rails.
+# UCX_NET_DEVICES ships empty, which lets the preprocess init container
+# auto-detect the RoCE devices. That works when every rail exposes its GID at
+# the same index; pin the list explicitly if you see "HCA IDs selected: []" in
+# the init container log, or to hold the KV transfer to a subset of the rails.
 #
 # Rails sharing one subnet additionally need source-based routing rules, which
 # the preprocess init container installs. The device names and the attachment name
@@ -148,8 +149,8 @@ scenario:
 
       # ---- OpenTelemetry tracing ----------------------------------------------
       # Emits OTEL_* env vars on prefill, decode and the routing proxy; vLLM
-      # receives the endpoint through --otlp-traces-endpoint in the customCommand
-      # blocks below. Deploy a collector reachable at otlpEndpoint -- the
+      # receives the endpoint through --otlp-traces-endpoint in the launch
+      # commands below. Deploy a collector reachable at otlpEndpoint -- the
       # benchmark configures tracing but ships no backend of its own.
       tracing:
         enabled: true
@@ -175,7 +176,7 @@ scenario:
     # defined ENTIRELY by the guide's own manifests:
     #
     #   * EVERYTHING ELSE in this scenario is IGNORED -- model, modelservice,
-    #     standalone, decode/prefill, vllmCommon, storage, harness model, etc.
+    #     standalone, decode/prefill, engine, storage, harness model, etc.
     #   * `-m/--models` and all other CLI/scenario tuning are ignored.
     #   * DoE `experiment` SETUP sweeps do NOT alter a kustomize deploy
     #     (only run/workload treatments still apply).
@@ -354,6 +355,114 @@ scenario:
         requestTimeout: "300s"
         backendRequestTimeout: "0s"
 
+      # -----------------------------------------------------------------------
+      # Shared role configuration
+      # Prefill and decode run the same container with the same NIXL transport
+      # and the same capabilities, so that shape is stated once. What genuinely
+      # differs between them -- how many replicas, how wide, how much memory,
+      # and the launch command -- each role states for itself below, and a key
+      # a role names wins over the value here.
+      # -----------------------------------------------------------------------
+      roleDefaults:
+        initContainers:
+          - name: preprocess
+            imageKey: benchmark
+            imagePullPolicy: Always
+            # Runs the scripts mounted from the llm-d-benchmark-preprocesses
+            # ConfigMap, which standup builds from the local checkout.
+            command: ["python3", "/setup/preprocess/set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
+            volumeMounts:
+              - name: shared-config
+                mountPath: /shared-config
+              - name: preprocesses
+                mountPath: /setup/preprocess
+
+        # -----------------------------------------------------------------------
+        # Extra Environment Variables
+        # -----------------------------------------------------------------------
+        extraEnvVars:
+          # The one environment variable the llm-d pd-disaggregation guide declares
+          # on both roles (guides/pd-disaggregation/modelserver/gpu/vllm/base/
+          # patch-{decode,prefill}.yaml). NixlConnector publishes this address to
+          # its peer as where the KV blocks can be read from, and takes it from the
+          # environment rather than the launch line. vLLM defaults it to
+          # `localhost`, which the other pod cannot reach, so the handshake has to
+          # be told the pod's own IP.
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: NCCL_EXCLUDE_IB_HCA
+            value: ""
+          - name: NVSHMEM_DEBUG
+            value: "none"
+          - name: NCCL_DEBUG
+            value: "WARN"
+          - name: NIXL_LOG_LEVEL
+            value: debug
+          - name: UCX_MAX_RMA_RAILS
+            value: "1"
+          # Disables NVLink SHARP (NVLS) collectives, which require an
+          # initialized Fabric Manager.
+          - name: NCCL_NVLS_ENABLE
+            value: "0"
+          # NIXL moves the KV blocks over UCX, and UCX picks its transports at
+          # agent creation -- after the weights are loaded, so a bad choice
+          # surfaces as an engine that dies minutes into startup rather than as
+          # a flag error. These name the set this stack is built for: `rc` is
+          # the RDMA transport, then shared memory and CUDA copies inside a pod,
+          # TCP between pods that have no RDMA device, and TCP for the
+          # rendezvous.
+          - name: UCX_TLS
+            value: "rc,sm,cuda_ipc,cuda_copy,tcp"
+          - name: UCX_SOCKADDR_TLS_PRIORITY
+            value: "tcp"
+          # Rails to pin the KV transfer to, in HCA form <device>:<port> --
+          # list yours with `ibstat -l` / `show_gids.sh`. Left empty, the
+          # preprocess initContainer discovers the RoCE devices and writes the
+          # value into /shared-config/llmdbench_env.sh; any non-empty value
+          # here wins over that discovery, so set it to hold the transfer to a
+          # subset of the rails, e.g.
+          #   --set 'modelservice.roleDefaults.extraEnvVars[N].value=mlx5_1:1,mlx5_3:1'
+          - name: UCX_NET_DEVICES
+            value: ""
+          # vLLM's own keep-alive is 5s, shorter than the 90s idle timeout Go's
+          # http.Transport gives llm-d-routing-sidecar, so the sidecar reuses a
+          # connection the engine has already closed and the request dies on a
+          # TCP reset. The llm-d guide raises it for the same reason.
+          - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+            value: "120"
+
+        # -----------------------------------------------------------------------
+        # Extra Container Configuration
+        # -----------------------------------------------------------------------
+        extraContainerConfig:
+          securityContext:
+            capabilities:
+              add:
+                - "IPC_LOCK"
+                - "SYS_RAWIO"
+                - "NET_ADMIN"
+                - "NET_RAW"
+            runAsGroup: 0
+            runAsUser: 0
+          imagePullPolicy: Always
+
+        # -----------------------------------------------------------------------
+        # Additional Volume Mounts
+        # -----------------------------------------------------------------------
+        additionalVolumeMounts: []
+
+        # -----------------------------------------------------------------------
+        # Additional Volumes
+        # -----------------------------------------------------------------------
+        additionalVolumes:
+          - name: preprocesses
+            type: configMap
+            configMap:
+              name: llm-d-benchmark-preprocesses
+              defaultMode: 493        # 0755, so the scripts are executable
+
       # -------------------------------------------------------------------------
       # Prefill Configuration
       # -------------------------------------------------------------------------
@@ -361,47 +470,38 @@ scenario:
         enabled: true
         replicas: 1
   #      replicas: 8
-        vllm:
-          customCommand: |
-            ${accelerator.runtimePreamble}
-            . /shared-config/llmdbench_env.sh
-            vllm serve $MODEL_SERVE_REF \
+        engine:
+          # The launch command, verbatim. Paste in a line that already works for
+          # you and it runs unchanged; the only flag llm-d-benchmark reads is
+          # `--port`, because the container port and the probes have to name an
+          # endpoint before the process exists.
+          #
+          # A prefill pod never gets the routing sidecar (the chart injects it
+          # only on decode), so prefill binds `engine.servicePort` (8000)
+          # itself -- which is also where decode's NIXL transfer reaches it.
+          #
+          # The flags below are the ones this guide was run with on CUDA. Other
+          # backends want materially different ones -- XPU takes no
+          # `--block-size` and wants `--enforce-eager`, Spyre and CPU differ
+          # again -- so they get their own scenario file rather than a
+          # substitution point here (see config/scenarios/examples/intel-xpu.yaml).
+          command: |
+            vllm serve Qwen/Qwen3-32B \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_INFERENCE_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
-            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"${accelerator.kvBufferDeviceJson}}' \
+            --port 8000 \
+            --block-size 128 \
+            --max-model-len 16384 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 1 \
+            --gpu-memory-utilization 0.90 \
+            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"}' \
             --disable-uvicorn-access-log \
             --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
             --no-enable-prefix-caching \
-            ${accelerator.dtypeArgs} \
-            ${accelerator.executionArgs} \
+            --dtype bfloat16 \
             --no-disable-hybrid-kv-cache-manager \
             ${OTEL_EXPORTER_OTLP_ENDPOINT:+--otlp-traces-endpoint $OTEL_EXPORTER_OTLP_ENDPOINT}
-
-        initContainers:
-          - name: preprocess
-            imageKey: benchmark
-            imagePullPolicy: Always
-            # Runs the scripts mounted from the llm-d-benchmark-preprocesses
-            # ConfigMap, which standup builds from the local checkout.
-            command: ["python3", "/setup/preprocess/set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
-            volumeMounts:
-              - name: shared-config
-                mountPath: /shared-config
-              - name: preprocesses
-                mountPath: /setup/preprocess
-
-        parallelism:
-          tensor: 1
-          data: 1
-          dataLocal: 1
-          workers: 1
 
         # Resource configuration
         resources:
@@ -411,102 +511,44 @@ scenario:
           requests:
             memory: 16Gi
             cpu: "8"
-
-        # -----------------------------------------------------------------------
-        # Extra Environment Variables
-        # -----------------------------------------------------------------------
-        extraEnvVars:
-          - name: NCCL_EXCLUDE_IB_HCA
-            value: ""
-          - name: NVSHMEM_DEBUG
-            value: "none"
-          - name: NCCL_DEBUG
-            value: "WARN"
-          - name: NIXL_LOG_LEVEL
-            value: debug
-          - name: UCX_MAX_RMA_RAILS
-            value: "1"
-          # Disables NVLink SHARP (NVLS) collectives, which require an
-          # initialized Fabric Manager.
-          - name: NCCL_NVLS_ENABLE
-            value: "0"
-
-        # -----------------------------------------------------------------------
-        # Extra Container Configuration
-        # -----------------------------------------------------------------------
-        extraContainerConfig:
-          securityContext:
-            capabilities:
-              add:
-                - "IPC_LOCK"
-                - "SYS_RAWIO"
-                - "NET_ADMIN"
-                - "NET_RAW"
-            runAsGroup: 0
-            runAsUser: 0
-          imagePullPolicy: Always
-
-        # -----------------------------------------------------------------------
-        # Additional Volume Mounts
-        # -----------------------------------------------------------------------
-        additionalVolumeMounts: []
-
-        # -----------------------------------------------------------------------
-        # Additional Volumes
-        # -----------------------------------------------------------------------
-        additionalVolumes:
-          - name: preprocesses
-            type: configMap
-            configMap:
-              name: llm-d-benchmark-preprocesses
-              defaultMode: 493        # 0755, so the scripts are executable
 
       # -------------------------------------------------------------------------
       # Decode Configuration
       # -------------------------------------------------------------------------
       decode:
         replicas: 2
-        vllm:
-          customCommand: |
-            ${accelerator.runtimePreamble}
-            . /shared-config/llmdbench_env.sh
-            vllm serve $MODEL_SERVE_REF \
+        # Devices per replica -- a Kubernetes fact, not a reading of the
+        # command. The kubelet grants accelerators before the engine process
+        # exists, so the count is stated here in Kubernetes' vocabulary and the
+        # chart turns it into the pod's device request. It has to agree with the
+        # width the command gives the engine (`--tensor-parallel-size 2` below),
+        # or the engine starves at startup. To request a count the parallelism
+        # widths do not describe, set `resources.limits.<accelerator resource>`.
+        parallelism:
+          tensor: 2
+
+        engine:
+          # Same verbatim contract as prefill. Decode binds 8200, not 8000:
+          # the routing sidecar the chart injects on decode pods listens on
+          # `engine.servicePort` (8000) and forwards here. In direct mode
+          # (`gateway.className: none`) there is no sidecar -- bind 8000 then.
+          command: |
+            vllm serve Qwen/Qwen3-32B \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_METRICS_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
-            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"${accelerator.kvBufferDeviceJson}}' \
+            --port 8200 \
+            --block-size 128 \
+            --max-model-len 16384 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 2 \
+            --gpu-memory-utilization 0.90 \
+            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"}' \
             --disable-uvicorn-access-log \
             --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
             --no-enable-prefix-caching \
-            ${accelerator.dtypeArgs} \
-            ${accelerator.executionArgs} \
+            --dtype bfloat16 \
             --no-disable-hybrid-kv-cache-manager \
             ${OTEL_EXPORTER_OTLP_ENDPOINT:+--otlp-traces-endpoint $OTEL_EXPORTER_OTLP_ENDPOINT}
-
-        initContainers:
-          - name: preprocess
-            imageKey: benchmark
-            imagePullPolicy: Always
-            # Runs the scripts mounted from the llm-d-benchmark-preprocesses
-            # ConfigMap, which standup builds from the local checkout.
-            command: ["python3", "/setup/preprocess/set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
-            volumeMounts:
-              - name: shared-config
-                mountPath: /shared-config
-              - name: preprocesses
-                mountPath: /setup/preprocess
-
-        parallelism:
-          tensor: 2
-          data: 1
-          dataLocal: 1
-          workers: 1
 
         # Resource configuration
         resources:
@@ -516,55 +558,6 @@ scenario:
           requests:
             memory: 128Gi
             cpu: "32"
-
-        # -----------------------------------------------------------------------
-        # Extra Environment Variables
-        # -----------------------------------------------------------------------
-        extraEnvVars:
-          - name: NCCL_EXCLUDE_IB_HCA
-            value: ""
-          - name: NVSHMEM_DEBUG
-            value: "none"
-          - name: NCCL_DEBUG
-            value: "WARN"
-          - name: NIXL_LOG_LEVEL
-            value: debug
-          - name: UCX_MAX_RMA_RAILS
-            value: "1"
-          # Disables NVLink SHARP (NVLS) collectives, which require an
-          # initialized Fabric Manager.
-          - name: NCCL_NVLS_ENABLE
-            value: "0"
-
-        # -----------------------------------------------------------------------
-        # Extra Container Configuration
-        # -----------------------------------------------------------------------
-        extraContainerConfig:
-          securityContext:
-            capabilities:
-              add:
-                - "IPC_LOCK"
-                - "SYS_RAWIO"
-                - "NET_ADMIN"
-                - "NET_RAW"
-            runAsGroup: 0
-            runAsUser: 0
-          imagePullPolicy: Always
-
-        # -----------------------------------------------------------------------
-        # Additional Volume Mounts
-        # -----------------------------------------------------------------------
-        additionalVolumeMounts: []
-
-        # -----------------------------------------------------------------------
-        # Additional Volumes
-        # -----------------------------------------------------------------------
-        additionalVolumes:
-          - name: preprocesses
-            type: configMap
-            configMap:
-              name: llm-d-benchmark-preprocesses
-              defaultMode: 493        # 0755, so the scripts are executable
 
     harness:
       name: vllm-benchmark

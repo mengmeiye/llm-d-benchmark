@@ -99,55 +99,66 @@ storage:
 
 Entries `REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL` and `REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL` will be automatically replaced with the current value of the environment variables `LLMDBENCH_DEPLOY_CURRENT_MODEL` and `LLMDBENCH_HARNESS_STACK_ENDPOINT_URL` respectively.
 
-In addition to that, **any other parameter (on the workload profile) can be ovewritten** by setting a list of `<key>,<value>` as the contents of environment variable `LLMDBENCH_HARNESS_EXPERIMENT_PROFILE_OVERRIDES`.
+In addition to that, **any other parameter on the workload profile can be overwritten** by passing a list of `<key>=<value>` pairs to `-o/--overrides`.
 
-Finally, new workload profiles can manually crafted and placed under the correct directory. Once crafted, these can then be used by the `run.sh` executable.
+Finally, new workload profiles can be hand-written and placed under the correct directory. Once written, they are selected with `-w/--workload`.
 
 ## Use
-An invocation of `run.sh` without any parameters will result in using all the already defined default values (consult the table below).
+`llmdbenchmark run` with no parameters beyond the scenario uses the defaults below.
 
-If a particular `llm-d` stack was stood up using a highly customized scenario file (e.g., with a different model name, specific `max_model_len`, specific network card), it should be included when invoking `./run.sh`. i.e., `./run.sh -c <scenario>`
+If a stack was stood up from a highly customized scenario (a different model, a specific context length, a specific network card), pass the same scenario to `run` so the harness targets it correctly:
 
-The command line parameters allow one to override even individual parameters on a particular workload profile. e.g., `./run.sh -c <scenario> -l inference-perf -w sanity_random -o min=20,total_count=200`
+```bash
+llmdbenchmark --spec guides/optimized-baseline run -l inference-perf -w sanity_random -o min=20,total_count=200
+```
+
+Command line parameters override individual entries in the workload profile, as `-o` does above.
 
 > [!IMPORTANT]
-> `run.sh` can, and usually is, used against a stack which was deployed by other means (i.e., outside the `standup.sh` in `llm-d-benchmark).
+> `run` can, and usually is, used against a stack that was deployed by other means -- outside `llmdbenchmark standup`. Point it at the endpoint with `-U/--endpoint-url`.
 
+Everything below has both a command line flag and an environment-variable form, `LLMDBENCH_` plus the flag's long name, upper-cased.
 
-The following table displays a comprehensive list of environment variables (and corresponding command line parameters) which control the execution of `./run.sh`
+### Choosing the load
 
-> [!NOTE]
-> Evidently, `./e2e.sh`, as the executable that **combines** `./setup/standup.sh`, `run.sh` and `setup/teardown.sh` into a singe operation can also consume the (workload) profile.
+| Flag | Environment variable | Meaning |
+| ---- | -------------------- | ------- |
+| `-l`/`--harness` | `LLMDBENCH_HARNESS` | Harness (load generator) to run. Default `inference-perf`; also settable as `harness.name`. |
+| `-w`/`--workload` | `LLMDBENCH_WORKLOAD` | Workload profile the harness runs. Default `sanity_random.yaml`; also settable as `harness.experimentProfile`. A bare name resolves inside `workload/profiles/<harness name>`. |
+| `--workload-file-path` | `LLMDBENCH_WORKLOAD_FILE_PATH` | Point at a profile outside the profiles tree. |
+| `-o`/`--overrides` | `LLMDBENCH_OVERRIDES` | Comma-separated `key=value` pairs overriding entries in the workload profile. |
+| `-e`/`--experiments` | `LLMDBENCH_EXPERIMENTS` | Sweep definition (see [doe.md](doe.md)). |
+| `-x`/`--dataset` | `LLMDBENCH_DATASET` | Dataset to fetch into the harness pod, for profiles that replay one. |
+| `-j`/`--parallelism` | `LLMDBENCH_PARALLELISM` | How many harness pods generate load, all running the same profile. Default `1`; also `harness.loadParallelism`. |
 
-| Variable                                       | Meaning                                        | Note                                                |
-| ---------------------------------------------  | ---------------------------------------------- | --------------------------------------------------- |
-| LLMDBENCH_DEPLOY_SCENARIO                      | File containing multiple environment variables which will override defaults | If not specified, defaults to (empty) `none.sh`. Can be overriden with CLI parameter `-c/--scenario` |
-| LLMDBENCH_DEPLOY_MODEL_LIST                     | List (comma-separated values) of models to be run against | Default=`meta-llama/Llama-3.2-1B-Instruct`. Can be overriden with CLI parameter `-m/--models` |
-| LLMDBENCH_VLLM_COMMON_NAMESPACE                | Namespace where the `llm-d` stack was stood up | Default=`llmdbench`. Can be overriden with CLI parameter `-p/--namespace` |
-| LLMDBENCH_HARNESS_NAMESPACE                    | The `namespace` where the `pod` `llmdbench-${LLMDBENCH_HARNESS_NAME}-launcher` will be created | Default=`${LLMDBENCH_VLLM_COMMON_NAMESPACE}`. Can be overriden with CLI parameter `-p/--namespace`.|
-| LLMDBENCH_DEPLOY_METHODS                       | List (comma-separated values) of standup methods | Default=`modelservice`. Can be overriden with CLI parameter `-t/--methods` |
-| LLMDBENCH_HARNESS_PROFILE_HARNESS_LIST         | Lists all harnesses available to use           | Automatically populated by listing the directories under `workload/profiles` |
-| LLMDBENCH_HARNESS_NAME                         | Specifies harness (load generator) to be used  | Default=`inference-perf`. Can be overriden with CLI parameter `-l/--harness`  |
-| LLMDBENCH_HARNESS_EXPERIMENT_PROFILE           | Specifies workload to be used (by the harness) | Default=`sanity_random.yaml`. Can be overriden with CLI parameter `-w/--workload` |
-| LLMDBENCH_HARNESS_EXPERIMENT_PROFILE_OVERRIDES | A list of key,value pairs overriding entries on the workload file | Default=(empty).Can be overriden with CLI parameter `-o/--overrides`|
-| LLMDBENCH_HARNESS_EXECUTABLE                   | Name of the executable inside `llm-d-benchmark` container | default=`llm-d-benchmark.sh`. Can be overriden for debug/experimentation |
-| LLMDBENCH_HARNESS_CONDA_ENV_NAME               | Local conda environment name                   | Default=`${LLMDBENCH_HARNESS_NAME}-runner`. Only used when `LLMDBENCH_RUN_EXPERIMENT_ANALYZE_LOCALLY` is set to `1` (Default=`0`) |
-| LLMDBENCH_HARNESS_WAIT_TIMEOUT                 | How long to wait for `pod` `llmdbench-${LLMDBENCH_HARNESS_NAME}-launcher` to complete its execution | Default=`3600`. Can be overriden with CLI parameter `-s/--wait |
-| LLMDBENCH_HARNESS_CPU_NR                       | How many CPUs should be requested for `pod` `llmdbench-${LLMDBENCH_HARNESS_NAME}-launcher` | Default=`16` |
-| LLMDBENCH_HARNESS_CPU_MEM                      | How many CPUs should be requested for `pod` `llmdbench-${LLMDBENCH_HARNESS_NAME}-launcher` | Default=`32Gi` |
-| LLMDBENCH_HARNESS_PVC_NAME                     | The `pvc` where experimental results will be stored | Default=`workload-pvc`. Can be overriden with CLI parameter `-k/--pvc`      |
-| LLMDBENCH_HARNESS_PVC_SIZE                     | The size of the `pvc` where experimental results will be stored | Default=`20Gi` |
-| LLMDBENCH_DATA_COLLECT                         | How much result data is copied to this machine: `default` (`oc cp`), `fast` (gzip'd `oc exec \| tar`), `results` (reports/metadata/plots only) or `skip` (nothing; results stay on the PVC) | Default=`default`. Can be overriden with CLI parameter `--data-collect` |
-| LLMDBENCH_NO_PVC                               | Run without the workload PVC/data-access pod (`--no-pvc`); harness pods use an emptyDir and results are copied from the pods into the workspace | Default=(empty). Can be overriden with CLI parameter `--no-pvc` |
-| LLMDBENCH_HARNESS_SKIP_RUN                     | Skip the execution of the experiment, and only collect data already on the `pvc` | Default=(empty) |
-| LLMDBENCH_HARNESS_LOAD_PARALLELISM             | Controls the number harness pods which will be created to generate load (all pods execute the same workload profile) | Default=`1`, can be overriden with ` -j/--parallelism` |
-| LLMDBENCH_HARNESS_ENVVARS_TO_YAML              | List all environment variables to be added to all harness pods | Default=`LLMDBENCH_RUN_EXPERIMENT`, can be overriden with `-g/--envvarspod` |
-| LLMDBENCH_HARNESS_DEBUG                        | Execute harness in "debug-mode" (i.e., `sleep infinity`) | Default=`0`.  Can be overriden with CLI parameter `-d/--debug`|
-| LLMDBENCH_COMPRESS                             | Compress each result set on the `pvc` before collecting it, so the archive rather than the raw tree crosses the tunnel (benchmark reports, `run_metadata.yaml`, `experiment-summary.yaml` and plots stay plain) | Default=`1`. Can be overriden with CLI parameter `--compress/--no-compress` |
-| LLMDBENCH_COMPRESS_LEVEL                       | zstd compression level | Default=`10`. Can be overriden with CLI parameter `--compress-level` |
+### Choosing the target
 
-> [!TIP]
-> In case the full path is ommited for the (workload) profile (either by setting `LLMDBENCH_HARNESS_EXPERIMENT_PROFILE` or CLI parameter `-w/--workload`), it is assumed that the file exists inside the `workload/profiles/<harness name>` folder
+| Flag | Environment variable | Meaning |
+| ---- | -------------------- | ------- |
+| `-p`/`--namespace` | `LLMDBENCH_NAMESPACE` | Namespace the stack was stood up in, and where the harness pod is created. |
+| `-m`/`--model` | `LLMDBENCH_MODEL` | Which model of the stack to run against. |
+| `--stack` | `LLMDBENCH_STACK` | Which named stacks of a multi-stack scenario to run. Default: every stack. |
+| `-t`/`--methods` | `LLMDBENCH_METHODS` | Standup methods the stack used, so `run` knows where to look for it. |
+| `-U`/`--endpoint-url` | `LLMDBENCH_ENDPOINT_URL` | Target an endpoint directly instead of discovering it from the stack. |
+| `--list-endpoints` | -- | Print the endpoints `run` would discover, and exit. |
+
+### Harness pod and results
+
+| Flag | Environment variable | Meaning | Scenario key |
+| ---- | -------------------- | ------- | ------------ |
+| `--wait-timeout` | `LLMDBENCH_WAIT_TIMEOUT` | How long to wait for the harness pod to finish. Default `3600`. | `harness.waitTimeout` |
+| `-r`/`--output` | `LLMDBENCH_OUTPUT` | Where results land. Default `local`. | `harness.output` |
+| `--data-collect` | `LLMDBENCH_DATA_COLLECT` | How much result data is copied to this machine: `default` (`oc cp`), `fast` (gzip'd `oc exec \| tar`), `results` (reports/metadata/plots only) or `skip` (nothing; results stay on the PVC). | -- |
+| `--compress` / `--no-compress` | `LLMDBENCH_COMPRESS` | Compress each result set on the PVC before collecting it, so the archive rather than the raw tree crosses the tunnel. Benchmark reports, `run_metadata.yaml`, `experiment-summary.yaml` and plots stay plain. Default on. | -- |
+| `--compress-level` | `LLMDBENCH_COMPRESS_LEVEL` | zstd compression level. Default `10`. | -- |
+| `--no-pvc` | `LLMDBENCH_NO_PVC` | Run without the workload PVC and data-access pod: harness pods use an emptyDir and results are copied straight out of them. | -- |
+| `-z`/`--skip` | `LLMDBENCH_SKIP` | Skip execution and only collect data already on the PVC. | -- |
+| `-d`/`--debug` | `LLMDBENCH_DEBUG` | Run the harness pod in debug mode (`sleep infinity`) so you can exec into it. | `harness.debug` |
+| `-g`/`--envvarspod` | `LLMDBENCH_HARNESS_ENVVARS_TO_YAML` | Extra environment variables to add to every harness pod. | -- |
+| `-q`/`--serviceaccount` | `LLMDBENCH_SERVICE_ACCOUNT` | ServiceAccount for the harness pod. | `serviceAccount.name` |
+| `--monitoring` | `LLMDBENCH_MONITORING` | Collect engine metrics alongside the run (see [metrics_collection.md](metrics_collection.md)). | `monitoring.metricsScrapeEnabled` |
+
+CPU, memory and PVC size for the harness pod are scenario keys rather than flags: `harness.resources.cpu`, `harness.resources.memory`, `harness.resources.memoryLimit`, `harness.pvcSize` and `storage.workloadPvc.name`. `llmdbenchmark run --help` is the authoritative flag list.
 
 ## Multi-Stack Runs
 
@@ -282,38 +293,30 @@ rewrites it away before the request reaches vLLM.
 
 ### Nop (No Op)
 
-The `nop` harness, combined with environment variables and when using in `standalone` mode, will parse the vLLM log and create reports with
-loading time statistics.
+The `nop` harness runs no load. Against a `standalone` stack it parses the engine log and reports weight-loading time statistics instead.
 
-The additional environment variables to set are:
+What it needs from the scenario, all under `standalone`:
 
-| Environment Variable                         | Example Values  |
-| -------------------------------------------- | -------------- |
-| LLMDBENCH_VLLM_COMMON_VLLM_LOAD_FORMAT   | `safetensors, tensorizer, runai_streamer, fastsafetensors` |
-| LLMDBENCH_VLLM_COMMON_ENABLE_SLEEP_MODE  | `false, true` |
-| LLMDBENCH_VLLM_COMMON_VLLM_LOGGING_LEVEL | `DEBUG, INFO, WARNING` etc |
-| LLMDBENCH_VLLM_STANDALONE_PREPROCESS         | `source /setup/preprocess/standalone-preprocess.sh ; /setup/preprocess/standalone-preprocess.py` |
+| Scenario key | Value | Why |
+| ------------ | ----- | --- |
+| `standalone.engine.command` | include `--load-format <format>` -- `safetensors`, `tensorizer`, `runai_streamer`, `fastsafetensors` | The loader whose timing you are measuring. It is an engine flag, so it lives in the command. |
+| `standalone.engine.command` | include `--enable-sleep-mode` | Required for sleep/wake benchmarks. |
+| `standalone.extraEnvVars` | `VLLM_LOGGING_LEVEL: DEBUG` | An engine environment variable, not a flag. At `DEBUG` the preprocess script points vLLM at a log format the `nop` categories report can parse; at anything less, categories go missing. |
+| `standalone.engine.preprocessCommand` | `source /setup/preprocess/vllm-load-format-preprocess.sh ; /setup/preprocess/vllm-load-format-preprocess.py` | Installs the loader's dependencies, exports what it needs, and pre-serializes the model for the `tensorizer` format. Runs in the standalone pod, in the engine's shell, before the command. |
+| `harness.name` | `nop` | |
 
-The variable `LLMDBENCH_VLLM_COMMON_VLLM_LOGGING_LEVEL` must be set to `DEBUG` so that the `nop` categories report finds all categories.
+A loader that the harness also has to know about -- `tensorizer`, for instance -- reads its format from `LLMDBENCH_VLLM_COMMON_VLLM_LOAD_FORMAT` in `standalone.extraEnvVars`; set it there and reference it in the command as `--load-format $LLMDBENCH_VLLM_COMMON_VLLM_LOAD_FORMAT` so the pod and the harness see one value.
 
-The variable `LLMDBENCH_VLLM_COMMON_ENABLE_SLEEP_MODE` must be set to `true` in order to run sleep/wake benchmarks.
+#### With the FMA launcher
 
-The variable `LLMDBENCH_VLLM_STANDALONE_PREPROCESS` must be set to the above value for the `nop` harness in order to install load format
-dependencies, export additional environment variables and pre-serialize models when using the `tensorizer` load format.
+A second container can be added to a `standalone` stack that runs the inference launcher from [llm-d-fast-model-actuation](https://github.com/llm-d-incubation/llm-d-fast-model-actuation/blob/main/inference_server/launcher/launcher.py). Its image also contains vLLM, and that image is used for both containers so they run under identical conditions.
 
-The preprocess scripts will run in the vLLM standalone pod before the vLLM server starts.
+| Scenario key | Default | Meaning |
+| ------------ | ------- | ------- |
+| `standalone.launcher.enabled` | `false` | Add the launcher container. |
+| `standalone.launcher.port` | `8001` | Port the launcher listens on. |
+| `standalone.launcher.vllmPort` | `8002` | Port the vLLM server it starts waits on. |
+| `standalone.launcher.image.repository` / `.tag` | -- | The launcher image. |
+| `standalone.launcher.customPreprocessCommand` | -- | Preprocess command for the launcher container. |
 
-An additional container can be added to `standalone` mode that starts the inference launcher from https://github.com/llm-d-incubation/llm-d-fast-model-actuation/blob/main/inference_server/launcher/launcher.py
-
-This launcher is contained in an image that also contains vLLM.
-
-The environment variables to set are:
-
-| Environment Variable                         | Example Values | |
-| -------------------------------------------- | -------------- | -------------------------------------------------------------------------------- |
-| LLMDBENCH_VLLM_STANDALONE_LAUNCHER           | `true, false`  | default is `false`, it will enable the launcher container |
-| LLMDBENCH_VLLM_STANDALONE_LAUNCHER_PORT      |  8001 etc | default is 8001, the launcher will listen on this port |
-| LLMDBENCH_VLLM_STANDALONE_LAUNCHER_VLLM_PORT |  8002 etc | default is 8002, the vLLM server started byt the launcher will wait on this port |
-
-When using the launcher, the `nop` harness will create a report with both the standalone vLLM server and the launched vLLM server metrics.
-The launcher image with vLLM will be used in both cases as well as all the env. variables to ensure they run under the same scenario. 
+With the launcher on, the `nop` harness reports metrics for both the standalone server and the launched one. [`examples/launcher.yaml`](../config/scenarios/examples/launcher.yaml) is a worked example.

@@ -54,29 +54,22 @@ scenario:
           # gpu.nvidia.com/model: H100                          # vanilla Kubernetes
 
       model:
-        name: moonshotai/Kimi-K3
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: kimi-k3
         # Directory *within* the model PVC, NOT a HuggingFace-shaped path.
         # "models/moonshotai/Kimi-K3" here would point the download Job and the
-        # serve command at an empty directory and re-pull 1.42 TiB.
+        # serve command at an empty directory and re-pull 1.42 TiB. That is also
+        # why this stack sets `modelservice.uriProtocol: pvc` below.
         path: Kimi-K3
-        huggingfaceId: moonshotai/Kimi-K3
         # modelArtifacts.size only; the PVC is sized under storage.modelPvc.
         size: 2Ti
-        maxModelLen: 32768
-        blockSize: 64
-        # 0.90, not the 0.95 default and not the recipe's hopper 0.97: the
-        # marlin MXFP4 MoE kernel allocates a ~1.6 GiB workspace OUTSIDE
-        # vLLM's pool on the first forward pass. 0.95 leaves no room for it.
-        gpuMemoryUtilization: 0.90
-        cacheBase: /model-cache
-        # PP stages hold in-flight microbatches; 5 is what the recipe's
-        # hopper profile specifies and what was measured. Raising it costs
-        # activation memory in every stage at once.
-        maxNumSeq: 5
-        # Caps a prefill chunk so one long request cannot OOM a single
-        # pipeline stage.
-        maxNumBatchedTokens: 8192
+        # Context length, page size, memory fraction and the batch widths are
+        # stated once, in `decode.engine.command` below, together with why each
+        # number is what it is. The capacity planner reads them back off the
+        # command, so there is no second place to keep in step.
 
       storage:
         modelPvc:
@@ -95,7 +88,15 @@ scenario:
         # cold cache.
         downloadTimeout: 21600
 
-    vllmCommon:
+    # The pod shape: volumes, shared memory, the shell the launch line is
+    # exec'd in. No engine flags here -- the launch line itself is written out
+    # in `decode.engine.command` below.
+    engine:
+      # Sourced before the engine command, in the same shell: the `preprocess`
+      # initContainer below writes this file with the network facts only the
+      # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+      # library path. Engine commands never mention it.
+      preprocessScript: ". /shared-config/llmdbench_env.sh"
       volumes:
         - name: shared-config
           type: emptyDir
@@ -124,6 +125,12 @@ scenario:
     modelservice:
       enabled: true
 
+      # `pvc`, not the default `pvc+hf`: the volume holds a raw weights
+      # directory rather than a Hugging Face hub cache, so the engine is given
+      # the path (`/model-cache/Kimi-K3`) and `--served-model-name` supplies the
+      # id. See `modelservice.uriProtocol` in config/templates/values/defaults.yaml.
+      uriProtocol: pvc
+
       gateway:
         className: epponly
 
@@ -131,8 +138,9 @@ scenario:
         # No routing sidecar. It exists to bridge servicePort -> vllmPort for
         # P/D disaggregation with a KV connector; this is an aggregated
         # deployment with no prefill peer, so the extra hop buys nothing.
-        # With the proxy off, vLLM binds $VLLM_INFERENCE_PORT (8000) directly
-        # and the chart's vllmPort helper agrees -- see the customCommand.
+        # With the proxy off, vLLM binds the Service port (8000) directly and
+        # the chart's vllmPort helper agrees -- see the `--port` in the engine
+        # command.
         proxy:
           enabled: false
 
@@ -245,15 +253,15 @@ scenario:
       replicas: 1
 
       parallelism:
-        # tensor: 8 x workers: 4 == world_size 32. The chart derives the LWS
+        # TP8 x workers: 4 == world_size 32. The chart derives the LWS
         # leaderWorkerTemplate.size from `workers`, and numGpuPerWorker from
         # dataLocal x tensor = 8 -- matching the 8 GPUs requested below, so
         # the chart's acceleratorWarning annotation stays clear.
         #
-        # There is no `pipeline` key: ParallelismConfig models only
-        # {data, dataLocal, tensor, workers}, and 13_ms-values.yaml.j2 renders
-        # exactly those four. PP therefore rides in vllm.customCommand.
-        tensor: 8
+        # `tensor` is not restated here: it is read off the command's
+        # `--tensor-parallel-size 8`, which is the single source of truth for
+        # parallelism. `workers` has no engine flag behind it -- it is a gang
+        # size, not something vLLM is told -- so it does live here.
         data: 1
         dataLocal: 1
         workers: 4
@@ -268,7 +276,7 @@ scenario:
       # utilities/capacity_validator.py:357 hardcodes `pp = 1` ("Pipeline
       # parallelism not yet exposed per-method"), because PP genuinely is not a
       # ParallelismConfig field -- this scenario carries it in
-      # vllm.customCommand, where the validator cannot see it. So it sizes the
+      # decode.engine.command, where the validator cannot see it. So it sizes the
       # model against tp x pp x dp = 8 GPUs / 640 GiB instead of the real 32 /
       # 2.5 TiB, and reports that a 1.42 TiB model does not fit. It does fit;
       # the measured footprint is 69.5 of 71.3 usable GiB per GPU.
@@ -279,17 +287,24 @@ scenario:
       # nvidia.com/gpu request, and 32 would leave every pod unschedulable on
       # an 8-GPU node.
 
-      vllm:
-        # ---------------------------------------------------------------------
-        # $TP_SIZE comes from the chart's parallelismEnv helper. GPUS_PER_NODE,
-        # PP_SIZE and NNODES are NOT provided by the chart -- they come from
-        # extraEnvVars below. ${LWS_WORKER_INDEX} / ${LWS_LEADER_ADDRESS} are
-        # injected by the LWS controller and are left untouched by the
-        # ${dotted.path} substitution pass (it requires at least one dot).
-        # ---------------------------------------------------------------------
-        customCommand: |
-          ${accelerator.runtimePreamble}
-          . /shared-config/llmdbench_env.sh
+      # -----------------------------------------------------------------------
+      # The launch line, verbatim: what this says is what the engine gets, and
+      # it is also where llm-d-benchmark reads the handful of facts it needs
+      # (the `--port` for the Service and the probes, and the capacity numbers
+      # for the pre-deploy check -- the eight devices per pod are stated as
+      # `accelerator.count`, because the kubelet grants them before the engine
+      # exists).
+      # Nothing here is generated, so the upstream recipe's flags -- including
+      # the ones no config key would ever have modelled, like --moe-backend and
+      # --attention-backend -- are simply pasted in.
+      #
+      # PP_SIZE and NNODES come from extraEnvVars below.
+      # ${LWS_WORKER_INDEX} / ${LWS_LEADER_ADDRESS} are injected by the LWS
+      # controller and are left untouched by the ${dotted.path} substitution
+      # pass (which requires at least one dot).
+      # -----------------------------------------------------------------------
+      engine:
+        command: |
 
           # Only PP stage 0 serves the OpenAI API. --api-server-count 0 is
           # the same code path as --headless (both reach run_headless).
@@ -305,23 +320,37 @@ scenario:
             sleep 3
           done
 
-          exec vllm serve $MODEL_SERVE_REF \
+          # --port 8000: the routing sidecar is off (see modelservice.routing
+          # above), so the engine holds the Service port itself.
+          #
+          # --gpu-memory-utilization 0.90, not the 0.95 default and not the
+          # recipe's hopper 0.97: the marlin MXFP4 MoE kernel allocates a
+          # ~1.6 GiB workspace OUTSIDE vLLM's pool on the first forward pass.
+          # 0.95 leaves no room for it.
+          #
+          # --max-num-seqs 5: PP stages hold in-flight microbatches; 5 is what
+          # the recipe's hopper profile specifies and what was measured. Raising
+          # it costs activation memory in every stage at once.
+          #
+          # --max-num-batched-tokens 8192 caps a prefill chunk so one long
+          # request cannot OOM a single pipeline stage.
+          exec vllm serve /model-cache/Kimi-K3 \
           --host 0.0.0.0 \
-          --served-model-name $MODEL_NAME \
-          --port $VLLM_INFERENCE_PORT \
+          --served-model-name moonshotai/Kimi-K3 \
+          --port 8000 \
           --trust-remote-code \
           --api-server-count $API_SERVER_COUNT \
-          --tensor-parallel-size $TP_SIZE \
+          --tensor-parallel-size 8 \
           --pipeline-parallel-size $PP_SIZE \
           --nnodes $NNODES \
           --node-rank ${LWS_WORKER_INDEX:-0} \
           --master-addr ${LWS_LEADER_ADDRESS} \
           --master-port 29501 \
-          --max-model-len $VLLM_MAX_MODEL_LEN \
-          --max-num-seqs $VLLM_MAX_NUM_SEQ \
-          --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-          --block-size $VLLM_BLOCK_SIZE \
-          --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+          --max-model-len 32768 \
+          --max-num-seqs 5 \
+          --max-num-batched-tokens 8192 \
+          --block-size 64 \
+          --gpu-memory-utilization 0.90 \
           --moe-backend marlin \
           --attention-backend FLASHMLA \
           --disable-custom-all-reduce \
@@ -362,12 +391,12 @@ scenario:
           cpu: "32"
 
       # Torch/Triton JIT artifacts and the CUDA cache. Set explicitly:
-      # vllmCommon.ephemeralStorage defaults to "" and a value written
+      # engine.ephemeralStorage defaults to "" and a value written
       # directly into resources.limits is ignored by the template.
       ephemeralStorage: 1Ti
 
       extraEnvVars:
-        # --- topology, consumed by customCommand ---
+        # --- topology, consumed by the engine command ---
         - name: PP_SIZE
           value: "4"
         - name: NNODES

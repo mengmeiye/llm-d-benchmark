@@ -266,7 +266,7 @@ You should see that prefill and decode pods are up and running:
 2025-09-23 15:51:29 : ✅ Completed model deployment
 ```
 
-Check out the pods. For example, if deployed in aggregate (aka "standalone"), you should expect to see the following, which demonstrates a running vLLM deployment (`vllm-standalone-llama-3-70b-6bd4bcdffd-k9t9w`) and a workload generator pod (`llmdbench-vllm-benchmark-launcher`) sending traffic to it.
+Check out the pods. For example, if deployed in aggregate (aka "standalone"), you should expect to see the following, which demonstrates a running vLLM deployment (`standalone-llama-3-70b-6bd4bcdffd-k9t9w`) and a workload generator pod (`llmdbench-vllm-benchmark-launcher`) sending traffic to it.
 
 ```
 $ kubectl get pods
@@ -274,7 +274,7 @@ NAME                                           READY   STATUS             RESTAR
 access-to-harness-data-workload-pvc            1/1     Running            0          11h
 download-model-ps6sz                           0/1     Completed          0          1h
 llmdbench-vllm-benchmark-launcher              1/1     Running            0          2m
-vllm-standalone-llama-3-70b-6bd4bcdffd-k9t9w   1/1     Running            0          1h
+standalone-llama-3-70b-6bd4bcdffd-k9t9w   1/1     Running            0          1h
 ```
 
 The experiment will take some time to run to completion. You may decrease the experiment and harness run treatments list for simplicity. After the experiment finishes running, you should see the following results in `~/data/pd-disaggregation`.

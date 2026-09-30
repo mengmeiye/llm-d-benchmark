@@ -41,7 +41,7 @@ accurate to the current codebase.
   - [File Structure](#file-structure)
   - [Step 1: Create the Specification Template](#step-1-create-the-specification-template)
   - [Step 2: Create the Scenario File](#step-2-create-the-scenario-file)
-  - [Overriding the Container Shell (`vllmCommon.shell`)](#overriding-the-container-shell-vllmcommonshell)
+  - [Overriding the Container Shell (`engine.shell`)](#overriding-the-container-shell-engineshell)
   - [How Templates Are Rendered](#how-templates-are-rendered)
   - [Custom Jinja2 Templates](#custom-jinja2-templates)
 - [8. How to Add a Smoketest Validator](#8-how-to-add-a-smoketest-validator)
@@ -69,9 +69,9 @@ A benchmark run proceeds through four phases, each with its own ordered list of
 steps:
 
 1. **Standup** (`Phase.STANDUP`) -- Provisions infrastructure, deploys models.
-   Steps 00-09 in `llmdbenchmark/standup/steps/`. Note: smoketest steps
-   (formerly steps 10-11) have been moved to `llmdbenchmark/smoketests/` and
-   run as a separate phase after standup.
+   Steps 00-09 in `llmdbenchmark/standup/steps/`. Validation is not part of
+   this phase: it lives in `llmdbenchmark/smoketests/` and runs as the
+   separate phase below.
 2. **Smoketest** (`Phase.SMOKETEST`) -- Post-deployment validation: health
    checks, inference tests, per-scenario config validation. Steps 00-02 in
    `llmdbenchmark/smoketests/steps/`.
@@ -668,7 +668,7 @@ model_name = self._require_config(plan_config, "model", "name")
 
 # Resolve with three-tier fallback: context value > plan config > default
 port = self._resolve(
-    plan_config, "vllmCommon.inferencePort", context_value=None, default=8000
+    plan_config, "engine.servicePort", context_value=None, default=8000
 )
 ```
 
@@ -869,8 +869,8 @@ Dockerfile as well.
 
 ## 7. How to Add a New Scenario (Well-Lit Path)
 
-Scenarios define a deployment configuration (model, GPU type, vLLM settings,
-etc.). They are the primary way users customize what gets deployed.
+Scenarios define a deployment configuration (model, GPU type, the engine launch
+command, etc.). They are the primary way users customize what gets deployed.
 
 ### File Structure
 
@@ -916,15 +916,18 @@ scenario:
     model:
       name: meta-llama/Llama-3.1-8B-Instruct
 
-    vllmCommon:
-      tensorParallelism: 2
-      flags:
-        disableLogRequests: true
-        noPrefixCaching: true
-
     standalone:
       enabled: true
       replicas: 1
+      # The engine launch command, verbatim. Every flag the engine accepts
+      # belongs here and reaches the container unchanged; nothing in
+      # llm-d-benchmark models them.
+      engine:
+        command: |
+          vllm serve meta-llama/Llama-3.1-8B-Instruct \
+            --port 8000 \
+            --tensor-parallel-size 2 \
+            --no-enable-prefix-caching
 
     modelservice:
       enabled: false
@@ -1006,7 +1009,7 @@ shared:
       proxy: { args: [ ... ], resources: { ... } }
       inferencePool: { failureMode: "FailOpen", providerConfig: { ... } }
     decode:
-      vllm: { customCommand: | ... }
+      engine: { command: | ... }
       initContainers: [ ... ]
 
 scenario:
@@ -1069,12 +1072,14 @@ stack. Sibling stacks are exposed to templates via the injected
 so N stacks don't race on the same Helm release during parallel per-stack step
 execution.
 
-### Overriding the Container Shell (`vllmCommon.shell`)
+### Overriding the Container Shell (`engine.shell`)
 
-The `command:` field rendered into every vLLM container -- decode and prefill in
-`13_ms-values.yaml.j2`, plus the main and launcher containers in
-`14_standalone-deployment_yaml.j2` -- defaults to `/bin/bash -c <vllm-startup-script>`.
-The single source of truth is `vllmCommon.shell` in
+The `command:` field rendered into every model-server container -- decode and
+prefill in `13_ms-values.yaml.j2`, plus the main and launcher containers in
+`14_standalone-deployment_yaml.j2` -- is `<shell> -c <the scenario's engine
+command>`, and defaults to `/bin/bash`. The engine command itself is never
+rewritten; the shell is only what execs it. The single source of truth is
+`engine.shell` in
 [`defaults.yaml`](../config/templates/values/defaults.yaml); override it
 per-scenario when the image lacks bash or you want plain POSIX `sh`.
 
@@ -1082,7 +1087,7 @@ per-scenario when the image lacks bash or you want plain POSIX `sh`.
 # config/scenarios/examples/my-scenario.yaml
 scenario:
   - name: "my-scenario"
-    vllmCommon:
+    engine:
       shell: /bin/sh        # default is "/bin/bash"
 ```
 
@@ -1091,20 +1096,23 @@ Rendered output in `plan/<stack>/ms-values.yaml`:
 ```yaml
 decode:
   containers:
-  - name: "vllm"
+  - name: "modelserver"
     ...
     command:
-      - /bin/sh           # <-- comes from vllmCommon.shell
+      - /bin/sh           # <-- comes from engine.shell
       - '-c'
     args:
       - |
-        # vllm startup script ...
+        # the scenario's engine command, verbatim ...
 ```
 
 Scope: applies to both deployment modes (`modelservice` and `standalone`). The
-templates render `vllmCommon.shell` directly with no jinja fallback, so the
+templates render `engine.shell` directly with no jinja fallback, so the
 defaults.yaml value is always authoritative -- unsetting it in a scenario does
-not "fall back to /bin/sh"; it removes the field and breaks rendering.
+not "fall back to /bin/sh"; it removes the field and breaks rendering. A
+distroless image that ships no shell at all needs
+`<role>.engine.modelCommand: imageDefault` instead, which renders `args:` with
+no `command:` so the image's own entrypoint runs.
 
 ### How Templates Are Rendered
 
@@ -1203,10 +1211,14 @@ class MyScenarioValidator(ScenarioValidator):
 
         self.validate_role_pods(pods, expected_count=1, role="server")
         self.assert_env_equals(pods[0], "MODEL_NAME", config["model"]["name"])
+        # <role>.parallelism.tensor is the width the scenario stated for the
+        # chart (and hence for the pod's accelerator request). Asserting the
+        # command's own flag against it is exactly the agreement a scenario has
+        # to keep, so it is worth a validator.
         self.assert_arg_contains(
             pods[0],
             "--tensor-parallel-size",
-            str(config["vllmCommon"]["tensorParallelism"]),
+            str(config["decode"]["parallelism"]["tensor"]),
         )
 ```
 
@@ -1272,8 +1284,8 @@ design:
   setup:
     factors:
       - name: tensor_parallelism
-        key: vllmCommon.tensorParallelism
-        levels: [1, 2, 4]
+        key: decode.engine.command
+        levels: [tp1, tp2, tp4]
 
   run:
     factors:
@@ -1289,14 +1301,23 @@ design:
 
 # Runtime: setup treatments consumed by the experiment orchestrator.
 # Each treatment specifies config overrides applied during plan rendering.
+# A width is two facts: the flag the engine runs at (in the command) and the
+# chart value that sizes the pod's accelerator request. Each treatment restates
+# both, because a pod granted one device cannot run an engine sharded across two.
 setup:
   treatments:
     - name: tp1
-      vllmCommon.tensorParallelism: 1
+      decode.parallelism.tensor: 1
+      decode.engine.command: |
+        vllm serve ${model.name} --port 8200 --tensor-parallel-size 1
     - name: tp2
-      vllmCommon.tensorParallelism: 2
+      decode.parallelism.tensor: 2
+      decode.engine.command: |
+        vllm serve ${model.name} --port 8200 --tensor-parallel-size 2
     - name: tp4
-      vllmCommon.tensorParallelism: 4
+      decode.parallelism.tensor: 4
+      decode.engine.command: |
+        vllm serve ${model.name} --port 8200 --tensor-parallel-size 4
 
 # Runtime: run treatments consumed by step_04 render_profiles.
 # Each treatment specifies harness profile overrides.
@@ -1316,7 +1337,7 @@ treatments:
 
 **Setup treatments** (`setup.treatments`) control the infrastructure deployed.
 Each treatment triggers a full standup/run/teardown cycle. Override keys use
-dotted paths into the scenario config (e.g., `vllmCommon.tensorParallelism`,
+dotted paths into the scenario config (e.g., `decode.engine.command`,
 `decode.replicas`, `standalone.enabled`). These overrides are passed to
 `RenderPlans` as `setup_overrides` and deep-merged into the scenario config
 during template rendering. They are applied *after* any `--cluster-config`

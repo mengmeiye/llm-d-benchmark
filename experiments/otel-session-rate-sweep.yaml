@@ -25,9 +25,11 @@
 # treatment starts against cold caches without redeploying the stack
 # (reset_external asks vLLM to clear connector-managed KV tiers as well).
 # A refused prefix reset is retried, and warned about if still unconfirmed.
-# Requires the server to run with VLLM_SERVER_DEV_MODE=1 (the repo
-# default via vllmCommon.flags.serverDevMode); if dev mode is off the
-# endpoints 404 and the reset is skipped with a warning (non-fatal).
+# Requires the server to run with VLLM_SERVER_DEV_MODE=1, which is not a
+# default: set it in the serving role's `extraEnvVars` (as
+# config/scenarios/guides/epp-keda-saturation.yaml does). If dev mode is
+# off the endpoints 404 and the reset is skipped with a warning
+# (non-fatal).
 # Default false.
 reset_caches: true
 

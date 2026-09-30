@@ -1,143 +1,142 @@
-"""Regression coverage for #1822: FMA launcher should load the model from
-the download job's staged local copy, not re-resolve the repo ID through
-the HF hub cache.
+"""What an FMA arm states, and what it inherits (#1822).
 
-``fma.launcher.loadModelFromLocalDir`` (opt-in, default off) switches the
-InferenceServerConfig's ``--model`` argument between the repo ID
-(``model.name``) and the staged local path
-(``<fma.modelMountPath>/<model.path>``). The model name itself must never
-change: it feeds the derived Helm release name elsewhere in the pipeline.
+Fast Model Actuation is the one path with no ``vllm serve`` line to write down:
+the launcher process *is* the engine entrypoint -- it is what owns
+``--enable-sleep-mode`` -- so the CRD takes a flag string rather than a command.
+``fma.launcher.options`` is that string, this path's counterpart of a role's
+``engine.command``, and like a command it is passed through verbatim. Nothing
+assembles it flag by flag, so nothing here has to be taught a new vLLM flag.
+
+Two things still have to hold, and they are what these tests pin:
+
+* #1822 -- an FMA arm can load the weights the download job already staged on
+  the PVC instead of re-resolving the repo ID through the HF hub cache (a
+  second, network-dependent copy that can re-download at weight load). That is
+  written as ``--model ${fma.modelMountPath}/${model.path}``, and because a
+  local path would mangle the derived Helm release name, the advertised ID is
+  pinned back with ``--served-model-name ${model.name}``.
+* Parity -- the numbers an FMA arm must share with the arm it is compared
+  against go in as ``${model.*}`` references, so the two cannot desync.
+
+Both are ordinary ``${...}`` references, resolved by the same substitution every
+other scenario value goes through, which is why neither needs a key of its own.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import MagicMock
+
 import yaml
-from jinja2 import Environment
 
+from llmdbenchmark.parser.cluster_resource_resolver import ClusterResourceResolver
 from llmdbenchmark.parser.render_plans import RenderPlans
+from llmdbenchmark.parser.version_resolver import VersionResolver
 
-_TEMPLATE_PATH = "config/templates/jinja/24_fma-deployment.yaml.j2"
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TEMPLATES = PROJECT_ROOT / "config" / "templates" / "jinja"
+DEFAULTS = PROJECT_ROOT / "config" / "templates" / "values" / "defaults.yaml"
+SCENARIO = PROJECT_ROOT / "config" / "scenarios" / "examples" / "fma.yaml"
 
 
-def _render(values: dict) -> list[dict]:
-    env = Environment(
-        autoescape=False,
-        trim_blocks=True,
-        lstrip_blocks=True,
-        keep_trailing_newline=False,
+def _render(tmp_path: Path, overrides: dict) -> tuple[dict, str]:
+    """Render the FMA example and return ``(merged config, rendered options)``."""
+    logger = MagicMock()
+    renderer = RenderPlans(
+        template_dir=TEMPLATES,
+        defaults_file=DEFAULTS,
+        scenarios_file=SCENARIO,
+        output_dir=tmp_path,
+        logger=logger,
+        setup_overrides=overrides,
+        version_resolver=VersionResolver(logger=logger, dry_run=True),
+        cluster_resource_resolver=ClusterResourceResolver(logger=logger, dry_run=True),
     )
-    env.filters["toyaml"] = RenderPlans._toyaml_filter
-    with open(_TEMPLATE_PATH, encoding="utf-8") as fh:
-        template = env.from_string(fh.read())
-    out = template.render(**values)
-    return [yaml.safe_load(doc) for doc in out.split("\n---\n") if doc.strip()]
+    result = renderer.eval()
+    assert not result.has_errors
+    plan_dir = result.rendered_paths[0]
+    merged = yaml.safe_load((plan_dir / "config.yaml").read_text())
+    docs = [
+        doc
+        for doc in yaml.safe_load_all((plan_dir / "24_fma-deployment.yaml").read_text())
+        if doc
+    ]
+    isc = next(doc for doc in docs if doc.get("kind") == "InferenceServerConfig")
+    return merged, isc["spec"]["modelServerConfig"]["options"]
 
 
-def _base_values(load_from_local_dir: bool) -> dict:
-    return {
-        "model_id_label": "opt-125m-abc123",
-        "model": {
-            "name": "facebook/opt-125m",
-            "path": "models/facebook/opt-125m",
-            "maxModelLen": 16384,
-            "gpuMemoryUtilization": 0.95,
-        },
-        "namespace": {"name": "bench"},
-        "labels": {"inferenceServing": "true"},
-        "huggingface": {"enabled": False},
-        "scenarioName": "test-scenario",
-        "fma": {
-            "enabled": True,
-            "modelMountPath": "/model-cache",
-            "modelPvcName": "model-pvc",
-            "mountModelVolume": True,
-            "launcher": {
-                "loadModelFromLocalDir": load_from_local_dir,
-                "maxInstances": 4,
-                "image": {
-                    "repository": "example.com/launcher",
-                    "tag": "v0.6.5",
-                    "pullPolicy": "IfNotPresent",
-                },
-                "podTemplate": {"metadata": {}},
-                "customPreprocessCommands": [],
-            },
-            "launcherConfigurator": {"port": 8001},
-            "requester": {
-                "image": {"repository": "example.com/requester", "tag": "v0.6.5"},
-                "probePort": 8080,
-                "spiPort": 8081,
-                "limitsGPU": 1,
-                "limitsCPU": "1",
-                "limitsMemory": "250Mi",
-                "replicas": 0,
-            },
-        },
-    }
+def _options_override(options: str, **model: object) -> dict:
+    override: dict = {"fma": {"launcher": {"options": options}}}
+    if model:
+        override["model"] = model
+    return override
 
 
-def _options(docs: list[dict]) -> str:
-    isc = next(d for d in docs if d and d.get("kind") == "InferenceServerConfig")
-    return isc["spec"]["modelServerConfig"]["options"]
+class TestStagedLocalWeights:
+    """#1822, written the way a user writes it: in the flag string."""
 
-
-class TestFmaLauncherLocalModelPath:
-    def test_default_off_uses_repo_id(self):
-        docs = _render(_base_values(load_from_local_dir=False))
-        assert "--model facebook/opt-125m " in _options(docs)
-
-    def test_opt_in_uses_staged_local_path(self):
-        docs = _render(_base_values(load_from_local_dir=True))
-        assert "--model /model-cache/models/facebook/opt-125m " in _options(docs)
-
-    def test_opt_in_does_not_change_model_name_used_for_release_naming(self):
-        """model.name (which feeds the Helm release name elsewhere) must
-        stay the repo ID regardless of the launcher's --model arg."""
-        values = _base_values(load_from_local_dir=True)
-        assert values["model"]["name"] == "facebook/opt-125m"
-
-    def test_opt_in_pins_served_model_name_to_repo_id(self):
-        """Without --served-model-name, vLLM advertises the model under its
-        local PATH and the run phase's verify_model step fails."""
-        docs = _render(_base_values(load_from_local_dir=True))
-        assert "--served-model-name facebook/opt-125m" in _options(docs)
-
-
-class TestFmaLauncherBaselineParity:
-    """The launcher's prefix-caching flag inherits vllmCommon.flags.noPrefixCaching
-    -- the key _macros.j2 emits the baseline's --no-enable-prefix-caching from --
-    so an FMA arm cannot silently desync from the arm it is compared against."""
-
-    def test_prefix_caching_on_by_default(self):
-        assert "--no-enable-prefix-caching" not in _options(
-            _render(_base_values(load_from_local_dir=False))
+    def test_staged_path_and_pinned_id_render_verbatim(self, tmp_path):
+        merged, options = _render(
+            tmp_path,
+            _options_override(
+                "--model ${fma.modelMountPath}/${model.path} "
+                "--served-model-name ${model.name} --enable-sleep-mode"
+            ),
         )
 
-    def test_prefix_caching_inherits_baseline_disable(self):
-        values = _base_values(load_from_local_dir=False)
-        values["vllmCommon"] = {"flags": {"noPrefixCaching": True}}
-        assert "--no-enable-prefix-caching" in _options(_render(values))
+        mount = merged["fma"]["modelMountPath"]
+        assert options == (
+            f"--model {mount}/{merged['model']['path']} "
+            f"--served-model-name {merged['model']['name']} --enable-sleep-mode"
+        )
 
-    def test_logging_flags_inherit_when_launcher_keys_absent(self):
-        """An absent launcher key is Jinja Undefined, not none -- it must still
-        inherit rather than fall through and drop the flag."""
-        values = _base_values(load_from_local_dir=False)
-        values["vllmCommon"] = {
-            "flags": {"disableLogRequests": True, "disableUvicornAccessLog": True}
-        }
-        options = _options(_render(values))
-        assert "--no-enable-log-requests" in options
-        assert "--disable-uvicorn-access-log" in options
+    def test_the_advertised_id_stays_the_repo_id(self, tmp_path):
+        """``model.name`` feeds the derived Helm release name, which a local
+        path mangles into an invalid (leading-dash) name. Naming the path in
+        ``--model`` must not touch it."""
+        merged, options = _render(
+            tmp_path,
+            _options_override(
+                "--model ${fma.modelMountPath}/${model.path} "
+                "--served-model-name ${model.name}"
+            ),
+        )
 
-    def test_explicit_false_overrides_inherited_true(self):
-        """`| default(x, true)` would treat false as empty and wrongly inherit."""
-        values = _base_values(load_from_local_dir=False)
-        values["vllmCommon"] = {"flags": {"disableLogRequests": True}}
-        values["fma"]["launcher"]["disableLogRequests"] = False
-        assert "--no-enable-log-requests" not in _options(_render(values))
+        assert merged["model"]["name"] == "meta-llama/Llama-3.1-8B-Instruct"
+        assert f"--served-model-name {merged['model']['name']}" in options
 
-    def test_block_size_inherits_model_block_size(self):
-        """model.blockSize is the same key the baseline feeds VLLM_BLOCK_SIZE."""
-        values = _base_values(load_from_local_dir=False)
-        values["model"]["blockSize"] = 64
-        assert "--block-size 64" in _options(_render(values))
+
+class TestCapacityParity:
+    def test_capacity_references_resolve_to_the_plans_numbers(self, tmp_path):
+        """One number, one place: whatever the plan holds is what both arms get."""
+        merged, options = _render(
+            tmp_path,
+            _options_override(
+                "--model ${model.name} --enable-sleep-mode "
+                "--max-model-len ${model.maxModelLen} "
+                "--block-size ${model.blockSize} "
+                "--gpu-memory-utilization ${model.gpuMemoryUtilization}",
+                maxModelLen=16384,
+                blockSize=64,
+                gpuMemoryUtilization=0.9,
+            ),
+        )
+
+        assert merged["model"]["maxModelLen"] == 16384
+        assert options == (
+            "--model meta-llama/Llama-3.1-8B-Instruct --enable-sleep-mode "
+            "--max-model-len 16384 --block-size 64 --gpu-memory-utilization 0.9"
+        )
+
+
+class TestNothingIsAssembled:
+    def test_no_flag_is_added_on_the_users_behalf(self, tmp_path):
+        """Not the model, not prefix caching, not a log-level -- nothing.
+
+        An FMA arm that wants a flag writes it, exactly as every other path
+        writes flags into ``engine.command``.
+        """
+        _, options = _render(tmp_path, _options_override("--enable-sleep-mode"))
+
+        assert options == "--enable-sleep-mode"

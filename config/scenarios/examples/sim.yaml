@@ -1,5 +1,4 @@
 # Sim Example Scenario for LLM-D Deployment
-# Migrated from bash environment variables to YAML format
 #
 # A scenario to capture running inference-sim on a resource limited
 # Kind/OpenShift cluster without requiring GPUs.
@@ -19,11 +18,9 @@ scenario:
     common:
       # -------------------------------------------------------------------------
       # Accelerator Configuration -- no GPUs
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_ACCELERATOR_NR=0
       # -------------------------------------------------------------------------
       accelerator:
         count: 0
-        # Corresponds to: LLMDBENCH_VLLM_COMMON_ACCELERATOR_MEMORY=24
         # To pass capacity planner sanity checking
         memory: 24
 
@@ -37,7 +34,6 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Affinity / Node Selection
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_AFFINITY=kubernetes.io/os:linux
       # By default, affinity is disabled and pods schedule on any available node.
       # Options:
       #   1. Leave commented out -- no node selection constraint
@@ -52,15 +48,14 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Model Configuration
-      # Corresponds to: LLMDBENCH_DEPLOY_MODEL_LIST="facebook/opt-125m"
       # -------------------------------------------------------------------------
       model:
-        name: facebook/opt-125m
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: facebook-opt-125m
-        path: models/facebook/opt-125m
-        huggingfaceId: facebook/opt-125m
         gpuMemoryUtilization: 0
-        # Corresponds to: LLMDBENCH_VLLM_COMMON_MAX_MODEL_LEN=1024
         maxModelLen: 1024
         size: 2Gi
 
@@ -75,17 +70,13 @@ scenario:
           size: 2Gi
           accessMode:
             - ReadWriteOnce
-        uriProtocol: hf
 
       images:
-        vllmOpenai:
-          repository: ghcr.io/llm-d/llm-d-inference-sim
-          tag: v0.10.2
         vllm:
           repository: ghcr.io/llm-d/llm-d-inference-sim
           tag: v0.10.2
 
-      vllmCommon:
+      engine:
         shmMemory: 500Mi
         volumes:
           - name: dshm
@@ -102,13 +93,15 @@ scenario:
 
       control:
         waitTimeout: 900
-        waitPeriod: 10
 
-    # =========================================================================
-    # STANDALONE -- Only applies when standalone.enabled: true
-    # =========================================================================
-    standalone:
-      enabled: false
+    # -------------------------------------------------------------------------
+    # Shared role configuration
+    # Every role in this scenario runs the same sim container with the same
+    # footprint, so the shape is stated once. Each role below carries only what
+    # it does differently -- how its container is launched. A key a role names
+    # for itself wins over the value here.
+    # -------------------------------------------------------------------------
+    roleDefaults:
       replicas: 1
 
       resources:
@@ -125,15 +118,30 @@ scenario:
         dataLocal: 1
         workers: 1
 
-      vllm:
-        modelCommand: imageDefault
+    # =========================================================================
+    # STANDALONE -- Only applies when standalone.enabled: true
+    # =========================================================================
+    standalone:
+      enabled: false
+
+      # llm-d-inference-sim is not an inference engine and takes no `vllm
+      # serve` line: its image entrypoint is the launcher, so this role passes
+      # an argument list instead of a command. `command: ""` is what selects
+      # that -- it drops the inherited default command (an empty string, since a
+      # YAML key with no value would leave the default in place), and
+      # modelCommand resolves to `imageDefault`, which emits `args:` and no
+      # `command:`. That matters for v0.9+ images: they are distroless and have
+      # no shell to exec one in. ${dotted.path} reads the resolved plan.
+      engine:
+        command: ""
         args:
           - "--model"
-          - "/model-cache/$(MODEL_PATH)"
+          - "facebook/opt-125m"
           - "--port"
-          - "$(VLLM_INFERENCE_PORT)"
-          - "--served-model-name"
-          - "$(MODEL_NAME)"
+          - "8000"
+          # Same image, same startup dependency on a render service the pod does
+          # not run -- see the decode role below for what this flag does.
+          - "--force-dummy-tokenizer"
 
     # =========================================================================
     # MODELSERVICE -- Only applies when modelservice.enabled: true
@@ -142,6 +150,20 @@ scenario:
     # =========================================================================
     modelservice:
       enabled: true
+
+      # Where the weights come from. `hf` means no model PVC and no download
+      # Job: the modelservice chart hands the engine an `hf://` artifact and
+      # injects its own HF_HOME. llm-d-inference-sim loads no weights at all,
+      # so staging a copy of opt-125m onto a PVC would only slow standup down
+      # on the small clusters this scenario targets.
+      #
+      # This key is read at `modelservice.uriProtocol`; under `storage:` it
+      # parses fine and nothing reads it.
+      #
+      # It does not govern the standalone role below -- enabling standalone
+      # with `mountModelVolume` (the default) stages the weights regardless,
+      # which is why that role's `--model` may name a /model-cache path.
+      uriProtocol: hf
 
       # =========================================================================
       # GATEWAY -- toggle the router topology
@@ -187,7 +209,6 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Routing / GAIE Configuration
-      # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_GAIE_MONITORING_PROMETHEUS_ENABLED=false
       # -------------------------------------------------------------------------
       router:
         monitoring:
@@ -195,62 +216,63 @@ scenario:
             enabled: false
       prefill:
         enabled: true
-        replicas: 1
 
-        parallelism:
-          tensor: 1
-          data: 1
-          dataLocal: 1
-          workers: 1
-
-        resources:
-          limits:
-            memory: 100Mi
-            cpu: "0"
-          requests:
-            memory: 100Mi
-            cpu: "0"
-
-        vllm:
-          modelCommand: imageDefault
-          additionalFlags: []
+        # The sim image launches itself -- see `standalone.engine` above. The
+        # entrypoint's own default port is 8000, which is what a prefill pod
+        # binds (it never gets a routing sidecar), so the port here only
+        # restates that.
+        engine:
+          command: ""
+          # The sim images from v0.9 through v0.10 tokenize through a
+          # separate render service while building their response dataset
+          # (`--render-url`, default http://localhost:8082) and exit at startup
+          # when nothing answers there -- a CrashLoopBackOff with no pod of that
+          # service anywhere in this stack. `--force-dummy-tokenizer` asks for
+          # the simulated tokenizer instead, which is all a sim needs: it has no
+          # weights and this scenario does not route on prefix-cache hits.
+          # v0.11 falls back to it on its own, so the flag can go when the
+          # `images.vllm` tag above moves past v0.10.
+          #
+          # Only the flag: the modelservice chart appends this list to the
+          # `--model/--port/--served-model-name` it derives for a sim image, so
+          # restating those would pass each of them twice.
+          args:
+            - "--force-dummy-tokenizer"
 
       # -------------------------------------------------------------------------
       # Decode Configuration
-      # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_*
-      # No customCommand -- the vLLM serve command is auto-generated
-      # from model.*, vllmCommon.flags.*, and decode.vllm.additionalFlags.
+      # The sim image launches itself, so this role states no command and no
+      # args. Nothing is auto-generated from `model.*` on its behalf: a role
+      # that wants flags states them, in the engine's own spelling, in
+      # `engine.command` (or here, in `engine.args`).
       # -------------------------------------------------------------------------
       decode:
-        replicas: 1
-
-        parallelism:
-          tensor: 1
-          data: 1
-          dataLocal: 1
-          workers: 1
-
-        resources:
-          limits:
-            memory: 100Mi
-            cpu: "0"
-          requests:
-            memory: 100Mi
-            cpu: "0"
-
-        vllm:
-          modelCommand: imageDefault
-          additionalFlags: []
+        # `routing.proxy.enabled: false` above means no sidecar holds the
+        # Service port in front of decode, so the sim entrypoint's own port
+        # 8000 is the right one.
+        engine:
+          command: ""
+          # The sim images from v0.9 through v0.10 tokenize through a
+          # separate render service while building their response dataset
+          # (`--render-url`, default http://localhost:8082) and exit at startup
+          # when nothing answers there -- a CrashLoopBackOff with no pod of that
+          # service anywhere in this stack. `--force-dummy-tokenizer` asks for
+          # the simulated tokenizer instead, which is all a sim needs: it has no
+          # weights and this scenario does not route on prefix-cache hits.
+          # v0.11 falls back to it on its own, so the flag can go when the
+          # `images.vllm` tag above moves past v0.10.
+          #
+          # Only the flag: the modelservice chart appends this list to the
+          # `--model/--port/--served-model-name` it derives for a sim image, so
+          # restating those would pass each of them twice.
+          args:
+            - "--force-dummy-tokenizer"
 
     # =========================================================================
     # WORKLOAD / HARNESS -- Benchmark execution configuration
     # =========================================================================
     # -------------------------------------------------------------------------
     # Harness Configuration
-    # Corresponds to: LLMDBENCH_HARNESS_PVC_SIZE=3Gi
-    #                 LLMDBENCH_HARNESS_CPU_NR=1
-    #                 LLMDBENCH_HARNESS_CPU_MEM=2Gi
-    #                 LLMDBENCH_HARNESS_NAME=inference-perf
     # -------------------------------------------------------------------------
     harness:
       name: inference-perf
@@ -262,6 +284,5 @@ scenario:
 
     # -------------------------------------------------------------------------
     # Workload Configuration
-    # Corresponds to: LLMDBENCH_CONTROL_WORK_DIR
     # -------------------------------------------------------------------------
     workDir: "~/data/sim"

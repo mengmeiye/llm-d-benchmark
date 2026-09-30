@@ -5,7 +5,7 @@ before Jinja template rendering.  Validation is non-blocking: errors are
 collected and returned as warning strings, never raised as exceptions.
 
 Phase 1 covers the most commonly overridden and error-prone sections:
-model, decode, prefill, vllmCommon, harness, and top-level parallelism.
+model, decode, prefill, engine, harness, and top-level parallelism.
 
 The root model uses ``extra="allow"`` so that unmodeled top-level keys
 pass through without error.  Nested section models use ``extra="forbid"``
@@ -53,7 +53,14 @@ class DescriptionConfig(BaseModel):
 
 
 class ParallelismConfig(BaseModel):
-    """Parallelism settings (used by decode, prefill, standalone, and top-level)."""
+    """Widths the llm-d chart needs to lay a role out across pods and nodes.
+
+    These are chart values, not engine flags: the modelservice chart sizes its
+    LeaderWorkerSet and its wide-EP layout from them, and the pre-deploy
+    capacity check shards KV cache by them. The engine learns its own widths
+    from the command line like every other flag, so a single-pod role leaves
+    these at 1 and says nothing.
+    """
 
     model_config = STRICT_CONFIG
 
@@ -61,6 +68,8 @@ class ParallelismConfig(BaseModel):
     dataLocal: int = Field(ge=0)
     tensor: int = Field(ge=0)
     workers: int = Field(ge=0)
+    # Not in defaults.yaml and rarely set, so defaulted rather than required.
+    pipeline: int = Field(default=1, ge=0)
 
 
 class ResourceQuantities(BaseModel):
@@ -145,7 +154,10 @@ class PodMonitorConfig(BaseModel):
 
     enabled: bool
     portName: str
-    path: str
+    # Where the engine publishes Prometheus metrics. Unset by default: the path
+    # is engine knowledge, so it comes from `<role>.engine.metricsPath`. Set it
+    # only to scrape somewhere else.
+    path: str | None = None
     interval: str
     scrapeTimeout: str | None = None
     labels: dict[str, str]
@@ -173,24 +185,74 @@ class AutoscalingConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# vLLM serve config (inside decode/prefill)
+# Engine config (inside decode/prefill/standalone/nok8s)
 # ---------------------------------------------------------------------------
 
 
-class VllmServeConfig(BaseModel):
-    """vLLM configuration inside decode/prefill sections."""
+class EngineImageConfig(BaseModel):
+    """Per-role engine image override.
+
+    Whatever a role omits is filled from ``images.<engine>`` by
+    :func:`llmdbenchmark.engine.resolver.resolve_engines`.
+    """
 
     model_config = STRICT_CONFIG
 
+    repository: str | None = None
+    tag: str | None = None
+    pullPolicy: str | None = None
+
+
+class EngineConfig(BaseModel):
+    """The inference engine a role runs.
+
+    Two fields are all a scenario normally writes: ``command`` (the launch
+    line, verbatim, exactly as it would be typed at a shell) and -- only when
+    there is no command to read -- ``name``. ``extraArgs`` is the third, for a
+    stack that wants a shared command plus a couple of words of its own.
+    Everything else is either an escape hatch for an image whose entrypoint
+    fixes a value, or a fact ``resolve_engines`` read out of the command and
+    recorded here for the templates.
+    """
+
+    model_config = STRICT_CONFIG
+
+    # -- stated by the scenario --------------------------------------------
+    name: str | None = None
+    command: str | None = None
+    #: Words appended to ``command``, unexamined. For the one shape a verbatim
+    #: command cannot serve: several stacks sharing one launch line where a few
+    #: differ in a flag or two. Repeating a flag the command already carries
+    #: overrides it, because every engine's argument parser keeps the last
+    #: occurrence -- and so does the reader in ``llmdbenchmark.engine.command``,
+    #: so the numbers read back match what the engine gets. Nothing here knows
+    #: what any of the words mean.
+    extraArgs: list[str] = Field(default_factory=list)
+    #: Overrides the ``--port`` in the command. Needed only when the image's
+    #: entrypoint fixes the port, or when the command could not be read.
     port: int | None = None
-    servicePort: int | None = None
-    workerMultiprocMethod: str
-    loggingLevel: str
-    imagePullPolicy: str | None = None
-    customCommand: str | None = None
-    customPreprocessCommand: str | None = None
-    additionalFlags: list[str]
+    #: Runs before the engine in the same container; overrides
+    #: ``engine.preprocessScript`` for this role.
+    preprocessCommand: str | None = None
+    #: ``custom`` (render ``command``) or ``imageDefault`` (run the image's
+    #: entrypoint). Defaulted from whether a command is present.
     modelCommand: str | None = None
+    #: Args appended to the image entrypoint in ``imageDefault`` mode.
+    args: list[str] = Field(default_factory=list)
+    image: EngineImageConfig | None = None
+    imagePullPolicy: str | None = None
+    containerName: str | None = None
+
+    # -- written by resolve_engines (not user-set) --------------------------
+    #: Everything read out of the command, as published by
+    #: ``ParsedCommand.to_dict()``. Consumed by steps and smoketests so they
+    #: never re-parse the command themselves.
+    facts: dict[str, Any] | None = None
+    #: Where the engine answers health checks and exposes Prometheus metrics.
+    #: Probes and the PodMonitor read these instead of naming a vLLM path.
+    healthPath: str | None = None
+    metricsPath: str | None = None
+    imageKey: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +287,7 @@ class DeploymentBaseConfig(BaseModel):
     podSecurityContext: dict[str, Any] | None = None
     shm: dict[str, str] | None = None
     probes: ProbesConfig
-    vllm: VllmServeConfig
+    engine: EngineConfig
 
     mountModelVolume: bool
     additionalVolumeMounts: list[Any]
@@ -234,13 +296,16 @@ class DeploymentBaseConfig(BaseModel):
     extraContainerConfig: dict[str, Any]
     extraPodConfig: dict[str, Any]
     initContainers: list[Any]
-    # Container-level ports (e.g. [{containerPort: 8200, name: vllm}]) when
+    # Container-level ports (e.g. [{containerPort: 8200, name: http}]) when
     # the scenario needs to expose a port the chart wouldn't add by default.
     ports: list[dict[str, Any]] | None = None
     monitoring: DeploymentMonitoringConfig
 
+    # Per-pod context-length labels, one per replica. To vary an engine
+    # parameter per replica, write a `,,`-delimited value in `extraEnvVars`
+    # and reference the variable from the engine command -- the preprocess
+    # splits it by pod index.
     contextLengthRanges: list[str] = Field(default_factory=list)
-    vllmVariants: list[dict[str, Any]] = Field(default_factory=list)
 
     annotations: dict[str, str] | None = None
     tolerations: list[dict[str, Any]] | None = None
@@ -266,67 +331,41 @@ class PrefillConfig(DeploymentBaseConfig):
 
 
 # ---------------------------------------------------------------------------
-# vllmCommon
+# engine (plan-wide)
 # ---------------------------------------------------------------------------
 
 
-class KvTransferConfig(BaseModel):
-    """KV cache transfer configuration (NIXL connector)."""
+class EngineCommonConfig(BaseModel):
+    """Engine settings shared by every role and deployment method.
 
-    model_config = STRICT_CONFIG
-
-    enabled: bool
-    connector: str
-    role: str
-    extraConfig: dict | None = None
-
-
-class KvEventsConfig(BaseModel):
-    """KV events configuration (for precise prefix cache aware routing)."""
-
-    model_config = STRICT_CONFIG
-
-    enabled: bool
-    publisher: str
-    port: int
-    topicPrefix: str
-    serviceName: str | None = None
-
-
-class VllmFlagsConfig(BaseModel):
-    """vLLM serve flags.
-
-    Uses ``extra="allow"`` because new flags are frequently added to vLLM
-    and scenarios may reference them before the schema is updated.
+    This is the pod-shaped half of running an engine -- where HOME points, which
+    shell wraps the command, which port the Service exposes, what gets mounted.
+    No engine *parameters* live here: those belong in the role's ``command``,
+    which llm-d-benchmark renders verbatim. ``name`` and ``command`` are here
+    only so a single-engine plan can state them once instead of per role.
     """
 
-    model_config = LENIENT_CONFIG
-
-    enforceEager: bool | None = None
-    disableLogRequests: bool | None = None
-    disableUvicornAccessLog: bool | None = None
-    allowLongMaxModelLen: str | None = None
-    serverDevMode: str | None = None
-    enableChunkedPrefill: bool | None = None
-    maxNumBatchedTokens: int | None = None
-    noPrefixCaching: bool | None = None
-    enablePrefixCaching: bool | None = None
-    enableAutoToolChoice: bool | None = None
-    toolCallParser: str | None = None
-    chatTemplate: str | None = None
-    chatTemplateContentFormat: str | None = None
-
-
-class VllmCommonConfig(BaseModel):
-    """Shared vLLM configuration applied to all deployment modes."""
-
     model_config = STRICT_CONFIG
 
-    inferencePort: int
-    host: str
+    #: Default engine for roles that do not name one. Usually left null and
+    #: detected from the command.
+    name: str | None = None
+    #: Default launch command for roles that do not carry their own.
+    command: str | None = None
+    #: Default ``extraArgs`` for roles that do not carry their own. A role's own
+    #: list replaces this one rather than adding to it, the same as ``command``.
+    extraArgs: list[str] = Field(default_factory=list)
+    #: Name of the serving container. Defaults to llm-d's engine-neutral
+    #: ``modelserver`` so manifests read the same whichever engine runs.
+    containerName: str | None = None
+    #: Port the Service exposes (distinct from the port the engine binds,
+    #: which comes from the command).
+    servicePort: int
+    #: Shell used to exec the command (``<shell> -c "<command>"``).
+    shell: str
+    #: Runs before the engine in every role that does not override it.
     preprocessScript: str
-    kvTransfer: KvTransferConfig
-    kvEvents: KvEventsConfig
+
     priorityClassName: str
     pullSecret: str
     containerHome: str
@@ -335,12 +374,6 @@ class VllmCommonConfig(BaseModel):
     ephemeralStorage: str
     networkResource: str
     networkNr: str
-    shell: str
-    nixlSideChannelPort: str
-    ucxTls: str
-    ucxSockaddrTlsPriority: str
-    ucxNetDevices: str
-    flags: VllmFlagsConfig
     volumes: list[dict[str, Any]]
     volumeMounts: list[dict[str, Any]]
 
@@ -363,17 +396,34 @@ class ModelConfig(BaseModel):
     path: str
     huggingfaceId: str
     size: str
-    maxModelLen: int | str
-    blockSize: int
-    gpuMemoryUtilization: float = Field(ge=0, le=1)
-    cacheBase: str
 
-    maxNumSeq: int | None = None
-    maxNumBatchedTokens: int | None = None
+    # Not rendered into any manifest. All three are read out of the engine
+    # command -- whichever flag that engine spells them in, see
+    # `EngineSpec.flags_for_metric` -- because something outside the engine needs
+    # a number the command already states: the pre-deploy capacity check and the
+    # harness workload profile's context length for the first two, the router's
+    # prefix-cache index for `blockSize`. A scenario states one only when the
+    # command cannot (an entrypoint that carries the flag, or an engine with no
+    # CLI flag for it at all). None means nobody said, and the dependent check is
+    # skipped rather than run against a guess.
+    maxModelLen: int | str | None = None
+    blockSize: int | None = None
+    gpuMemoryUtilization: float | None = Field(default=None, ge=0, le=1)
 
     # Computed at render time by RenderPlans._resolve_model_id_label and
     # injected for ${model.idLabel} template use -- not user-set.
     idLabel: str | None = None
+
+    # Computed at render time by RenderPlans._resolve_model_hub_cache -- not
+    # user-set. Under `uriProtocol: pvc+hf` the model volume holds a Hugging Face
+    # hub cache, and this is the subdirectory of the volume it sits in. Relative
+    # to the volume root on purpose: every container that touches the cache sees
+    # that volume somewhere else -- the download Job at `downloadJob.mountPath`,
+    # the serving pods where the modelservice chart mounts it, a standalone pod
+    # at `standalone.modelMountPath`, the hostPath DaemonSet through the node
+    # filesystem -- so each composes HF_HUB_CACHE from its own mount path and
+    # this. None under every other protocol.
+    hubCacheSubdir: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +508,7 @@ class BenchmarkConfig(BaseModel):
     model: ModelConfig
     decode: DecodeConfig
     prefill: PrefillConfig
-    vllmCommon: VllmCommonConfig
+    engine: EngineCommonConfig
     harness: HarnessConfig
     parallelism: ParallelismConfig | None = None
     description: DescriptionConfig | None = None

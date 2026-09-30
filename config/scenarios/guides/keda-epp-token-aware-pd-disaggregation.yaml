@@ -60,32 +60,36 @@ scenario:
         resource: auto
 
       model:
-        name: Qwen/Qwen3-32B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the role commands state; a short name is a
+        # choice, so it stays here.
         shortName: qwen-qwen3-32b
-        path: models/Qwen/Qwen3-32B
-        huggingfaceId: Qwen/Qwen3-32B
         size: 1Ti
-        maxModelLen: 16384
-        blockSize: 128
-        gpuMemoryUtilization: 0.90
-        cacheBase: /model-cache
-
-        # The prefill chunk. Unset, _macros.j2 falls back to a hardcoded '256',
-        # which turns an 8192-token prompt into 32 chunked prefill passes and
-        # makes the prefill-heavy shape measure chunking overhead instead of
-        # prefill capacity. MUST equal the calibration's CHUNK_SIZE or the
-        # measured peakPrefillThroughput is silently wrong.
-        # NOTE: this key is only valid on `model` (ModelConfig in
-        # parser/config_schema.py). _macros.j2 also probes
-        # `vllmCommon.maxNumBatchedTokens`, but STRICT_CONFIG rejects that path,
-        # so the model-level key is the only usable one.
-        maxNumBatchedTokens: 8192
+        # maxModelLen / blockSize / gpuMemoryUtilization are deliberately NOT
+        # set here: they are engine parameters, so the role commands state them
+        # and they are read back out for the pre-deploy capacity check and the
+        # router's prefix-cache index.
+        #
+        # The prefill chunk (`--max-num-batched-tokens`) is in those commands
+        # too, and in this guide it carries a second meaning: it MUST equal the
+        # calibration's CHUNK_SIZE, or an 8192-token prompt is prefilled in
+        # several passes and the measured peakPrefillThroughput is silently
+        # wrong. See the comment on prefill's command.
 
       storage:
         modelPvc:
           size: 1Ti
 
-      vllmCommon:
+      # Pod infrastructure, not engine parameters: RDMA device limits, volumes,
+      # the Service port. Every engine parameter is stated once, in the launch
+      # command each role below carries verbatim.
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the network facts only the
+        # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+        # library path. Engine commands never mention it.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
+
         networkResource: "auto"   # auto-detect from cluster nodes
         networkNr: "1"            # number of network devices
 
@@ -274,34 +278,15 @@ scenario:
         requestTimeout: "300s"
         backendRequestTimeout: "0s"
 
-      # -------------------------------------------------------------------------
-      # Prefill Configuration -- unchanged from pd-disaggregation.yaml.
-      # -------------------------------------------------------------------------
-      prefill:
-        enabled: true
-        replicas: 1
-        vllm:
-          customCommand: |
-            ${accelerator.runtimePreamble}
-            . /shared-config/llmdbench_env.sh
-            vllm serve $MODEL_SERVE_REF \
-            --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_INFERENCE_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
-            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"${accelerator.kvBufferDeviceJson}}' \
-            --disable-uvicorn-access-log \
-            --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
-            --no-enable-prefix-caching \
-            ${accelerator.dtypeArgs} \
-            ${accelerator.executionArgs} \
-            --no-disable-hybrid-kv-cache-manager
-
+      # -----------------------------------------------------------------------
+      # Shared role configuration
+      # Prefill and decode run the same container with the same NIXL transport
+      # and the same capabilities, so that shape is stated once. What genuinely
+      # differs between them -- how many replicas, how wide, how much memory,
+      # the launch command, and decode's metrics port -- each role states for
+      # itself below, and a key a role names wins over the value here.
+      # -----------------------------------------------------------------------
+      roleDefaults:
         initContainers:
           - name: preprocess
             imageKey: benchmark
@@ -310,6 +295,82 @@ scenario:
             volumeMounts:
               - name: shared-config
                 mountPath: /shared-config
+
+        extraEnvVars:
+          # NixlConnector publishes this address to its peer as where the KV
+          # blocks can be read from, and takes it from the environment rather
+          # than the launch line. vLLM defaults it to `localhost`, which the
+          # other pod cannot reach.
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: NCCL_EXCLUDE_IB_HCA
+            value: ""
+          - name: NVSHMEM_DEBUG
+            value: "none"
+          - name: NCCL_DEBUG
+            value: "WARN"
+          - name: NIXL_LOG_LEVEL
+            value: debug
+          - name: UCX_MAX_RMA_RAILS
+            value: "1"
+          # Disables NVLink SHARP (NVLS) collectives, which require an
+          # initialized Fabric Manager.
+          - name: NCCL_NVLS_ENABLE
+            value: "0"
+
+        extraContainerConfig:
+          securityContext:
+            capabilities:
+              add:
+                - "IPC_LOCK"
+                - "SYS_RAWIO"
+                - "NET_ADMIN"
+                - "NET_RAW"
+            runAsGroup: 0
+            runAsUser: 0
+          imagePullPolicy: Always
+
+        additionalVolumeMounts: []
+        additionalVolumes: []
+
+      # -------------------------------------------------------------------------
+      # Prefill Configuration -- unchanged from pd-disaggregation.yaml.
+      # -------------------------------------------------------------------------
+      prefill:
+        enabled: true
+        replicas: 1
+        engine:
+          # The launch command, verbatim. Paste in a line that already works for
+          # you and it runs unchanged; the only flag llm-d-benchmark reads is
+          # `--port`, because the container port and the probes have to name an
+          # endpoint before the process exists.
+          #
+          # A prefill pod never gets the routing sidecar (the chart injects it
+          # only on decode), so prefill binds `engine.servicePort` (8000)
+          # itself -- which is also where decode's NIXL transfer reaches it.
+          #
+          # `--max-num-batched-tokens` MUST stay equal to the calibration's
+          # CHUNK_SIZE and to `model.maxNumBatchedTokens` above: a larger chunk
+          # is prefilled in several passes, so the measured TTFT is not one
+          # prefill pass and peakPrefillThroughput is silently wrong.
+          command: |
+            vllm serve Qwen/Qwen3-32B \
+            --host 0.0.0.0 \
+            --port 8000 \
+            --block-size 128 \
+            --max-model-len 16384 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 8192 \
+            --tensor-parallel-size 1 \
+            --gpu-memory-utilization 0.90 \
+            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"}' \
+            --disable-uvicorn-access-log \
+            --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
+            --no-enable-prefix-caching \
+            --dtype bfloat16 \
+            --no-disable-hybrid-kv-cache-manager
 
         parallelism:
           tensor: 1
@@ -325,33 +386,6 @@ scenario:
             memory: 16Gi
             cpu: "8"
 
-        extraEnvVars:
-          - name: NCCL_EXCLUDE_IB_HCA
-            value: "mlx5_0,mlx5_2,mlx5_4,mlx5_8,mlx5_7,mlx5_10,mlx5_12,mlx5_14,mlx5_16"
-          - name: NVSHMEM_DEBUG
-            value: "none"
-          - name: NCCL_DEBUG
-            value: "WARN"
-          - name: NIXL_LOG_LEVEL
-            value: debug
-          - name: UCX_MAX_RMA_RAILS
-            value: "1"
-
-        extraContainerConfig:
-          securityContext:
-            capabilities:
-              add:
-                - "IPC_LOCK"
-                - "SYS_RAWIO"
-                - "NET_ADMIN"
-                - "NET_RAW"
-            runAsGroup: 0
-            runAsUser: 0
-          imagePullPolicy: Always
-
-        additionalVolumeMounts: []
-        additionalVolumes: []
-
       # -------------------------------------------------------------------------
       # Decode Configuration
       # replicas: 1 (down from pd-disaggregation.yaml's 2) -- start at the
@@ -365,36 +399,27 @@ scenario:
       # -------------------------------------------------------------------------
       decode:
         replicas: 1
-        vllm:
-          customCommand: |
-            ${accelerator.runtimePreamble}
-            . /shared-config/llmdbench_env.sh
-            vllm serve $MODEL_SERVE_REF \
+        engine:
+          # Same verbatim contract as prefill. Decode binds 8200, not 8000:
+          # the routing sidecar the chart injects on decode pods listens on
+          # `engine.servicePort` (8000) and forwards here. 8200 is also the
+          # container port the PodMonitor below scrapes by name.
+          command: |
+            vllm serve Qwen/Qwen3-32B \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_METRICS_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
-            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"${accelerator.kvBufferDeviceJson}}' \
+            --port 8200 \
+            --block-size 128 \
+            --max-model-len 16384 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 8192 \
+            --tensor-parallel-size 2 \
+            --gpu-memory-utilization 0.90 \
+            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"}' \
             --disable-uvicorn-access-log \
             --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
             --no-enable-prefix-caching \
-            ${accelerator.dtypeArgs} \
-            ${accelerator.executionArgs} \
+            --dtype bfloat16 \
             --no-disable-hybrid-kv-cache-manager
-
-        initContainers:
-          - name: preprocess
-            imageKey: benchmark
-            imagePullPolicy: Always
-            command: ["set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
-            volumeMounts:
-              - name: shared-config
-                mountPath: /shared-config
 
         parallelism:
           tensor: 2
@@ -410,18 +435,10 @@ scenario:
             memory: 128Gi
             cpu: "32"
 
-        extraEnvVars:
-          - name: NCCL_EXCLUDE_IB_HCA
-            value: "mlx5_0,mlx5_2,mlx5_4,mlx5_8,mlx5_7,mlx5_10,mlx5_12,mlx5_14,mlx5_16"
-          - name: NVSHMEM_DEBUG
-            value: "none"
-          - name: NCCL_DEBUG
-            value: "WARN"
-          - name: NIXL_LOG_LEVEL
-            value: debug
-          - name: UCX_MAX_RMA_RAILS
-            value: "1"
-
+        # The only container-level difference from roleDefaults: the named
+        # "metrics" port the PodMonitor resolves its scrape target by. Naming
+        # `ports` here replaces roleDefaults' block for decode, so the
+        # securityContext it needs is restated with it.
         extraContainerConfig:
           ports:
             - containerPort: 8200
@@ -437,9 +454,6 @@ scenario:
             runAsGroup: 0
             runAsUser: 0
           imagePullPolicy: Always
-
-        additionalVolumeMounts: []
-        additionalVolumes: []
 
         # Leave this chart-level PodMonitor OFF (inherits monitoring.podmonitor.
         # enabled: false from defaults.yaml) -- the top-level monitoring.podmonitor

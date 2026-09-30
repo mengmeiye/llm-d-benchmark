@@ -6,6 +6,8 @@ from copy import deepcopy
 
 import requests
 
+from llmdbenchmark.engine import ENGINE_ROLES
+
 
 class ImageOverrideConfigError(RuntimeError):
     """Raised when a sidecar/init-container image override is misconfigured.
@@ -393,7 +395,7 @@ class VersionResolver:
 
         unresolved = []
         self._resolve_image_tags(result, unresolved)
-        self._resolve_standalone_image(result, unresolved)
+        self._resolve_role_engine_images(result, unresolved)
         self._resolve_init_container_images(result, unresolved)
         if not skip_kubernetes:
             self._resolve_wva_image(result, unresolved)
@@ -424,19 +426,35 @@ class VersionResolver:
                         )
                         unresolved.append(f"images.{image_key}.tag")
 
-    def _resolve_standalone_image(self, values: dict, unresolved: list) -> None:
-        """Resolve 'auto' tag for the standalone image."""
-        standalone_image = values.get("standalone", {}).get("image", {})
-        if isinstance(standalone_image, dict) and standalone_image.get("tag") == "auto":
-            repo = standalone_image.get("repository", "")
-            if repo:
-                try:
-                    standalone_image["tag"] = self.resolve_image_tag("", repo)
-                except RuntimeError as exc:
-                    self.logger.log_warning(
-                        f"⚠️  Could not resolve standalone image tag: {exc}"
-                    )
-                    unresolved.append("standalone.image.tag")
+    def _resolve_role_engine_images(self, values: dict, unresolved: list) -> None:
+        """Resolve an ``"auto"`` tag on a per-role server image override.
+
+        A role names its own server image under ``<role>.engine.image``; what it
+        omits is filled in from ``images.<engine>`` later, by the engine
+        resolver. So this has to run over all three roles rather than just
+        standalone -- the override is the same key on each, whichever engine the
+        role's command launches.
+        """
+        for role in ENGINE_ROLES:
+            role_cfg = values.get(role)
+            if not isinstance(role_cfg, dict):
+                continue
+            engine_cfg = role_cfg.get("engine")
+            if not isinstance(engine_cfg, dict):
+                continue
+            image = engine_cfg.get("image")
+            if not isinstance(image, dict) or image.get("tag") != "auto":
+                continue
+            repo = image.get("repository", "")
+            if not repo:
+                continue
+            try:
+                image["tag"] = self.resolve_image_tag("", repo)
+            except RuntimeError as exc:
+                self.logger.log_warning(
+                    f"⚠️  Could not resolve {role} engine image tag: {exc}"
+                )
+                unresolved.append(f"{role}.engine.image.tag")
 
     def _resolve_wva_image(self, values: dict, unresolved: list) -> None:
         """Resolve 'auto' tag for the WVA image."""
@@ -496,9 +514,13 @@ class VersionResolver:
         for key, ver in values.get("chartVersions", {}).items():
             if ver == "auto":
                 unresolved.append(f"chartVersions.{key}")
-        standalone = values.get("standalone", {}).get("image", {})
-        if isinstance(standalone, dict) and standalone.get("tag") == "auto":
-            unresolved.append("standalone.image.tag")
+        for role in ENGINE_ROLES:
+            engine_cfg = (values.get(role) or {}).get("engine")
+            if not isinstance(engine_cfg, dict):
+                continue
+            image = engine_cfg.get("image")
+            if isinstance(image, dict) and image.get("tag") == "auto":
+                unresolved.append(f"{role}.engine.image.tag")
         gw_ver = values.get("gateway", {}).get("version")
         if gw_ver == "auto":
             unresolved.append("gateway.version")

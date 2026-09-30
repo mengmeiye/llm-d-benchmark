@@ -470,7 +470,7 @@ Overrides support dotted key paths for nested YAML values. Values are auto-coerc
 The `--experiments` flag points to a YAML file that defines multiple **treatments**. Each treatment gets its own rendered profile, experiment ID, and pod deployment.
 
 ```bash
-llmdbenchmark --spec optimized-baseline run \
+llmdbenchmark --spec guides/optimized-baseline run \
   --harness inference-perf \
   --workload shared_prefix_synthetic.yaml \
   --experiments experiments/optimized-baseline.yaml
@@ -532,9 +532,9 @@ design:
   type: full_factorial
   setup:
     factors:
-      - name: numCpuBlocks
-        key: vllmCommon.flags.numCpuBlocks
-        levels: [500, 1000, 2000, 5000]
+      - name: cpuBytesToUse
+        key: decode.extraEnvVars
+        levels: [25Gi, 50Gi, 100Gi, 200Gi]
     constants:
       - key: model.maxModelLen
         value: 16000
@@ -554,10 +554,14 @@ setup:
     model.maxModelLen: 16000
     model.blockSize: 64
   treatments:
-    - name: cpu-blocks-500
-      vllmCommon.flags.numCpuBlocks: 500
-    - name: cpu-blocks-1000
-      vllmCommon.flags.numCpuBlocks: 1000
+    - name: cpu-bytes-25g
+      decode.extraEnvVars:
+        - name: CPU_BYTES_TO_USE
+          value: "26843545600"
+    - name: cpu-bytes-50g
+      decode.extraEnvVars:
+        - name: CPU_BYTES_TO_USE
+          value: "53687091200"
 
 # Run treatments -- consumed by step_04 (same as run-only experiments)
 treatments:
@@ -572,11 +576,25 @@ treatments:
 **Setup section keys:**
 - `setup.constants` -- merged into every setup treatment's overrides (base values)
 - `setup.treatments[].name` -- identifier for the treatment
-- All other keys in a setup treatment are **config overrides** -- dotted key paths applied to the plan config via deep merge (e.g. `vllmCommon.flags.numCpuBlocks: 500`)
+- All other keys in a setup treatment are **config overrides** -- dotted key paths applied to the plan config via deep merge (e.g. `decode.replicas: 4`)
+
+A setup treatment cannot sweep an engine flag directly: a role's `engine.command`
+is passed through verbatim, so the flag's value is not a config key. Two ways to
+vary one:
+
+- **Have the command read a container variable** and sweep that variable, as the
+  example above does -- the command writes `$(CPU_BYTES_TO_USE)` once and each
+  treatment overrides `decode.extraEnvVars`. Note that a dotted override
+  addresses dicts, not list elements, so it replaces the whole list.
+- **Restate the command per treatment** (`decode.engine.command: |` with the full
+  serve line at each level). Necessary for anything structural, such as
+  `--tensor-parallel-size`: setting `decode.parallelism.tensor` would be
+  overridden by the command with a warning, since the command is the single
+  source of truth for parallelism.
 
 #### Sweeping EPP plugins config (`router.epp.pluginsConfigFile`)
 
-The EPP's optimized-baseline plugin set (prefix-cache routing, predicted-latency
+The EPP's default plugin set (prefix-cache routing, predicted-latency
 scoring, queue policies, etc.) is selected by `router.epp.pluginsConfigFile`.
 It flows straight through to the chart at render time:
 
@@ -726,19 +744,19 @@ Evaluates how different prompt and output token lengths affect inference latency
 
 **Full DoE experiment** (automated setup × run matrix):
 ```bash
-llmdbenchmark --spec optimized-baseline experiment \
+llmdbenchmark --spec guides/optimized-baseline experiment \
   --experiments experiments/optimized-baseline.yaml
 ```
 
 **Single setup, all run treatments:**
 ```bash
-llmdbenchmark --spec optimized-baseline standup run teardown \
+llmdbenchmark --spec guides/optimized-baseline standup run teardown \
   --experiments experiments/optimized-baseline.yaml
 ```
 
 **Run-only** (against an existing endpoint):
 ```bash
-llmdbenchmark --spec optimized-baseline run \
+llmdbenchmark --spec guides/optimized-baseline run \
   --endpoint-url http://10.131.0.42:80 \
   --model Qwen/Qwen3-32B \
   --namespace my-namespace \

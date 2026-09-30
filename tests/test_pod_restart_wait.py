@@ -114,6 +114,47 @@ def test_without_budget_a_crashing_pod_still_fails_immediately(tmp_path, monkeyp
     assert "restart budget" not in result.stderr
 
 
+def test_abort_names_the_image_and_the_kubelet_message(tmp_path, monkeypatch):
+    """The abort has to say what to fix, not just that we stopped waiting.
+
+    A router pod whose sidecar image does not exist aborts the wait with
+    ``ImagePullBackOff``; the pod is then deleted with the failed release, so if
+    the image and the registry's answer are not in this message they are gone.
+    """
+    pod = PodState.from_api(
+        {
+            "metadata": {"name": "qwen3-rou", "uid": "u1", "namespace": "ns"},
+            "status": {
+                "phase": "Pending",
+                "containerStatuses": [
+                    {"name": "epp", "ready": True, "state": {}},
+                    {
+                        "name": "prediction-server",
+                        "ready": False,
+                        "image": "ghcr.io/llm-d/predictor:v0.10.0",
+                        "state": {
+                            "waiting": {
+                                "reason": "ImagePullBackOff",
+                                "message": 'Back-off pulling image "ghcr.io/llm-d/predictor:v0.10.0"',
+                            }
+                        },
+                    },
+                ],
+            },
+        }
+    )
+    cmd = _executor(tmp_path, monkeypatch, [[pod]])
+    result = cmd.wait_for_pods("app=x", "ns", timeout=600, poll_interval=1)
+
+    assert result.success is False
+    for text in (result.stderr, cmd.test_logger.text()):
+        assert "prediction-server" in text
+        assert "image=ghcr.io/llm-d/predictor:v0.10.0" in text
+        assert "Back-off pulling image" in text
+    # The Ready sidecar is not part of the diagnosis.
+    assert "epp (" not in result.stderr
+
+
 def test_without_budget_ready_pods_succeed(tmp_path, monkeypatch):
     cmd = _executor(tmp_path, monkeypatch, [[_pod("decode-0", ready=True)]])
     assert cmd.wait_for_pods("app=x", "ns", timeout=600, poll_interval=1).success

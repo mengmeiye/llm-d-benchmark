@@ -9,7 +9,7 @@
    storage.extraPvc.name is empty and this template produces no output.
 
    The extra PVC is NOT automatically mounted. Scenarios must also add matching
-   entries to vllmCommon.volumes/volumeMounts or additionalVolumes/Mounts
+   entries to engine.volumes/volumeMounts or additionalVolumes/Mounts
    to reference the PVC in their pods.
 
    Example usage in a scenario YAML:
@@ -17,7 +17,7 @@
        extraPvc:
          name: spyre-precompiled-model
          size: 50Gi
-     vllmCommon:
+     engine:
        volumes:
          - name: spyre-precompiled-model
            type: persistentVolumeClaim

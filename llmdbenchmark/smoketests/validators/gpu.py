@@ -3,7 +3,12 @@
 from pathlib import Path
 
 from llmdbenchmark.executor.context import ExecutionContext
-from llmdbenchmark.smoketests.base import BaseSmoketest, _load_config, _nested_get
+from llmdbenchmark.smoketests.base import (
+    BaseSmoketest,
+    _engine_container,
+    _load_config,
+    _nested_get,
+)
 from llmdbenchmark.smoketests.report import CheckResult, SmoketestReport
 
 
@@ -112,19 +117,11 @@ class GpuValidator(BaseSmoketest):
             )
             return report
 
-        # Find the correct container name
-        containers = serving_pod.get("spec", {}).get("containers", [])
-        container_name = None
-        for c in containers:
-            if "vllm" in c.get("name", ""):
-                container_name = c.get("name")
-                break
-        if not container_name and containers:
-            container_name = containers[0].get("name", "vllm")
+        # The serving container, by llm-d's engine-neutral name (falling back to
+        # the first non-sidecar container for a pod that renamed it).
+        container_name = _engine_container(serving_pod)
 
-        resources = self.get_pod_resources(
-            serving_pod, container=container_name or "vllm"
-        )
+        resources = self.get_pod_resources(serving_pod, container=container_name)
         limits = resources.get("limits", {})
 
         # GPU resources should be present
@@ -142,7 +139,7 @@ class GpuValidator(BaseSmoketest):
         )
 
         # Shared memory volume -- only check if scenario defines it
-        configured_volumes = _nested_get(config, "vllmCommon", "volumes") or []
+        configured_volumes = _nested_get(config, "engine", "volumes") or []
         configured_vol_names = [
             v.get("name", "") for v in configured_volumes if isinstance(v, dict)
         ]

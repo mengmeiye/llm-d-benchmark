@@ -1,6 +1,6 @@
 {# Modelservice-only template. With -t kustomize the upstream llm-d guide
    manifests are applied verbatim, so we render nothing here even though
-   the legacy `standalone.enabled = False` guard would otherwise pass. #}
+   the `standalone.enabled: false` guard below would otherwise pass. #}
 {% if standalone.enabled is defined and not standalone.enabled and not (kustomize.enabled | default(false)) %}
 helmDefaults:
   createNamespace: false

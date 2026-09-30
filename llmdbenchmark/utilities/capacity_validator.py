@@ -1,17 +1,56 @@
-"""Capacity planner validation for vLLM deployments against GPU and model constraints."""
+"""Capacity planner validation for a served model against GPU and model constraints.
+
+The inputs are engine-neutral: the context length and the memory fraction come
+from whichever flag the role's command spells them in, read by
+:mod:`llmdbenchmark.engine.resolver`; the parallelism widths and the device
+count come from what the llm-d chart and the pod spec were given. Numbers nobody
+stated are ``None``, and the checks that need them are skipped rather than
+guessed.
+
+One input is *not* engine-neutral, however much it looks it. Every engine takes
+a memory fraction, and every engine means something different by it:
+
+  * vLLM's ``--gpu-memory-utilization`` is the whole device budget -- weights,
+    activations and KV together.
+  * SGLang's ``--mem-fraction-static`` covers weights and the KV pool only;
+    activations and CUDA graphs are taken on top, out of what it left.
+  * TRT-LLM's ``--kv_cache_free_gpu_memory_fraction`` is a fraction of what is
+    still *free* after weights and peak activation, all of it KV.
+
+So ``0.88`` describes three different KV pools, and reading all three as vLLM's
+is not a rounding error: on one 80 GiB device it declares a working SGLang
+deployment of Qwen3-32B dead ("cannot serve any requests", because it subtracts
+activations a second time), and passes a TRT-LLM one it has understated by 3x.
+:attr:`~llmdbenchmark.engine.spec.EngineSpec.memoryFractionScope` records which
+reading an engine takes and :func:`_memory_budget` does that engine's
+subtraction; everything downstream -- the verdict, the concurrency estimate, the
+suggestions -- follows from it. ``planner.capacity_planner`` supplies the model
+and hardware estimates all three share.
+"""
 
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol, TYPE_CHECKING
 
+# The leaf engine module, not the `llmdbenchmark.engine` package: the package
+# pulls in the command parser and the resolver, and a capacity check has no
+# business importing either.
+from llmdbenchmark.engine.spec import (
+    MEMORY_FRACTION_DEVICE,
+    MEMORY_FRACTION_FREE_AFTER_LOAD,
+    MEMORY_FRACTION_WEIGHTS_AND_KV,
+    get_engine_spec,
+)
+from llmdbenchmark.parser.cluster_resource_resolver import (
+    effective_accelerator_count,
+)
 from planner.capacity_planner import (
     KVCacheDetail,
-    allocatable_kv_cache_memory,
-    available_gpu_memory,
     estimate_vllm_activation_memory,
     estimate_vllm_cuda_graph_memory,
     estimate_vllm_non_torch_memory,
@@ -19,7 +58,6 @@ from planner.capacity_planner import (
     get_model_config_from_hf,
     get_text_config,
     gpus_required,
-    max_concurrent_requests,
     max_context_len,
     model_memory_req,
     model_total_params,
@@ -69,8 +107,17 @@ class ValidationParams:
     pp: int
     dp: int
     accelerator_nr: int  # User-requested GPUs per pod
+    # Both come out of the engine command, which need not state either.
+    # 0 = unstated (the engine will use its own default); the checks that
+    # need the number are skipped rather than run against a guess.
     gpu_memory_util: float
     max_model_len: int
+    # The engine the role's command launches, as `resolve_engines` detected it.
+    # Its spec says what `gpu_memory_util` above is a fraction *of* -- the one
+    # input whose meaning is engine-specific (see the module docstring). Empty
+    # means nobody said, and vLLM's reading is used, which is what this check
+    # assumed for every engine before the scope was recorded.
+    engine: str = ""
     ignore_failures: bool = False
     label: str = ""  # e.g. "standalone", "decode", "prefill"
 
@@ -113,14 +160,138 @@ def _convert_accelerator_memory(gpu_name: str, raw_value: str) -> int:
     return 0
 
 
+@dataclass(frozen=True)
+class _MemoryBudget:
+    """Where one replica's GPU memory goes, in GiB, under one engine's reading.
+
+    Every figure covers the whole group of devices a replica occupies
+    (``TP x PP x DP``), which is how the planner totals them and how a replica
+    actually spends them.
+    """
+
+    scope: str
+    fraction: float
+    total: float  # devices x memory per device
+    claimed: float  # what the fraction lets the engine allocate
+    weights: float  # model weights, one copy per DP rank
+    intermediates: float  # peak activation + CUDA graphs + non-torch overhead
+    kv: float  # left for the KV cache; <= 0 means the model cannot serve
+    outside: float  # memory the fraction does not claim at all
+    activation_per_gpu: float
+    non_torch_per_gpu: float
+    note: str  # the subtraction, spelled out for the log
+
+    @property
+    def intermediates_fit_outside(self) -> bool:
+        """Whether what the fraction left can hold what it does not cover.
+
+        Only meaningful for :data:`MEMORY_FRACTION_WEIGHTS_AND_KV`, where
+        activations and CUDA graphs are allocated *outside* the fraction: too
+        high a value there does not shrink the KV pool, it OOMs mid-forward.
+        """
+        return self.outside >= self.intermediates
+
+
+def _memory_budget(
+    params: ValidationParams,
+    model: str,
+    model_config: "AutoConfig",
+    spec: Any,
+) -> _MemoryBudget:
+    """Split a replica's device memory the way ``spec``'s engine splits it.
+
+    The model and hardware estimates are the planner's, unchanged and shared by
+    every engine -- weights come from the safetensors index, peak activation and
+    overhead from its empirical profiles. What differs is only the subtraction,
+    because the fraction the user wrote is a fraction of a different thing in
+    each engine (see the module docstring).
+
+    For :data:`MEMORY_FRACTION_DEVICE` the result reproduces
+    ``planner.allocatable_kv_cache_memory`` exactly -- deliberately, so vLLM's
+    verdict is the one it always was -- except that this does not clamp at zero:
+    a model that does not fit reports how far it overran instead of reporting a
+    KV pool of 0 GB, which reads as "loads but cannot serve".
+    """
+    gpu_count = gpus_required(tp=params.tp, pp=params.pp, dp=params.dp)
+    total = float(params.gpu_memory) * gpu_count
+    fraction = params.gpu_memory_util
+
+    weights = model_memory_req(model, model_config, params.hf_token) * params.dp
+
+    # Scaled as the planner scales them: activation is per replica (one copy per
+    # DP rank), the two overheads are per device.
+    activation_per_gpu = estimate_vllm_activation_memory(model_config, tp=params.tp)
+    non_torch_per_gpu = estimate_vllm_non_torch_memory(params.tp)
+    intermediates = (
+        activation_per_gpu * params.dp
+        + estimate_vllm_cuda_graph_memory() * gpu_count
+        + non_torch_per_gpu * gpu_count
+    )
+
+    scope = getattr(spec, "memoryFractionScope", MEMORY_FRACTION_DEVICE)
+    flag = spec.memoryUtilFlags[0] if spec.memoryUtilFlags else "the memory fraction"
+
+    if scope == MEMORY_FRACTION_WEIGHTS_AND_KV:
+        claimed = total * fraction
+        kv = claimed - weights
+        note = (
+            f"{flag}={fraction} covers weights + the KV pool: "
+            f"{total:.1f} x {fraction} = {claimed:.2f} GB static, minus "
+            f"{weights:.2f} GB weights = {kv:.2f} GB for KV. Activations and "
+            f"overhead ({intermediates:.2f} GB) are taken on top, out of the "
+            f"{total - claimed:.2f} GB the fraction leaves."
+        )
+    elif scope == MEMORY_FRACTION_FREE_AFTER_LOAD:
+        free = total - weights - intermediates
+        kv = free * fraction
+        claimed = weights + intermediates + kv
+        note = (
+            f"{flag}={fraction} is a fraction of what is free once the engine "
+            f"has loaded: {total:.1f} minus {weights:.2f} GB weights and "
+            f"{intermediates:.2f} GB activations/overhead = {free:.2f} GB free, "
+            f"x {fraction} = {kv:.2f} GB for KV."
+        )
+    else:
+        claimed = total * fraction
+        kv = claimed - weights - intermediates
+        note = (
+            f"{flag}={fraction} is the whole device budget: {total:.1f} x "
+            f"{fraction} = {claimed:.2f} GB, minus {weights:.2f} GB weights and "
+            f"{intermediates:.2f} GB activations/overhead = {kv:.2f} GB for KV."
+        )
+
+    return _MemoryBudget(
+        scope=scope,
+        fraction=fraction,
+        total=total,
+        claimed=claimed,
+        weights=weights,
+        intermediates=intermediates,
+        kv=kv,
+        outside=total - claimed,
+        activation_per_gpu=activation_per_gpu,
+        non_torch_per_gpu=non_torch_per_gpu,
+        note=note,
+    )
+
+
 def validate_vllm_params(
     params: ValidationParams,
     logger: _Logger,
 ) -> list[str]:
-    """Validate vLLM parameters against the capacity planner. Returns diagnostic messages."""
+    """Validate a role's engine parameters against the capacity planner."""
     tag = "WARNING" if params.ignore_failures else "ERROR"
     prefix = f"[{params.label}] " if params.label else ""
     messages: list[str] = []
+
+    # What the role's engine means by the memory fraction, and what to call that
+    # flag in a message. An engine with no spec resolves to GENERIC, which states
+    # no fraction flag: `gpu_memory_util` is then 0 and every check below that
+    # reads it turns itself off anyway.
+    spec = get_engine_spec(params.engine)
+    fraction_flag = (
+        spec.memoryUtilFlags[0] if spec.memoryUtilFlags else "the memory fraction"
+    )
 
     def msg(text: str) -> None:
         full = f"{prefix}{tag}: {text}"
@@ -160,6 +331,23 @@ def validate_vllm_params(
         )
         skip_gpu_tests = True
 
+    if not params.gpu_memory_util:
+        info(
+            f"The {spec.name} command does not set a GPU memory fraction "
+            f"({fraction_flag}), so how much of each device the engine will "
+            "claim is unknown. Skipping KV-cache estimation."
+        )
+        skip_gpu_tests = True
+
+    if not params.max_model_len:
+        info(
+            "The engine command does not set a context length "
+            "(vLLM --max-model-len, SGLang --context-length, TRT-LLM "
+            "--max_seq_len), so the engine will use the model's own maximum. "
+            "Skipping context-length and KV-cache checks."
+        )
+        skip_gpu_tests = True
+
     for model in params.models:
         model_config = _get_model_config(
             model, params.hf_token, logger, params.ignore_failures
@@ -188,7 +376,11 @@ def validate_vllm_params(
             except AttributeError as exc:
                 msg(f"Cannot determine max context length for {model}: {exc}")
 
-            if valid_max_ctx and params.max_model_len > valid_max_ctx:
+            if (
+                valid_max_ctx
+                and params.max_model_len
+                and params.max_model_len > valid_max_ctx
+            ):
                 msg(
                     f"maxModelLen={params.max_model_len} exceeds "
                     f"model limit of {valid_max_ctx} for {model}"
@@ -197,16 +389,15 @@ def validate_vllm_params(
             msg("Model config on parameter shape not available.")
 
         if not skip_gpu_tests:
-            avail_mem = available_gpu_memory(params.gpu_memory, params.gpu_memory_util)
+            # What the fraction *claims* is stated with the budget below, once
+            # the model's weights are known: how much of the claim is left for
+            # KV depends on which of the three readings this engine takes, so
+            # there is no engine-neutral "available memory" to report here.
             info(
-                f"{params.gpu_memory} GB per GPU, "
-                f"{params.gpu_memory} x {params.gpu_memory_util} "
-                f"(gpu_memory_utilization) = {avail_mem:.1f} GB available"
-            )
-            info(
-                f"Each replica requires {per_replica_gpus} GPUs, "
-                f"total available GPU memory = "
-                f"{avail_mem * per_replica_gpus:.1f} GB"
+                f"{params.gpu_memory} GB per GPU x {per_replica_gpus} GPU(s) "
+                f"per replica = {params.gpu_memory * per_replica_gpus} GB, "
+                f"of which {spec.name} is told to take "
+                f"{fraction_flag}={params.gpu_memory_util}"
             )
 
         if model_config is not None:
@@ -218,40 +409,49 @@ def validate_vllm_params(
                 info(f"{model} requires {model_mem:.2f} GB of memory")
 
                 if not skip_gpu_tests:
-                    activation_mem = estimate_vllm_activation_memory(
-                        model_config, tp=params.tp
-                    )
-                    cuda_graph_mem = estimate_vllm_cuda_graph_memory()
-                    non_torch_mem = estimate_vllm_non_torch_memory(params.tp)
-                    total_intermediate = activation_mem + cuda_graph_mem + non_torch_mem
-
-                    info(f"Peak activation memory per GPU: {activation_mem:.2f} GB")
-                    info(f"Non-torch memory per GPU: {non_torch_mem:.2f} GB")
+                    budget = _memory_budget(params, model, model_config, spec)
                     info(
-                        f"Total intermediate memory per GPU: "
-                        f"{total_intermediate:.2f} GB"
+                        f"Peak activation memory per GPU: "
+                        f"{budget.activation_per_gpu:.2f} GB"
                     )
+                    info(f"Non-torch memory per GPU: {budget.non_torch_per_gpu:.2f} GB")
+                    info(budget.note)
 
-                if not skip_gpu_tests:
-                    avail_kv = allocatable_kv_cache_memory(
-                        model,
-                        model_config,
-                        params.gpu_memory,
-                        params.gpu_memory_util,
-                        tp=params.tp,
-                        pp=params.pp,
-                        dp=params.dp,
-                        max_model_len=params.max_model_len,
-                        batch_size=1,
-                        hf_token=params.hf_token,
-                    )
-
+                    avail_kv = budget.kv
                     kv_details = KVCacheDetail(
                         model, model_config, params.max_model_len, batch_size=1
                     )
                     per_req_kv = kv_details.per_request_kv_cache_gb
 
-                    if avail_kv < 0:
+                    # Only this engine's own reading puts the intermediates
+                    # outside the fraction, and only there can a value be too
+                    # *high* without shrinking the KV pool: the pool is sized
+                    # fine and the forward pass has nowhere to run. It is what
+                    # OOMs SGLang at 0.95 on an 80 GiB device.
+                    if (
+                        budget.scope == MEMORY_FRACTION_WEIGHTS_AND_KV
+                        and not budget.intermediates_fit_outside
+                    ):
+                        msg("DEPLOYMENT WILL FAIL: no room left for activations.")
+                        msg(
+                            f"{fraction_flag}={budget.fraction} reserves "
+                            f"{budget.claimed:.2f} GB of {budget.total:.1f} GB "
+                            f"for weights and KV, leaving {budget.outside:.2f} "
+                            f"GB -- but activations, CUDA graphs and allocator "
+                            f"overhead need {budget.intermediates:.2f} GB on "
+                            f"top of it, and {spec.name} allocates those "
+                            f"outside the fraction."
+                        )
+                        _log_config_suggestions(
+                            msg,
+                            params,
+                            f"4. Reduce {fraction_flag} to at most "
+                            f"{max(0.0, (budget.total - budget.intermediates) / budget.total):.2f} "
+                            f"(currently {budget.fraction}), which is what "
+                            f"leaves room for them",
+                        )
+
+                    elif avail_kv <= 0:
                         msg(
                             "DEPLOYMENT WILL FAIL: Insufficient GPU memory "
                             "to load model."
@@ -261,7 +461,7 @@ def validate_vllm_params(
                             "memory than available after loading weights "
                             "and activation memory."
                         )
-                        _log_config_suggestions(msg, params)
+                        _log_config_suggestions(msg, params, _raise_fraction(budget))
 
                     elif avail_kv < per_req_kv:
                         msg(
@@ -274,7 +474,7 @@ def validate_vllm_params(
                             f"(max_model_len={params.max_model_len}): "
                             f"{per_req_kv:.2f} GB"
                         )
-                        _log_config_suggestions(msg, params)
+                        _log_config_suggestions(msg, params, _raise_fraction(budget))
 
                     else:
                         info(f"Allocatable KV cache memory: {avail_kv:.2f} GB")
@@ -284,17 +484,12 @@ def validate_vllm_params(
                             f"{per_req_kv:.2f} GB"
                         )
 
-                        total_concurrent = max_concurrent_requests(
-                            model,
-                            model_config,
-                            params.max_model_len,
-                            params.gpu_memory,
-                            params.gpu_memory_util,
-                            batch_size=1,
-                            tp=params.tp,
-                            pp=params.pp,
-                            dp=params.dp,
-                            hf_token=params.hf_token,
+                        # floor(pool / per request), which is what
+                        # `planner.max_concurrent_requests` computes -- done here
+                        # so it divides *this* engine's pool rather than
+                        # recomputing a vLLM-shaped one.
+                        total_concurrent = (
+                            math.floor(avail_kv / per_req_kv) if per_req_kv else 0
                         )
                         info(
                             f"Max concurrent requests (worst case, "
@@ -309,11 +504,36 @@ def validate_vllm_params(
     return messages
 
 
-def _log_config_suggestions(msg_fn, params: ValidationParams) -> None:
-    """Log configuration suggestions when deployment will fail."""
+def _raise_fraction(budget: _MemoryBudget) -> str:
+    """The "give the engine more memory" suggestion, in this engine's terms."""
+    if budget.scope == MEMORY_FRACTION_FREE_AFTER_LOAD:
+        # This fraction is of free memory, so raising it takes from a reserve the
+        # engine deliberately left; 1.0 means "all of it".
+        return (
+            f"4. Increase the memory fraction (currently {budget.fraction}) "
+            f"toward 1.0, which leaves no headroom outside the KV pool"
+        )
+    return (
+        f"4. Increase the memory fraction (currently {budget.fraction}, may cause OOM)"
+    )
+
+
+def _log_config_suggestions(
+    msg_fn, params: ValidationParams, fraction_advice: str | None = None
+) -> None:
+    """Log configuration suggestions when deployment will fail.
+
+    ``fraction_advice`` is the last line, which is the only engine-specific one:
+    whether to raise or lower the memory fraction, and toward what, depends on
+    what that fraction measures.
+    """
+    spec = get_engine_spec(params.engine)
+    flag = spec.memoryUtilFlags[0] if spec.memoryUtilFlags else "memory fraction"
+
     msg_fn("  Current config:")
+    msg_fn(f"    engine: {spec.name}")
     msg_fn(f"    GPU memory per device: {params.gpu_memory} GB")
-    msg_fn(f"    GPU memory utilization: {params.gpu_memory_util}")
+    msg_fn(f"    {flag}: {params.gpu_memory_util}")
     msg_fn(f"    maxModelLen: {params.max_model_len}")
     msg_fn(f"    TP: {params.tp}, PP: {params.pp}, DP: {params.dp}")
     msg_fn("  Possible solutions:")
@@ -321,8 +541,12 @@ def _log_config_suggestions(msg_fn, params: ValidationParams) -> None:
     msg_fn("    2. Increase tensor parallelism to use more GPUs")
     msg_fn("    3. Use GPUs with more memory")
     msg_fn(
-        f"    4. Increase gpu_memory_utilization "
-        f"(currently {params.gpu_memory_util}, may cause OOM)"
+        "    "
+        + (
+            fraction_advice
+            or f"4. Increase the memory fraction "
+            f"(currently {params.gpu_memory_util}, may cause OOM)"
+        )
     )
 
 
@@ -351,21 +575,25 @@ def _extract_params(
     if hf_token in ("", "REPLACE_TOKEN"):
         hf_token = None
 
-    parallelism = method_config.get("parallelism", {})
-    tp = int(parallelism.get("tensor", 1))
-    dp = int(parallelism.get("data", 1))
-    pp = 1  # Pipeline parallelism not yet exposed per-method
+    # KV cache is sharded across the widths the llm-d chart was given, which is
+    # where a scenario states them (the chart needs them for LeaderWorkerSet
+    # sizing and wide-EP layout). Unstated means 1.
+    parallelism = method_config.get("parallelism") or {}
+
+    def width(key: str) -> int:
+        value = parallelism.get(key)
+        return int(value) if value else 1
+
+    tp = width("tensor")
+    pp = width("pipeline")
+    dp = width("dataLocal") or width("data")
 
     accel_section = plan_config.get("accelerator", {})
-    method_accel_count = method_config.get("accelerator", {}).get("count")
-    global_accel_count = accel_section.get("count")
 
-    accelerator_nr = int(
-        method_config.get(
-            "acceleratorNr",
-            method_accel_count or global_accel_count or tp * pp * dp,
-        )
-    )
+    # How many devices one pod actually holds, from the Kubernetes request the
+    # role writes down (same chain the manifests render).
+    stated_nr, _ = effective_accelerator_count(method_config, plan_config)
+    accelerator_nr = int(method_config.get("acceleratorNr", stated_nr or tp * pp * dp))
     accel_type = method_config.get("acceleratorType", {}).get(
         "labelValue", ""
     ) or accel_section.get("type", "")
@@ -374,9 +602,26 @@ def _extract_params(
         str(accel_section.get("memory", "")),
     )
 
-    gpu_memory_util = float(model_config["gpuMemoryUtilization"])
+    # Both are read out of the engine command; a command that does not set them
+    # leaves them None (the engine then uses its own default, which we cannot
+    # know). Zero is the "unknown" sentinel the checks below already understand:
+    # it turns off GPU-memory and context-length validation instead of
+    # validating against a number nobody asked for.
+    try:
+        gpu_memory_util = float(model_config.get("gpuMemoryUtilization") or 0.0)
+    except (TypeError, ValueError):
+        gpu_memory_util = 0.0
+    try:
+        max_model_len = int(model_config.get("maxModelLen") or 0)
+    except (TypeError, ValueError):
+        max_model_len = 0
 
-    max_model_len = int(model_config["maxModelLen"])
+    # Which engine this role launches, as `resolve_engines` detected it from the
+    # command (`engine.name`, normalised: an alias is already resolved). It says
+    # what `gpu_memory_util` above is a fraction of. Absent -- an older plan, or
+    # a role with no engine block -- leaves it empty and vLLM's reading stands.
+    role_engine = method_config.get("engine") or {}
+    engine = role_engine.get("name", "") if isinstance(role_engine, dict) else ""
 
     return ValidationParams(
         models=models,
@@ -389,6 +634,7 @@ def _extract_params(
         accelerator_nr=accelerator_nr,
         gpu_memory_util=gpu_memory_util,
         max_model_len=max_model_len,
+        engine=str(engine or ""),
         ignore_failures=ignore_failures,
         label=method,
     )
@@ -405,18 +651,18 @@ def run_capacity_planner(
 
     if ignore_failures:
         log.log_info(
-            "Validating vLLM configuration against Capacity Planner "
+            "Validating engine configuration against Capacity Planner "
             "(deployment will continue even if validation fails)"
         )
     else:
         log.log_info(
-            "Validating vLLM configuration against Capacity Planner "
+            "Validating engine configuration against Capacity Planner "
             "(deployment will halt if validation fails)"
         )
 
     is_fma = plan_config.get("fma", {}).get("enabled", False)
     if is_fma:
-        log.log_info("Deployment method is fma -- skipping vLLM capacity validation")
+        log.log_info("Deployment method is fma -- skipping engine capacity validation")
         return all_messages
 
     standalone = plan_config.get("standalone", {})
@@ -439,7 +685,7 @@ def run_capacity_planner(
             params = _extract_params(plan_config, method, ignore_failures)
             if params:
                 log.log_info(
-                    f"Validating {method} vLLM arguments for {params.models} ..."
+                    f"Validating {method} engine arguments for {params.models} ..."
                 )
                 all_messages.extend(validate_vllm_params(params, log))
             else:

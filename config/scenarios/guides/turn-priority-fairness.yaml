@@ -19,17 +19,17 @@ scenario:
       # Model Configuration
       # -------------------------------------------------------------------------
       model:
-        name: Qwen/Qwen3-30B-A3B-Instruct-2507
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact decode's launch command states; a short name is
+        # a choice, so it stays here.
         shortName: qwen-qwen3-30b-a3b-instruct-2507
-        path: models/Qwen/Qwen3-30B-A3B-Instruct-2507
-        huggingfaceId: Qwen/Qwen3-30B-A3B-Instruct-2507
         size: 1Ti
-        # YaRN in decode.vllm.customCommand is what lifts the served window this
-        # far past the model's native 262144.
-        maxModelLen: 1010000
-        blockSize: 64
-        gpuMemoryUtilization: 0.95
-        cacheBase: /model-cache
+        # maxModelLen / blockSize / gpuMemoryUtilization are deliberately NOT
+        # set here: they are engine parameters, so decode's launch command
+        # states them and they are read back out for the pre-deploy capacity
+        # check and the router's prefix-cache index. The 1010000-token window
+        # in that command is only reachable because of the YaRN `--hf-overrides`
+        # beside it -- the model's native limit is 262144.
 
       # -------------------------------------------------------------------------
       # Image. The EPP tag defaults.yaml pins has no program-aware-fairness
@@ -48,18 +48,19 @@ scenario:
         workloadPvc:
           size: 1Ti
 
-      vllmCommon:
+      # Pod infrastructure, not engine parameters: RDMA device limits, volumes,
+      # the Service port. Every engine parameter -- the OffloadingConnector's
+      # CPU tier included -- is stated once, in decode's launch command below.
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the CUDA library path this
+        # guide's command used to discover with its own `find / -name
+        # libcuda.so.1` preamble, plus the network facts only the node can tell
+        # us. The command no longer mentions either.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
+
         networkResource: "auto"
         networkNr: "auto"
-
-        kvTransfer:
-          enabled: true
-          connector: OffloadingConnector
-          role: kv_both
-          extraConfig:
-            num_cpu_blocks: 1280
-            cpu_bytes_to_use: 549755813888
-            block_size: 256
 
         volumes:
           - name: shared-config
@@ -246,21 +247,36 @@ scenario:
       decode:
         replicas: 1
 
-        vllm:
-          customCommand: |
-            export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
-            export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-            vllm serve $MODEL_SERVE_REF \
+        # The launch command, verbatim -- the same line you would run by hand.
+        # It reaches the container unchanged, so every flag here is read by vLLM
+        # and none of them by llm-d-benchmark, which reads only what decides
+        # Kubernetes objects: `--port` (container port, probes, the routing
+        # sidecar's upstream) and the capacity numbers the pre-deploy check
+        # needs.
+        #
+        # Decode binds 8200: the routing sidecar the chart injects on decode
+        # pods owns `engine.servicePort` (8000) and forwards here. 8200 is also
+        # the named `metrics` container port below.
+        #
+        # `--hf-overrides` is what makes the 1010000-token window legal: YaRN
+        # scales the model's native 262144 by 4. `--max-model-len` past that
+        # without the override is rejected at load.
+        #
+        # The OffloadingConnector JSON is written out as vLLM parses it -- a
+        # 512GiB CPU tier in 1280 blocks of 256 tokens.
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_METRICS_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
+            --port 8200 \
+            --block-size 64 \
             --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144}}' \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+            --max-model-len 1010000 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 4 \
+            --gpu-memory-utilization 0.95 \
+            --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"num_cpu_blocks":1280,"cpu_bytes_to_use":549755813888,"block_size":256}}' \
             --no-enable-log-requests \
             --reasoning-parser qwen3 \
             --enable-auto-tool-choice \

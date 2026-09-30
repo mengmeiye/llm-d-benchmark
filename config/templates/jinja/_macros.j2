@@ -59,175 +59,86 @@
 {% endif %}
 {%- endmacro %}
 
-{# Macro to build kv-transfer-config JSON #}
-{% macro build_kv_transfer_config() -%}
-{% if vllmCommon.kvTransfer.extraConfig is defined and vllmCommon.kvTransfer.extraConfig -%}
-{"kv_connector":"{{ vllmCommon.kvTransfer.connector }}","kv_role":"{{ vllmCommon.kvTransfer.role }}","kv_connector_extra_config":{{ vllmCommon.kvTransfer.extraConfig | tojson }}}
-{%- else -%}
-{"kv_connector":"{{ vllmCommon.kvTransfer.connector }}","kv_role":"{{ vllmCommon.kvTransfer.role }}"}
-{%- endif %}
-{%- endmacro %}
+{# kv-transfer and kv-events are not modelled here. A scenario writes the flag
+   in its engine command, verbatim, exactly as the llm-d guides do --
 
-{# Macro to build kv-events-config JSON #}
-{% macro build_kv_events_config() -%}
-{% set default_service_name = model_id_label ~ '-router-epp' -%}
-{% set service_name = vllmCommon.kvEvents.serviceName | default(default_service_name) -%}
-{% set ns = namespace.name -%}
-{% set port = vllmCommon.kvEvents.port -%}
-{% set publisher = vllmCommon.kvEvents.publisher -%}
-{% set topic_prefix = vllmCommon.kvEvents.topicPrefix -%}
-{"enable_kv_cache_events":true,"publisher":"{{ publisher }}","endpoint":"tcp://{{ service_name }}.{{ ns }}.svc.cluster.local:{{ port }}","topic":"{{ topic_prefix }}@$(POD_IP):$(VLLM_INFERENCE_PORT)@{{ model.name }}"}
-{%- endmacro %}
+     decode:
+       engine:
+         command: |
+           vllm serve ${model.name} --port 8200 \
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
-{# What this stack's default command serves -- the single source of truth
-   for the vLLM serve target, also exported to pods as $MODEL_SERVE_REF so
-   custom commands stay dual-mode (PVC vs hf) without hardcoding paths.
-   - standalone: always the model ID. The ID resolves through the HF hub
-     cache (HF_HOME), NOT the staged PVC copy at <modelMountPath>/<path>;
-     see #1822 for the cost of that split. Kept as-is here to preserve
-     existing behavior -- switching mounted standalone to the staged path
-     is a separate, deliberate change.
-   - modelservice + uriProtocol=hf: the HF id (runtime fetch by the chart).
-   - modelservice otherwise: the staged PVC copy at <cacheBase>/<path>. #}
-{% macro model_serve_ref(stack='modelservice') -%}
-{%- if stack == 'standalone' -%}
-{{ model.name }}
-{%- elif modelservice is defined and modelservice.uriProtocol is defined and modelservice.uriProtocol == 'hf' -%}
-{{ model.huggingfaceId | default(model.name) }}
-{%- else -%}
-{{ model.cacheBase }}/{{ model.path }}
-{%- endif -%}
-{%- endmacro %}
+   -- and cluster-dependent values are reachable through ${dotted.path}
+   substitution and the container env, e.g.
 
-{# Macro to build vLLM serve command with templated arguments #}
-{% macro build_vllm_command(mode='decode') -%}
-{% if mode == 'decode' -%}
-{% set config = decode -%}
-{% else -%}
-{% set config = prefill -%}
-{% endif -%}
+     decode:
+       extraEnvVars:
+         - name: KV_EVENTS_ENDPOINT
+           value: "tcp://*:5556"
+       engine:
+         command: |
+           vllm serve ${model.name} --port 8200 \
+             --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","topic":"kv@$(POD_IP)@${model.name}"}'
 
-{# Determine preprocess script to use #}
-{% if config.vllm.customPreprocessCommand is defined and config.vllm.customPreprocessCommand is not none -%}
-{% set preprocess_script = config.vllm.customPreprocessCommand -%}
-{% else -%}
-{% set preprocess_script = vllmCommon.preprocessScript -%}
-{% endif -%}
-{# Preprocess is normally best-effort, so it is chained with `;` and vLLM starts
-   regardless. With contextLengthRanges the preprocess also self-labels the pod,
-   and an unlabeled pod is invisible to the context-length-aware scorer -- the
-   deploy would look healthy while serving no context-aware traffic. Chain with
-   `&&` there so a preprocess failure actually stops the container. #}
-{% set preprocess_sep = '&&' if (config.contextLengthRanges is defined and config.contextLengthRanges | length > 0) else ';' -%}
+   The endpoint is the address the engine *binds* and publishes on -- the router
+   subscribes to each pod -- so it is a wildcard bind, not a Service name.
 
-{# Pre-calculate which optional flags are enabled #}
-{% set has_enforce_eager = vllmCommon.flags.enforceEager | default(false) -%}
-{% set has_disable_log_requests = vllmCommon.flags.disableLogRequests | default(false) -%}
-{% set has_disable_uvicorn = vllmCommon.flags.disableUvicornAccessLog | default(false) -%}
-{% set has_no_prefix_caching = vllmCommon.flags.noPrefixCaching | default(false) -%}
-{% set has_enable_prefix_caching = vllmCommon.flags.enablePrefixCaching | default(false) -%}
-{# Optional --kv-cache-memory cap (bytes); unset sizes the KV cache from
-   --gpu-memory-utilization. Set it to match a capped FMA arm. #}
-{% set kv_cache_memory = vllmCommon.flags.kvCacheMemory | default(none) -%}
-{% set has_kv_transfer = vllmCommon.kvTransfer is defined and vllmCommon.kvTransfer.enabled -%}
-{% set has_kv_events = vllmCommon.kvEvents is defined and vllmCommon.kvEvents.enabled -%}
-{% set gpu_mem_util = model.gpuMemoryUtilization | float -%}
+   This keeps llm-d-benchmark out of the business of knowing an engine's JSON
+   schema, which differs per engine and changes per release. #}
 
-{# Custom command provided #}
-{% if config.vllm.customCommand is defined and config.vllm.customCommand is not none -%}
-{{ preprocess_script }} {{ preprocess_sep }} {{ config.vllm.customCommand | trim }}
-{%- if has_kv_transfer %} \
-  --kv-transfer-config '{{ build_kv_transfer_config() }}'
-{%- endif %}
-{%- if has_kv_events %} \
-  --kv-events-config '{{ build_kv_events_config() }}'
-{%- endif %}
-{%- else -%}
-{# Use default vllm serve command -- uses container env vars at runtime #}
-{# When routing proxy is disabled, vLLM must bind to the service port (8000)
-   directly since there is no sidecar to bridge servicePort to vllmPort.
-   When proxy is enabled, vLLM binds to vllm.port (8200) and the proxy
-   handles the servicePort (8000) to vllmPort (8200) forwarding.
-   The port env var is set accordingly: VLLM_INFERENCE_PORT (8000) when no proxy,
-   VLLM_METRICS_PORT (8200) when proxy is enabled.
-   IMPORTANT: Prefill pods NEVER have the routing proxy (the Helm chart only
-   injects it on decode pods), so prefill must always use VLLM_INFERENCE_PORT
-   (8000) regardless of the proxy setting. Without this, the routing sidecar
-   on decode pods cannot reach the prefill pod (connection refused on 8000
-   while vLLM listens on 8200). #}
-{% set proxy_disabled = (routing is defined and routing.proxy is defined and routing.proxy.enabled is defined and not routing.proxy.enabled) -%}
-{% set use_inference_port = proxy_disabled or mode == 'prefill' -%}
-{% set port_var = '$VLLM_INFERENCE_PORT' if use_inference_port else '$VLLM_METRICS_PORT' -%}
-{{ preprocess_script }} {{ preprocess_sep }} vllm serve {{ model_serve_ref() }} \
-  --host {{ vllmCommon.host }} \
-  --served-model-name {{ model.name }} \
-  --port {{ port_var }} \
-  --block-size $VLLM_BLOCK_SIZE \
-  --max-model-len $VLLM_MAX_MODEL_LEN
-{%- set tp_size = config.parallelism.tensor | int %}
-{%- if tp_size > 0 %} \
-  --tensor-parallel-size $VLLM_TENSOR_PARALLELISM
-{%- endif %}
-{%- if gpu_mem_util > 0 %} \
-  --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL
-{%- endif %}
-{%- if kv_cache_memory %} \
-  --kv-cache-memory {{ kv_cache_memory }}
-{%- endif %}
-{%- if has_enforce_eager %} \
-  --enforce-eager
-{%- endif %}
-{%- if has_disable_log_requests %} \
-  --no-enable-log-requests
-{%- endif %}
-{%- if has_disable_uvicorn %} \
-  --disable-uvicorn-access-log
-{%- endif %}
-{%- if has_no_prefix_caching %} \
-  --no-enable-prefix-caching
-{%- endif %}
-{%- if has_enable_prefix_caching %} \
-  --enable-prefix-caching
-{%- endif %}
-{%- if vllmCommon.flags.chatTemplate is defined and vllmCommon.flags.chatTemplate %} \
-  --chat-template '{{ vllmCommon.flags.chatTemplate }}'
-{%- endif %}
-{%- if vllmCommon.flags.chatTemplateContentFormat is defined and vllmCommon.flags.chatTemplateContentFormat %} \
-  --chat-template-content-format {{ vllmCommon.flags.chatTemplateContentFormat }}
-{%- endif %}
-{%- if has_kv_transfer %} \
-  --kv-transfer-config '{{ build_kv_transfer_config() }}'
-{%- endif %}
-{%- if has_kv_events %} \
-  --kv-events-config '{{ build_kv_events_config() }}'
-{%- endif %}
-{%- if config.vllm.additionalFlags is defined %}
-{% for flag in config.vllm.additionalFlags %} \
-  {{ flag }}
-{%- endfor %}
-{%- endif %}
-{%- endif %}
+{# ======================================================================== #}
+{# Render a role's engine launch command.                                   #}
+{#                                                                          #}
+{# There is nothing to build: the command is what the scenario wrote. This   #}
+{# macro only prefixes the preprocess step and picks how the two are         #}
+{# chained, so the engine's command line is byte-for-byte what the user      #}
+{# would have typed -- whichever engine it launches.                        #}
+{#                                                                          #}
+{# role: 'decode', 'prefill' or 'standalone'.                               #}
+{# ======================================================================== #}
+{% macro render_engine_command(role='decode') -%}
+{% set _roles = {
+     'decode': decode | default({}, true),
+     'prefill': prefill | default({}, true),
+     'standalone': standalone | default({}, true),
+   } -%}
+{% set config = _roles.get(role) | default({}, true) -%}
+{% set engine_cfg = config.engine | default({}, true) -%}
+{# Per-role preprocess wins; otherwise the plan-wide one. #}
+{% set preprocess = engine_cfg.preprocessCommand | default(engine.preprocessScript | default('/bin/true', true), true) -%}
+{# Preprocess is normally best-effort, so it is chained with `;` and the engine
+   starts regardless. With contextLengthRanges the preprocess also self-labels
+   the pod, and an unlabeled pod is invisible to the context-length-aware
+   scorer -- the deploy would look healthy while serving no context-aware
+   traffic. Chain with `&&` there so a preprocess failure actually stops the
+   container. #}
+{% set sep = '&&' if (config.contextLengthRanges | default([], true) | length > 0) else ';' -%}
+{{ preprocess }} {{ sep }} {{ engine_cfg.command | default('', true) | trim }}
 {%- endmacro %}
 
 
 {# ======================================================================== #}
-{# Macro to build the shared env vars block for a modelservice pod.        #}
-{# Used by BOTH the vllm container AND init containers so they share the   #}
-{# exact same environment. Takes mode ('decode' or 'prefill') and an       #}
-{# optional role_label ('1' for decode, '1' for prefill) for VLLM_IS_*.    #}
+{# The shared env vars block for a modelservice pod.                        #}
+{#                                                                          #}
+{# Used by BOTH the serving container AND its init containers so they share  #}
+{# the exact same environment.                                              #}
+{#                                                                          #}
+{# Only benchmark-owned variables live here: what the pod needs to find the   #}
+{# model, label itself, and reach the cluster. No engine parameters: a role   #}
+{# states its own command. Engine-specific environment                       #}
+{# (VLLM_NIXL_SIDE_CHANNEL_*, UCX_*, SGLANG_DISAGG_*, ...) goes in           #}
+{# `<role>.extraEnvVars`, which is exactly how the llm-d guides write it.    #}
+{#                                                                          #}
+{# mode: 'decode' or 'prefill'.                                             #}
 {# ======================================================================== #}
 {% macro build_ms_env_vars(mode='decode') -%}
 {% if mode == 'decode' -%}
 {% set config = decode -%}
-{% set role_env_name = 'VLLM_IS_DECODE' -%}
 {% else -%}
 {% set config = prefill -%}
-{% set role_env_name = 'VLLM_IS_PREFILL' -%}
 {% endif -%}
-- name: {{ role_env_name }}
-  value: "1"
 - name: HOME
-  value: "{{ vllmCommon.containerHome }}"
+  value: "{{ engine.containerHome }}"
 {# Workaround for https://github.com/vllm-project/vllm/issues/44548     #}
 {# (vLLM v0.20.0+ with torch 2.11). torch._inductor's cache_dir() calls #}
 {# getpass.getuser() -> pwd.getpwuid(uid), which raises KeyError on     #}
@@ -236,90 +147,34 @@
 {# arbitrary -- any non-empty value works.                              #}
 - name: USER
   value: "llm-d"
-{# The mode-correct vLLM serve target (see model_serve_ref) -- custom
-   commands use $MODEL_SERVE_REF instead of hardcoding /model-cache paths
-   so they work in both PVC and hf modes. #}
-- name: MODEL_SERVE_REF
-  value: "{{ model_serve_ref() }}"
-{# Only emit HF_HOME when the modelservice chart will NOT. With
-   modelservice.uriProtocol == 'hf' (mirrors 13_ms-values.yaml.j2) the
-   chart mounts an hf:// cache and injects its own HF_HOME=/model-cache;
-   emitting it here too gave a duplicate env entry that Helm 4 server-side
-   apply rejects (Helm 3 client-side apply silently last-wins'd to the
-   chart's value). For pvc:// (the default) the chart sets no HF_HOME, so
-   ours is required -- omitting it unconditionally regressed every
-   pvc-protocol scenario. #}
+{# Only emit HF_HOME when the modelservice chart will NOT. The chart injects
+   exactly one HF variable, and which one depends on the protocol:
+
+     hf      HF_HOME=<mountPath>. Ours would be a duplicate env entry, which
+             Helm 4 server-side apply rejects outright (Helm 3 client-side
+             apply silently last-wins'd to the chart's value), so skip it.
+     pvc+hf  HF_HUB_CACHE=<mountPath>/<cache subdir>. Different variable, no
+             collision, and HF_HUB_CACHE outranks HF_HOME for hub lookups --
+             so the engine's plain model id resolves against the staged PVC
+             cache while HF_HOME stays a writable scratch dir for everything
+             else HF wants to write.
+     pvc     Neither. Ours is the only HF_HOME there is. #}
 {% if not (modelservice is defined and modelservice.uriProtocol is defined and modelservice.uriProtocol == 'hf') -%}
 - name: HF_HOME
-  value: "{{ vllmCommon.hfHome }}"
+  value: "{{ engine.hfHome }}"
 {% endif -%}
 - name: MODEL_NAME
   value: "{{ model.name }}"
 - name: MODEL_PATH
   value: "{{ model.path }}"
-- name: VLLM_CACHE_ROOT
-  value: "{{ config.vllm.cacheRoot | default(vllmCommon.containerHome ~ '/vllm') }}"
-- name: VLLM_WORKER_MULTIPROC_METHOD
-  value: "{{ config.vllm.workerMultiprocMethod | default(vllmCommon.workerMultiprocMethod | default('spawn')) }}"
-- name: VLLM_LOGGING_LEVEL
-  value: "{{ config.vllm.loggingLevel | default(vllmCommon.loggingLevel | default('INFO')) }}"
-- name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
-  value: "{{ config.vllm.httpTimeoutKeepAlive | default(120) }}"
-{% if vllmCommon.flags.allowLongMaxModelLen is defined and vllmCommon.flags.allowLongMaxModelLen -%}
-- name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
-  value: "{{ vllmCommon.flags.allowLongMaxModelLen }}"
-{% endif -%}
-{% if vllmCommon.flags.serverDevMode is defined and vllmCommon.flags.serverDevMode -%}
-- name: VLLM_SERVER_DEV_MODE
-  value: "{{ vllmCommon.flags.serverDevMode }}"
-{% endif -%}
-- name: VLLM_INFERENCE_PORT
-  value: "{{ config.vllm.servicePort | default(vllmCommon.inferencePort) }}"
-- name: VLLM_METRICS_PORT
-  value: "{{ config.vllm.port | default(vllmCommon.vllmPort) }}"
-- name: VLLM_BLOCK_SIZE
-  value: "{{ model.blockSize | default(vllmCommon.blockSize | default('16')) }}"
-{% if config.vllmVariants is defined and config.vllmVariants | length > 0 -%}
-- name: VLLM_MAX_MODEL_LEN
-  value: "{{ config.vllmVariants | map(attribute='maxModelLen') | join(',,') }}"
-{% else -%}
-- name: VLLM_MAX_MODEL_LEN
-  value: "{{ model.maxModelLen | default(vllmCommon.maxModelLen | default('4096')) }}"
-{% endif -%}
-- name: VLLM_LOAD_FORMAT
-  value: "{{ vllmCommon.loadFormat | default('auto') }}"
-- name: VLLM_ACCELERATOR_MEM_UTIL
-  value: "{{ model.gpuMemoryUtilization | default(vllmCommon.gpuMemoryUtilization | default('0.95')) }}"
-{% if config.vllmVariants is defined and config.vllmVariants | length > 0 and config.vllmVariants[0].maxNumSeq is defined -%}
-- name: VLLM_MAX_NUM_SEQ
-  value: "{{ config.vllmVariants | map(attribute='maxNumSeq') | join(',,') }}"
-{% else -%}
-- name: VLLM_MAX_NUM_SEQ
-  value: "{{ model.maxNumSeq | default(vllmCommon.maxNumSeq | default('256')) }}"
-{% endif -%}
-- name: VLLM_TENSOR_PARALLELISM
-  value: "{{ config.parallelism.tensor | default('1') }}"
-{% if config.vllmVariants is defined and config.vllmVariants | length > 0 and config.vllmVariants[0].maxNumBatchedTokens is defined -%}
-- name: VLLM_MAX_NUM_BATCHED_TOKENS
-  value: "{{ config.vllmVariants | map(attribute='maxNumBatchedTokens') | join(',,') }}"
-{% else -%}
-- name: VLLM_MAX_NUM_BATCHED_TOKENS
-  value: "{{ model.maxNumBatchedTokens | default(vllmCommon.maxNumBatchedTokens | default('256')) }}"
-{% endif -%}
-- name: VLLM_NIXL_SIDE_CHANNEL_HOST
-  valueFrom:
-    fieldRef:
-      fieldPath: status.podIP
-- name: VLLM_NIXL_SIDE_CHANNEL_PORT
-  value: "{{ vllmCommon.nixlSideChannelPort | default('5557') }}"
-- name: UCX_TLS
-  value: "{{ vllmCommon.ucxTls | default('sm,cuda_ipc,cuda_copy,tcp') }}"
-- name: UCX_SOCKADDR_TLS_PRIORITY
-  value: "{{ vllmCommon.ucxSockaddrTlsPriority | default('tcp') }}"
-{% if vllmCommon.ucxNetDevices is defined and vllmCommon.ucxNetDevices %}
-- name: UCX_NET_DEVICES
-  value: "{{ vllmCommon.ucxNetDevices }}"
-{% endif %}
+{# The port the engine binds (read from this role's command) and the port the
+   Service exposes. Emitted so a command can write `--port $ENGINE_PORT` when a
+   scenario would rather not repeat the number, and so a preprocess script or
+   probe override can find both. #}
+- name: ENGINE_PORT
+  value: "{{ config.engine.port | default(engine.servicePort) }}"
+- name: SERVICE_PORT
+  value: "{{ engine.servicePort }}"
 - name: POD_IP
   valueFrom:
     fieldRef:
@@ -378,87 +233,474 @@
 {% endif %}
 {%- endmacro %}
 
-{# Macro to build standalone vLLM serve command #}
-{% macro build_standalone_vllm_command() -%}
-{# Determine preprocess script to use #}
-{% if standalone.vllm.customPreprocessCommand is defined and standalone.vllm.customPreprocessCommand is not none -%}
-{% set preprocess_script = standalone.vllm.customPreprocessCommand -%}
-{% elif vllmCommon.preprocessScript is defined -%}
-{% set preprocess_script = vllmCommon.preprocessScript -%}
-{% else -%}
-{% set preprocess_script = standalone.vllm.preprocessCommand -%}
-{% endif -%}
+{# ======================================================================== #}
+{# One engine role -- decode or prefill -- as the modelservice chart wants  #}
+{# it. The two roles are the same pod: same container, same probes, same    #}
+{# volumes, same accelerator arithmetic, same pass-through of everything    #}
+{# the engine cares about. Describing them twice meant every fix had to be  #}
+{# made twice, and where one was missed the copies drifted.                 #}
+{#                                                                         #}
+{#   role_name       the chart key, and the role's key in per-role maps     #}
+{#                   such as annotations                                    #}
+{#   role            that role's own value subtree                          #}
+{#                                                                         #}
+{# Unlike the macros above, this one is not whitespace-trimmed at its ends: #}
+{# it emits whole lines starting at column 0, and the caller relies on the  #}
+{# trailing newline. #}
+{# ======================================================================== #}
+{% macro modelservice_role(role_name, role) %}
+{% set create = (role.enabled if role.enabled is defined else (role.replicas | default(0) | int > 0)) %}
+{# Probe port: whatever the engine binds, which is the --port in this role's
+   engine command (read into <role>.engine.port). Probing anything else would
+   fail on a healthy pod, so this follows the command even when the command is
+   the mistake.
 
-{# Pre-calculate which optional flags are enabled #}
-{% set has_kv_transfer = vllmCommon.kvTransfer is defined and vllmCommon.kvTransfer.enabled -%}
-{% set has_kv_events = vllmCommon.kvEvents is defined and vllmCommon.kvEvents.enabled -%}
-{% set gpu_mem_util = model.gpuMemoryUtilization | float -%}
+   On decode the routing proxy normally bridges servicePort -> engine port;
+   with the proxy disabled nothing does, and the command has to bind
+   servicePort itself. On prefill the chart never injects the proxy at all, so
+   the engine's own port is what the probes -- and the decode sidecar doing P/D
+   disaggregation -- reach prefill on, which is why a prefill command should
+   bind the service port. Either way the render pipeline warns when the command
+   does not, rather than silently probing a port nobody listens on. #}
+{% set effective_port = role.engine.port | default(engine.servicePort, true) -%}
+{{ role_name }}:
+  create: {{ create | lower }}
+{% if create %}
+  replicas: {{ role.replicas }}
 
-{# Custom command provided #}
-{% if standalone.vllm.customCommand is defined and standalone.vllm.customCommand is not none -%}
-{{ preprocess_script }}; {{ standalone.vllm.customCommand }}
-{%- if has_kv_transfer %} \
-  --kv-transfer-config '{{ build_kv_transfer_config() }}'
-{%- endif %}
-{%- if has_kv_events %} \
-  --kv-events-config '{{ build_kv_events_config() }}'
-{%- endif %}
-{%- else -%}
-{# Use default vllm serve command -- uses container env vars at runtime #}
-{% set has_enforce_eager = vllmCommon.flags.enforceEager | default(false) -%}
-{% set has_disable_log_requests = vllmCommon.flags.disableLogRequests | default(false) -%}
-{% set has_disable_uvicorn = vllmCommon.flags.disableUvicornAccessLog | default(false) -%}
-{% set has_no_prefix_caching = vllmCommon.flags.noPrefixCaching | default(false) -%}
-{% set has_enable_prefix_caching = vllmCommon.flags.enablePrefixCaching | default(false) -%}
-{{ preprocess_script }}; vllm serve {{ model_serve_ref('standalone') }} \
-  --host {{ vllmCommon.host | default('0.0.0.0') }} \
-  --served-model-name {{ model.name }} \
-  --port $VLLM_INFERENCE_PORT \
-  --block-size $VLLM_BLOCK_SIZE \
-  --max-model-len $VLLM_MAX_MODEL_LEN \
-  --load-format $VLLM_LOAD_FORMAT
-{%- if gpu_mem_util > 0 %} \
-  --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL
-{%- endif %}
-{%- set tp_size = standalone.parallelism.tensor | int %}
-{%- if tp_size > 0 %} \
-  --tensor-parallel-size $VLLM_TENSOR_PARALLELISM
-{%- endif %}
-{%- if model.maxNumSeq is defined and model.maxNumSeq %} \
-  --max-num-seq $VLLM_MAX_NUM_SEQ
-{%- endif %}
-{%- if has_no_prefix_caching %} \
-  --no-enable-prefix-caching
-{%- endif %}
-{%- if has_enable_prefix_caching %} \
-  --enable-prefix-caching
-{%- endif %}
-{%- if has_enforce_eager %} \
-  --enforce-eager
-{%- endif %}
-{%- if has_disable_log_requests %} \
-  --no-enable-log-requests
-{%- endif %}
-{%- if has_disable_uvicorn %} \
-  --disable-uvicorn-access-log
-{%- endif %} \
-  --model-loader-extra-config "$LLMDBENCH_VLLM_COMMON_MODEL_LOADER_EXTRA_CONFIG"
-{%- if vllmCommon.flags.chatTemplate is defined and vllmCommon.flags.chatTemplate %} \
-  --chat-template '{{ vllmCommon.flags.chatTemplate }}'
-{%- endif %}
-{%- if vllmCommon.flags.chatTemplateContentFormat is defined and vllmCommon.flags.chatTemplateContentFormat %} \
-  --chat-template-content-format {{ vllmCommon.flags.chatTemplateContentFormat }}
-{%- endif %}
-{%- if has_kv_transfer %} \
-  --kv-transfer-config '{{ build_kv_transfer_config() }}'
-{%- endif %}
-{%- if has_kv_events %} \
-  --kv-events-config '{{ build_kv_events_config() }}'
-{%- endif %}
-{%- if standalone.vllm.additionalFlags is defined %}
-{% for flag in standalone.vllm.additionalFlags %} \
-  {{ flag }}
-{%- endfor %}
-{%- endif %}
-{%- endif %}
-{%- endmacro %}
+{% if role.autoscaling is defined %}
+  autoscaling:
+    enabled: {{ role.autoscaling.enabled | lower }}
+{% if role.autoscaling.minReplicas is defined %}
+    minReplicas: {{ role.autoscaling.minReplicas }}
+{% endif %}
+{% if role.autoscaling.maxReplicas is defined %}
+    maxReplicas: {{ role.autoscaling.maxReplicas }}
+{% endif %}
+{% endif %}
+
+{% if role.nodeSelector is defined and role.nodeSelector %}
+  nodeSelector:
+{{ role.nodeSelector | toyaml | indent(4, true) }}
+{% endif %}
+
+{% if role.schedulerName is defined %}
+  schedulerName: {{ role.schedulerName }}
+{% endif %}
+
+{% set priority = role.priorityClassName | default(engine.priorityClassName | default('')) %}
+{% if priority and priority != 'none' %}
+  priorityClassName: {{ priority }}
+{% endif %}
+
+{# Devices one replica is given. This is a Kubernetes fact, not an engine one:
+   the kubelet grants devices before the engine process exists, so it is said in
+   Kubernetes' own vocabulary and never inferred from a command line.
+
+     <role>.resources.limits.<accelerator resource>  written as Kubernetes
+       v (if unset)
+     <role>.accelerator.count                        shorthand, per role
+       v (if unset)
+     accelerator.count                               shorthand, plan-wide
+       v (if unset)
+     <role>.parallelism.tensor x dataLocal           what the chart was given
+
+   Mirrored by ``effective_accelerator_count`` in
+   llmdbenchmark/parser/cluster_resource_resolver.py. #}
+{% set accel_resource = (role.accelerator.resource if role.accelerator is defined and role.accelerator.resource is defined else accelerator.resource | default('')) %}
+{% set stated_devices = role.resources.limits[accel_resource] if (accel_resource and role.resources.limits is defined and role.resources.limits[accel_resource] is defined) else none %}
+{% set chart_gpus = (role.parallelism.tensor | int) * (role.parallelism.dataLocal | int) %}
+{% set shorthand_gpus = (role.accelerator.count | int) if (role.accelerator is defined and role.accelerator.count is defined) else ((accelerator.count | int) if accelerator.count is defined else chart_gpus) %}
+{% set accel_count = (stated_devices | int) if stated_devices is not none else shorthand_gpus %}
+{% if accel_count > 0 %}
+{% set accel_type = role.acceleratorType if role.acceleratorType is defined else (standalone.acceleratorType if standalone.acceleratorType is defined else {}) %}
+{% if accel_type and accel_type.labelKey is defined %}
+  acceleratorTypes:
+    labelKey: {{ accel_type.labelKey }}
+    labelValues:
+{% if accel_type.labelValues is defined %}
+{% for value in accel_type.labelValues %}
+    - "{{ value }}"
+{% endfor %}
+{% elif accel_type.labelValue is defined %}
+    - "{{ accel_type.labelValue }}"
+{% endif %}
+{% endif %}
+{% endif %}
+
+  parallelism:
+    tensor: {{ role.parallelism.tensor }}
+    data: {{ role.parallelism.data }}
+    dataLocal: {{ role.parallelism.dataLocal }}
+    workers: {{ role.parallelism.workers }}
+
+{% if affinity is defined and affinity.enabled %}
+  affinity:
+{% if affinity.nodeSelector is defined and affinity.nodeSelector %}
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+{% for key, value in affinity.nodeSelector.items() %}
+          - key: {{ key }}
+            operator: In
+            values:
+            - "{{ value }}"
+{% endfor %}
+{% endif %}
+{% if affinity.podAffinity is defined and affinity.podAffinity %}
+    podAffinity:
+{{ affinity.podAffinity | toyaml | indent(6) }}
+{% endif %}
+{% if affinity.podAntiAffinity is defined and affinity.podAntiAffinity %}
+    podAntiAffinity:
+{{ affinity.podAntiAffinity | toyaml | indent(6) }}
+{% endif %}
+{% endif %}
+
+{% if annotations is defined and annotations.common is defined and annotations.common %}
+  annotations:
+{% for key, value in annotations.common.items() %}
+    {{ key }}: "{{ value }}"
+{% endfor %}
+{% endif %}
+
+{% if annotations is defined and annotations[role_name] is defined and annotations[role_name].pod is defined and annotations[role_name].pod %}
+  podAnnotations:
+{% for key, value in annotations[role_name].pod.items() %}
+    {{ key }}: "{{ value }}"
+{% endfor %}
+{% endif %}
+
+{% if role.tolerations is defined and role.tolerations %}
+  tolerations:
+{{ role.tolerations | toyaml | indent(4, first=True) }}
+{% endif %}
+
+{% if role.accelerator is defined %}
+  accelerator:
+{% if role.accelerator.type is defined %}
+    type: {{ role.accelerator.type }}
+{% endif %}
+{% if dra is defined and dra.enabled is defined %}
+    dra: {{ dra.enabled | lower }}
+{% endif %}
+{% endif %}
+
+{% if role.resourceClaims is defined and role.resourceClaims %}
+  resourceClaims:
+{{ role.resourceClaims | toyaml | indent(4, first=True) }}
+{% endif %}
+
+{% if role.podSecurityContext is defined and role.podSecurityContext %}
+  podSecurityContext:
+{{ role.podSecurityContext | toyaml | indent(4, first=True) }}
+{% endif %}
+
+{# Pod-level extraConfig. The chart splices this into the PodSpec via
+   `llm-d-modelservice.modelPod` (.pdSpec.extraConfig), which is where
+   PodSpec-scoped fields such as `imagePullSecrets` must go -- the
+   container-level `extraConfig` further down lands inside the engine
+   container, where the kubelet would never read them. #}
+{% set pod_extra = role.extraPodConfig | default({}, true) %}
+{% if (engine.pullSecret is defined and engine.pullSecret) or pod_extra %}
+  extraConfig:
+{% if engine.pullSecret is defined and engine.pullSecret %}
+    imagePullSecrets:
+    - name: {{ engine.pullSecret }}
+{% endif %}
+{% if pod_extra %}
+{{ pod_extra | toyaml | indent(4, first=True) }}
+{% endif %}
+{% endif %}
+
+{# LWS / Multinode specific options #}
+{% if role.hostIPC is defined %}
+  hostIPC: {{ role.hostIPC | lower }}
+{% endif %}
+{% if role.hostPID is defined %}
+  hostPID: {{ role.hostPID | lower }}
+{% endif %}
+{% if role.enableServiceLinks is defined %}
+  enableServiceLinks: {{ role.enableServiceLinks | lower }}
+{% endif %}
+{% if role.terminationGracePeriodSeconds is defined %}
+  terminationGracePeriodSeconds: {{ role.terminationGracePeriodSeconds }}
+{% endif %}
+{% if role.subGroupPolicy is defined %}
+  subGroupPolicy:
+{{ role.subGroupPolicy | toyaml | indent(4) }}
+{% endif %}
+{% if role.subGroupExclusiveTopology is defined %}
+  subGroupExclusiveTopology: {{ role.subGroupExclusiveTopology | lower }}
+{% endif %}
+
+{# Init containers.  The version_resolver expands `imageKey` into `image`
+   and resolves any `:auto` tag before this template runs; this loop only
+   has to backfill the case where neither field was set. Propagate core env
+   vars so preprocess scripts have access to port numbers, model parameters,
+   and parallelism settings (needed for NCCL/HCA detection at pod runtime). #}
+{% if role.initContainers is defined and role.initContainers %}
+  initContainers:
+{% for ic in role.initContainers %}
+{% if not ic.image %}
+{% set _ = ic.update({'image': images.benchmark.repository ~ ':' ~ images.benchmark.tag}) %}
+{% endif %}
+{% endfor %}
+{% for ic in role.initContainers %}
+{{ render_init_container(ic, role_name) | indent(4, true) }}
+{% endfor %}
+{% endif %}
+
+{# Main containers #}
+  containers:
+  - name: "{{ role.engine.containerName | default('modelserver', true) }}"
+    image: "{{ role.engine.image.repository }}:{{ role.engine.image.tag }}"
+    imagePullPolicy: {{ role.engine.imagePullPolicy | default(role.engine.image.pullPolicy) | default('IfNotPresent') }}
+    mountModelVolume: {{ role.mountModelVolume | lower }}
+{% set model_command = role.engine.modelCommand | default('custom') %}
+    modelCommand: {{ model_command }}
+{% if model_command == 'custom' %}
+    command:
+      - {{ engine.shell }}
+      - '-c'
+    args:
+      - |
+{{ render_engine_command(role_name) | indent(8, first=True) }}
+{% elif model_command == 'imageDefault' and role.engine.args is defined and role.engine.args %}
+    args:
+{{ role.engine.args | toyaml | indent(6, true) }}
+{% endif %}
+    env:
+{{ build_ms_env_vars(role_name) | indent(6, true) }}
+{% if role.ports is defined and role.ports %}
+    ports:
+{{ role.ports | toyaml | indent(6, true) }}
+{% elif role.extraContainerConfig is defined and role.extraContainerConfig.ports is defined %}
+    ports:
+{% for port in role.extraContainerConfig.ports %}
+      - containerPort: {{ port.containerPort }}
+{% if port.name is defined %}
+        name: {{ port.name }}
+{% endif %}
+        protocol: {{ port.protocol | default('TCP') }}
+{% endfor %}
+{% endif %}
+    resources:
+      limits:
+        memory: {{ role.resources.limits.memory }}
+        cpu: "{{ role.resources.limits.cpu }}"
+{% if accel_resource and role.resources.limits is defined and role.resources.limits[accel_resource] is defined %}
+        {{ accel_resource }}: "{{ role.resources.limits[accel_resource] }}"
+{% elif accel_resource and accel_count > 0 and accelerator.type != 'cpu' %}
+        {{ accel_resource }}: "{{ accel_count }}"
+{% endif %}
+{% set eph_storage = role.ephemeralStorage | default(engine.ephemeralStorage) %}
+{% set eph_resource = engine.ephemeralStorageResource %}
+{% if eph_storage and eph_resource %}
+        {{ eph_resource }}: "{{ eph_storage }}"
+{% endif %}
+{% set net_resource = role.networkResource | default(engine.networkResource) %}
+{% set net_nr = role.networkNr | default(engine.networkNr) %}
+{% if net_resource and net_nr %}
+        {{ net_resource }}: "{{ net_nr }}"
+{% endif %}
+{% if role.resources.limits is defined and role.resources.limits.claims is defined %}
+      claims:
+{{ role.resources.limits.claims | toyaml | indent(8) }}
+{% endif %}
+      requests:
+        memory: {{ role.resources.requests.memory }}
+        cpu: "{{ role.resources.requests.cpu }}"
+{% if accel_resource and role.resources.requests is defined and role.resources.requests[accel_resource] is defined %}
+        {{ accel_resource }}: "{{ role.resources.requests[accel_resource] }}"
+{% elif accel_resource and accel_count > 0 and accelerator.type != 'cpu' %}
+        {{ accel_resource }}: "{{ accel_count }}"
+{% endif %}
+{% if eph_storage and eph_resource %}
+        {{ eph_resource }}: "{{ eph_storage }}"
+{% endif %}
+{% if net_resource and net_nr %}
+        {{ net_resource }}: "{{ net_nr }}"
+{% endif %}
+    extraConfig:
+      startupProbe:
+        httpGet:
+          path: {{ role.probes.startup.path | default(role.engine.healthPath, true) }}
+          port: {{ role.probes.startup.port | default(effective_port) }}
+        failureThreshold: {{ role.probes.startup.failureThreshold }}
+        initialDelaySeconds: {{ role.probes.startup.initialDelaySeconds }}
+        periodSeconds: {{ role.probes.startup.periodSeconds }}
+        timeoutSeconds: {{ role.probes.startup.timeoutSeconds }}
+      livenessProbe:
+{% if role.probes.liveness.path is defined and role.probes.liveness.path %}
+        httpGet:
+          path: {{ role.probes.liveness.path }}
+          port: {{ role.probes.liveness.port | default(effective_port) }}
+{% else %}
+        tcpSocket:
+          port: {{ role.probes.liveness.port | default(effective_port) }}
+{% endif %}
+        failureThreshold: {{ role.probes.liveness.failureThreshold }}
+        periodSeconds: {{ role.probes.liveness.periodSeconds }}
+{% if role.probes.liveness.timeoutSeconds is defined %}
+        timeoutSeconds: {{ role.probes.liveness.timeoutSeconds }}
+{% endif %}
+      readinessProbe:
+        httpGet:
+          path: {{ role.probes.readiness.path | default(role.engine.healthPath, true) }}
+          port: {{ role.probes.readiness.port | default(effective_port) }}
+        failureThreshold: {{ role.probes.readiness.failureThreshold }}
+        periodSeconds: {{ role.probes.readiness.periodSeconds }}
+{% if role.probes.readiness.timeoutSeconds is defined %}
+        timeoutSeconds: {{ role.probes.readiness.timeoutSeconds }}
+{% endif %}
+{% if role.extraContainerConfig is defined and role.extraContainerConfig %}
+{% set extra_config_without_ports = {} %}
+{% for k, v in role.extraContainerConfig.items() if k != 'ports' %}
+{% set _ = extra_config_without_ports.update({k: v}) %}
+{% endfor %}
+{% if extra_config_without_ports %}
+{{ extra_config_without_ports | toyaml | indent(6, true) }}
+{% endif %}
+{% endif %}
+    volumeMounts:
+{% for mount in engine.volumeMounts %}
+      - name: {{ mount.name }}
+        mountPath: {{ mount.mountPath }}
+{% if mount.subPath is defined %}
+        subPath: {{ mount.subPath }}
+{% endif %}
+{% if mount.readOnly is defined %}
+        readOnly: {{ mount.readOnly | lower }}
+{% endif %}
+{% endfor %}
+{% if role.additionalVolumeMounts is defined %}
+{% for mount in role.additionalVolumeMounts %}
+      - name: {{ mount.name }}
+        mountPath: {{ mount.mountPath }}
+{% if mount.subPath is defined %}
+        subPath: {{ mount.subPath }}
+{% endif %}
+{% if mount.readOnly is defined %}
+        readOnly: {{ mount.readOnly | lower }}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+  volumes:
+{% for volume in engine.volumes %}
+    - name: {{ volume.name }}
+{% if volume.type == 'configMap' %}
+      configMap:
+        name: {{ volume.configMap.name }}
+{% if volume.configMap.defaultMode is defined %}
+        defaultMode: {{ volume.configMap.defaultMode }}
+{% endif %}
+{% elif volume.type == 'emptyDir' %}
+{# Guard against bare `emptyDir:` (renders as YAML null and is rejected by    #}
+{# strict CRDs like LeaderWorkerSet's server-side apply) when neither medium  #}
+{# nor sizeLimit is set. Emit `emptyDir: {}` placeholder in that case.        #}
+{% if volume.emptyDir is defined and (volume.emptyDir.medium is defined or volume.emptyDir.sizeLimit is defined) %}
+      emptyDir:
+{% if volume.emptyDir.medium is defined %}
+        medium: {{ volume.emptyDir.medium }}
+{% endif %}
+{% if volume.emptyDir.sizeLimit is defined %}
+        sizeLimit: {{ volume.emptyDir.sizeLimit }}
+{% endif %}
+{% else %}
+      emptyDir: {}
+{% endif %}
+{% elif volume.type == 'persistentVolumeClaim' %}
+      persistentVolumeClaim:
+        claimName: {{ volume.persistentVolumeClaim.claimName }}
+{% elif volume.type == 'secret' %}
+      secret:
+        secretName: {{ volume.secret.secretName }}
+{% if volume.secret.defaultMode is defined %}
+        defaultMode: {{ volume.secret.defaultMode }}
+{% endif %}
+{% elif volume.type == 'hostPath' %}
+      hostPath:
+        path: {{ volume.hostPath.path }}
+{% if volume.hostPath.type is defined %}
+        type: {{ volume.hostPath.type }}
+{% endif %}
+{% endif %}
+{% endfor %}
+{% if role.additionalVolumes is defined %}
+{% for volume in role.additionalVolumes %}
+    - name: {{ volume.name }}
+{% if volume.type == 'configMap' %}
+      configMap:
+        name: {{ volume.configMap.name }}
+{% if volume.configMap.defaultMode is defined %}
+        defaultMode: {{ volume.configMap.defaultMode }}
+{% endif %}
+{% elif volume.type == 'emptyDir' %}
+{# Guard against bare `emptyDir:` (renders as YAML null and is rejected by    #}
+{# strict CRDs like LeaderWorkerSet's server-side apply) when neither medium  #}
+{# nor sizeLimit is set. Emit `emptyDir: {}` placeholder in that case.        #}
+{% if volume.emptyDir is defined and (volume.emptyDir.medium is defined or volume.emptyDir.sizeLimit is defined) %}
+      emptyDir:
+{% if volume.emptyDir.medium is defined %}
+        medium: {{ volume.emptyDir.medium }}
+{% endif %}
+{% if volume.emptyDir.sizeLimit is defined %}
+        sizeLimit: {{ volume.emptyDir.sizeLimit }}
+{% endif %}
+{% else %}
+      emptyDir: {}
+{% endif %}
+{% elif volume.type == 'persistentVolumeClaim' %}
+      persistentVolumeClaim:
+        claimName: {{ volume.persistentVolumeClaim.claimName }}
+{% elif volume.type == 'secret' %}
+      secret:
+        secretName: {{ volume.secret.secretName }}
+{% if volume.secret.defaultMode is defined %}
+        defaultMode: {{ volume.secret.defaultMode }}
+{% endif %}
+{% elif volume.type == 'hostPath' %}
+      hostPath:
+        path: {{ volume.hostPath.path }}
+{% if volume.hostPath.type is defined %}
+        type: {{ volume.hostPath.type }}
+{% endif %}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{# Monitoring / PodMonitor #}
+{% if role.monitoring is defined and role.monitoring.podmonitor is defined %}
+  monitoring:
+    podmonitor:
+      enabled: {{ role.monitoring.podmonitor.enabled | lower }}
+{% if role.monitoring.podmonitor.enabled %}
+      portName: "{{ role.monitoring.podmonitor.portName }}"
+      path: "{{ role.monitoring.podmonitor.path | default(role.engine.metricsPath, true) }}"
+      interval: "{{ role.monitoring.podmonitor.interval }}"
+{% if role.monitoring.podmonitor.scrapeTimeout is defined %}
+      scrapeTimeout: "{{ role.monitoring.podmonitor.scrapeTimeout }}"
+{% endif %}
+{% if role.monitoring.podmonitor.labels is defined and role.monitoring.podmonitor.labels %}
+      labels:
+{{ role.monitoring.podmonitor.labels | toyaml(8) }}
+{% endif %}
+{% if role.monitoring.podmonitor.annotations is defined and role.monitoring.podmonitor.annotations %}
+      annotations:
+{{ role.monitoring.podmonitor.annotations | toyaml(8) }}
+{% endif %}
+{% if role.monitoring.podmonitor.relabelings is defined and role.monitoring.podmonitor.relabelings %}
+      relabelings:
+{{ role.monitoring.podmonitor.relabelings | toyaml(8) }}
+{% endif %}
+{% if role.monitoring.podmonitor.metricRelabelings is defined %}
+      metricRelabelings:
+{{ role.monitoring.podmonitor.metricRelabelings | toyaml(8) }}
+{% endif %}
+{% endif %}
+{% endif %}
+{% endif %}
+{% endmacro %}

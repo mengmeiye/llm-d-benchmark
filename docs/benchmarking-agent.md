@@ -157,7 +157,7 @@ anyone looks at them.
 The PRD's Recommendation Map default names an `inference-scheduling`
 guide. That specification does not exist in this repository; it was
 renamed upstream to `optimized-baseline`
-(`README.md:104`, `util/test-scenarios.sh:91`). `recommendation_map.yaml`
+(see `README.md`). `recommendation_map.yaml`
 resolves both the Interactive Chat and Batch Throughput rows to
 `guides/optimized-baseline` and records the rename in a comment. If a
 maintainer wants the literal name `inference-scheduling` to resolve, the

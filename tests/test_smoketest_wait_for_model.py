@@ -275,9 +275,11 @@ class TestTimeoutReturnsError:
         assert "3s" in err
         # Names the override knob
         assert "modelReadyTimeout" in err
-        # Suggests checking model-server logs
+        # Suggests checking model-server logs, naming the container the user
+        # has to pass to -c. That name is engine-neutral now ("modelserver"),
+        # so a sglang or TensorRT-LLM stack gets a command that works too.
         assert "kubectl logs" in err
-        assert "vllm" in err
+        assert "-c modelserver" in err
         # And the helper logged the error (so it's visible even if caller
         # ignores the return value).
         logger.log_error.assert_called_once()

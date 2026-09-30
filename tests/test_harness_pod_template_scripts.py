@@ -55,11 +55,15 @@ def _template_values() -> dict[str, Any]:
             "stackName": "model",
         },
         "experiment": {"workspaceDir": "/workspace"},
-        "vllmCommon": {"inferencePort": 8000},
+        # The Service/gateway port the harness dials -- infrastructure, not an
+        # engine parameter, so it lives under `engine` and not in a command.
+        "engine": {"servicePort": 8000},
         "standalone": {
             "enabled": False,
             "launcher": {"enabled": False},
-            "vllm": {"loadFormat": "auto"},
+            # There is no config key for `--load-format`: the loader is selected
+            # by this env var and named in the role's own command.
+            "extraEnvVars": [],
         },
         "fma": {"enabled": False},
         "storage": {"workloadPvc": {"name": "workload-pvc"}},
@@ -109,7 +113,8 @@ def test_harness_pod_receives_configured_time_series_metrics() -> None:
                 "metricsPath": "/metrics",
                 "timeSeriesMetrics": ["vllm:custom_metric"],
             },
-            "decode": {"vllm": {"port": 8000}},
+            # The port decode's engine command binds, recorded by resolve_engines.
+            "decode": {"engine": {"port": 8200}},
             "router": {"monitoring": {}},
         }
     )

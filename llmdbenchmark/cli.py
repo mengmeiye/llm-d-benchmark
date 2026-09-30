@@ -43,6 +43,7 @@ from llmdbenchmark.parser.cli_overrides import (
     is_secret_path,
     parse_cli_overrides,
 )
+from llmdbenchmark.engine import switch_scenario_file
 from llmdbenchmark.parser.render_specification import RenderSpecification
 from llmdbenchmark.exceptions.exceptions import TemplateError, ConfigurationError
 from llmdbenchmark.parser.render_plans import RenderPlans
@@ -216,6 +217,8 @@ def dispatch_cli(args: argparse.Namespace, logger: logging.Logger) -> None:
             "Specification file rendered and validated successfully.",
             emoji="✅",
         )
+
+        _switch_engine(specification_as_dict, args, render_logger)
 
         render_logger.log_debug(
             "Using specification file to fully render templates into complete system stack plans."
@@ -1656,6 +1659,8 @@ def _render_plans_for_experiment(args, logger, setup_overrides=None):
 
     render_logger = plan_logger(logger, config.quiet_plan)
 
+    _switch_engine(specification_as_dict, args, render_logger)
+
     version_resolver = VersionResolver(logger=render_logger, dry_run=args.dry_run)
     cluster_resource_resolver = ClusterResourceResolver(
         logger=render_logger,
@@ -1942,6 +1947,7 @@ def _log_env_overrides(logger, args):
         "LLMDBENCH_WORKSPACE": ("workspace", "--workspace"),
         "LLMDBENCH_BASE_DIR": ("base_dir", "--base-dir"),
         "LLMDBENCH_SPEC": ("specification_file", "--spec"),
+        "LLMDBENCH_ENGINE": ("engine", "--engine"),
         "LLMDBENCH_DESCRIPTION_TEXT": ("run_description", "--run-description"),
         "LLMDBENCH_DESCRIPTION_KEYWORDS": ("run_keywords", "--run-keywords"),
         "LLMDBENCH_TELEMETRY_ENABLED": ("telemetry_enabled", "--telemetry-enabled"),
@@ -2123,6 +2129,41 @@ def _all_flag_forms(flag: str) -> list[str]:
     return _ALIASES.get(flag, [flag])
 
 
+def _switch_engine(specification_as_dict: dict, args, logger) -> None:
+    """Point `scenario_file.path` at a copy switched to `--engine`, in place.
+
+    A scenario states its engine as a verbatim launch command and may carry
+    another engine's command commented out beside it, tagged `# @engine <name>`.
+    This performs that switch -- uncommenting the tagged groups and dropping the
+    definitions they replace -- into the run's plan directory, so the scenario
+    in the repo is never modified and the switched copy is kept with the run's
+    other artifacts.
+
+    Asking for the engine the scenario already launches is a no-op. Asking for
+    one it neither launches nor offers is an error: the alternative has to exist
+    in the file, because only the file knows which companion keys move with it.
+    """
+    engine = (getattr(args, "engine", None) or "").strip()
+    if not engine:
+        return
+    scenario = specification_as_dict["scenario_file"]["path"]
+    try:
+        switched = switch_scenario_file(scenario, engine, Path(config.plan_dir))
+    except (OSError, ValueError) as exc:
+        logger.log_error(f"--engine {engine}: {exc}")
+        sys.exit(1)
+    if switched is None:
+        logger.log_info(
+            f"--engine {engine}: already this scenario's engine, nothing to switch."
+        )
+        return
+    specification_as_dict["scenario_file"]["path"] = str(switched)
+    logger.log_info(
+        f"Engine switched to {engine}: rendering {switched}",
+        emoji="🔀",
+    )
+
+
 def _extract_workspace_from_scenario(
     specification_file: Path,
     base_dir: Path,
@@ -2235,6 +2276,11 @@ def cli() -> None:
         help="Specification file for the experiment.",
     )
     parser.add_argument(
+        "--engine",
+        default=env("LLMDBENCH_ENGINE"),
+        help="Run the scenario on this inference engine instead of the one its launch command states. The scenario must carry that engine's command commented out and tagged `# @engine <name>` -- `util/scenario-inventory.py --alternative <name>` lists the scenarios that do. The switch is made into the run's plan directory; the scenario file is not modified. Naming the engine the scenario already launches does nothing (env: LLMDBENCH_ENGINE).",
+    )
+    parser.add_argument(
         "--dry-run",
         "-n",
         action="store_true",
@@ -2325,6 +2371,11 @@ def cli() -> None:
         help="Specification file for the experiment. Accepts a bare name (e.g. 'gpu'), "
         "a category/name (e.g. 'guides/optimized-baseline'), or a full path. "
         "Bare names are searched in config/specification/**/<name>.yaml.j2.",
+    )
+    benchmark_parser.add_argument(
+        "--engine",
+        default=argparse.SUPPRESS,
+        help="Run the scenario on this inference engine instead of the one its launch command states. The scenario must carry that engine's command commented out and tagged `# @engine <name>` -- `util/scenario-inventory.py --alternative <name>` lists the scenarios that do. The switch is made into the run's plan directory; the scenario file is not modified. Naming the engine the scenario already launches does nothing (env: LLMDBENCH_ENGINE).",
     )
     benchmark_parser.add_argument(
         "--non-admin",
@@ -2514,8 +2565,8 @@ def cli() -> None:
     # Each invocation gets its own timestamped sub-directory inside the workspace.
     # Priority: --workspace CLI / LLMDBENCH_WORKSPACE env > scenario workDir
     #           > auto-generated temp dir.
-    # workDir is the YAML equivalent of LLMDBENCH_CONTROL_WORK_DIR from the
-    # old bash scenarios.
+    # A scenario's `workDir` is where its results land when neither the flag
+    # nor the environment variable names a workspace.
     if args.workspace:
         overall_workspace = Path(args.workspace)
     else:

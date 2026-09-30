@@ -27,7 +27,6 @@ scenario:
       #     # cloud.google.com/gke-accelerator: nvidia-h100-80gb  # GKE
       # -------------------------------------------------------------------------
       # Model Configuration
-      # Corresponds to: LLMDBENCH_DEPLOY_MODEL_LIST="Qwen/Qwen3-30B-A3B-Thinking-2507"
       # Alternative models (commented out in original):
       #   - Qwen/Qwen3-0.6B
       #   - facebook/opt-125m
@@ -35,15 +34,16 @@ scenario:
       #   - deepseek-ai/DeepSeek-R1-0528
       # -------------------------------------------------------------------------
       model:
-        name: Qwen/Qwen3-30B-A3B-Thinking-2507
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen3-30b-a3b-thinking-2507
-        path: models/Qwen/Qwen3-30B-A3B-Thinking-2507
-        huggingfaceId: Qwen/Qwen3-30B-A3B-Thinking-2507
         size: 1Ti
-        maxModelLen: 262144
-        blockSize: 64
-        gpuMemoryUtilization: 0.95
-        cacheBase: /model-cache
+        # maxModelLen / blockSize / gpuMemoryUtilization are deliberately NOT
+        # set here: they are pure engine parameters, so they are stated in
+        # decode's launch command below and read back out for the capacity
+        # planner.
 
       # -------------------------------------------------------------------------
       # Storage Configuration
@@ -56,10 +56,19 @@ scenario:
           # storageClassName: shared-vast
           # storageClassName: ocs-storagecluster-cephfs
 
-      vllmCommon:
-#        ucxTls: "rc,sm,cuda_ipc,cuda_copy,tcp"
-#        ucxTls: "cuda,rc,sm"
-#        ucxNetDevices: "eth0"   # pin KV transfer when secondary NICs are attached
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the network facts only the
+        # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+        # library path. Engine commands never mention it.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
+        # The UCX settings for the NIXL data plane, if this stack ever needs
+        # them, are container environment variables and belong in the role's
+        # extraEnvVars -- UCX reads them from the environment, not the command:
+        #   - name: UCX_TLS
+        #     value: "rc,sm,cuda_ipc,cuda_copy,tcp"
+        #   - name: UCX_NET_DEVICES
+        #     value: "eth0"   # pin KV transfer when secondary NICs are attached
         networkResource: "auto"   # auto-detect from cluster nodes
         networkNr: "1"            # number of network devices
 
@@ -71,10 +80,8 @@ scenario:
             type: emptyDir
             emptyDir:
               medium: Memory
-              # Corresponds to: LLMDBENCH_VLLM_COMMON_SHM_MEM (using default 16Gi)
               sizeLimit: 16Gi
 
-        # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_VOLUME_MOUNTS
         volumeMounts:
           - name: shared-config
             mountPath: /shared-config
@@ -85,9 +92,9 @@ scenario:
 # for the NIXL KV-transfer data plane, and it chooses independently of
 # VLLM_NIXL_SIDE_CHANNEL_HOST (which is pinned to the pod IP). If a rail cannot
 # carry that traffic the handshake fails (NIXL_ERR_REMOTE_DISCONNECT /
-# NIXL_ERR_NOT_FOUND) and requests hang instead of erroring, so pin
-# vllmCommon.ucxNetDevices when enabling this -- "eth0" keeps KV transfer on the
-# pod network.
+# NIXL_ERR_NOT_FOUND) and requests hang instead of erroring, so set
+# UCX_NET_DEVICES in the role's extraEnvVars when enabling this -- "eth0" keeps
+# KV transfer on the pod network.
 # Alternatively, --set 'annotations.prefill.pod."k8s.v1.cni.cncf.io/networks"'=multi-nic-compute,'annotations.decode.pod."k8s.v1.cni.cncf.io/networks"'=multi-nic-compute
       annotations:
         prefill:
@@ -236,20 +243,41 @@ scenario:
       # -------------------------------------------------------------------------
       decode:
         replicas: 2
-        vllm:
-          customCommand: |
-            export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
-            export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-            vllm serve $MODEL_SERVE_REF \
+        # The launch command, verbatim -- the same line you would run by hand.
+        # It reaches the container unchanged, so every flag here is read by vLLM
+        # and none of them by llm-d-benchmark, which reads only what decides
+        # Kubernetes objects: `--port` (container port, probes, the routing
+        # sidecar's upstream) and the capacity numbers the pre-deploy check
+        # needs.
+        #
+        # Decode binds 8200: the routing sidecar the chart injects on decode pods
+        # owns `engine.servicePort` (8000) and forwards here.
+        #
+        # The agentic flags below -- reasoning parser, tool-call parser, pinned
+        # generation config -- are the point of this guide, and they are exactly
+        # as vLLM's own documentation spells them. Nothing translates them.
+        # Devices per replica -- a Kubernetes fact, not a reading of the
+        # command. The kubelet grants accelerators before the engine process
+        # exists, so the count is stated here in Kubernetes' vocabulary and the
+        # chart turns it into the pod's device request. It has to agree with the
+        # width the command gives the engine (`--tensor-parallel-size 2` below),
+        # or the engine starves at startup. To request a count the parallelism
+        # widths do not describe, set `resources.limits.<accelerator resource>`.
+        parallelism:
+          tensor: 2
+
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3-30B-A3B-Thinking-2507 \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_METRICS_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+            --port 8200 \
+            --max-model-len 262144 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 2 \
+            --block-size 64 \
+            --gpu-memory-utilization 0.95 \
+            --dtype bfloat16 \
             --no-enable-log-requests \
             --reasoning-parser qwen3 \
             --enable-auto-tool-choice \
@@ -268,11 +296,6 @@ scenario:
               - name: shared-config
                 mountPath: /shared-config
 
-        parallelism:
-          tensor: 2
-          data: 1
-          dataLocal: 1
-          workers: 1
 
         # Resource configuration
         resources:
@@ -285,15 +308,15 @@ scenario:
 
         # -----------------------------------------------------------------------
         # Extra Environment Variables
-        # Only PYTHONHASHSEED and LMCACHE_MAX_LOCAL_CPU_SIZE are explicitly set;
-        # other vars (UCX_TLS, VLLM_NIXL_*, etc.) are auto-populated by the
-        # preprocess script at pod runtime.
+        # No environment variables for this scenario. Nothing is auto-populated:
+        # whatever the engine -- or a library beneath it (UCX_*, NCCL_*,
+        # VLLM_NIXL_*, ...) -- needs must be listed here, the same way the
+        # engine command lists its own flags.
         # -----------------------------------------------------------------------
         extraEnvVars: []
 
         # -----------------------------------------------------------------------
         # Extra Container Configuration
-        # Corresponds to: LLMDBENCH_VLLM_COMMON_EXTRA_CONTAINER_CONFIG
         # -----------------------------------------------------------------------
         extraContainerConfig:
           ports:
@@ -313,13 +336,11 @@ scenario:
 
         # -----------------------------------------------------------------------
         # Additional Volume Mounts
-        # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_VOLUME_MOUNTS
         # -----------------------------------------------------------------------
         additionalVolumeMounts: []
 
         # -----------------------------------------------------------------------
         # Additional Volumes
-        # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_VOLUMES
         # -----------------------------------------------------------------------
         additionalVolumes: []
 

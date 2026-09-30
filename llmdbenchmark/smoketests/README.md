@@ -96,8 +96,12 @@ The base class (`validate_role_pods`) handles the common checks that apply to ev
 - Routing proxy present or absent based on `routing.proxy.enabled`
 - Volumes and volume mounts (dshm, shared-config, kubeconfig, etc.)
 - Startup/liveness/readiness probe paths, thresholds, and periods
-- vLLM command-line flags (enforce-eager, kv-transfer-config, block-size, max-model-len, etc.)
-- VLLM_IS_DECODE / VLLM_IS_PREFILL role markers
+- The scenario's engine command, rendered into the container **verbatim** -- one
+  comparison instead of per-flag assertions, so it holds for vLLM, SGLang and
+  TensorRT-LLM alike and catches a dropped line continuation, an eaten quote or
+  a `${...}` left unsubstituted
+- The engine the command launches, and that it runs in the resolved serving
+  container
 
 ### Registered validators
 
@@ -139,7 +143,7 @@ Results are aggregated into a `SmoketestReport` that provides a summary (`passed
 llmdbenchmark --spec gpu smoketest -p my-namespace
 
 # Just the config validation step
-llmdbenchmark --spec optimized-baseline smoketest -p my-namespace -s 2
+llmdbenchmark --spec guides/optimized-baseline smoketest -p my-namespace -s 2
 
 # Just the health check
 llmdbenchmark --spec pd-disaggregation smoketest -p my-namespace -s 0

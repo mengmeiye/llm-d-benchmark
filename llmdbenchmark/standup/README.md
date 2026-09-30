@@ -11,7 +11,7 @@ Steps are registered in `steps/__init__.py` via `get_standup_steps()` and execut
 | 00 | `EnsureInfraStep` | global | Validate system dependencies (kubectl, helm, etc.) and print cluster summary banner |
 | 02 | `AdminPrerequisitesStep` | global | Install cluster-level admin prerequisites (CRDs, gateways, LeaderWorkerSet, SCCs) |
 | 03 | `WorkloadMonitoringStep` | global | Validate cluster resources and configure workload monitoring (PodMonitors). Installs WVA controller once per `wva.namespace` across all rendered stacks. |
-| 04 | `ModelNamespaceStep` | global | Prepare the model namespace. Creates one shared model PVC (idempotent across stacks) and one download Job per stack with `modelservice.uriProtocol: pvc` (or standalone). Jobs are launched in parallel (phase 1) and waited on in turn (phase 2), so total wall time ~ slowest model. Every stack's weights live in a distinct `model.path` subdirectory on the shared PVC. |
+| 04 | `ModelNamespaceStep` | global | Prepare the model namespace. Creates one shared model PVC (idempotent across stacks) and one download Job per stack on a PVC-backed `modelservice.uriProtocol` (`pvc+hf`, `pvc`) or standalone. Jobs are launched in parallel (phase 1) and waited on in turn (phase 2), so total wall time ~ slowest model. Every stack's weights live in a distinct `model.path` subdirectory on the shared PVC. |
 | 05 | `FMADeployStep` | global | Deploy FMA controllers |
 | 05 | `StandaloneDeployStep` | global | Deploy vLLM as standalone Kubernetes Deployments and Services |
 | 06 | `DeploySetupStep` | global | Set up Helm repos and deploy gateway infrastructure for modelservice mode |
@@ -38,10 +38,11 @@ On clusters where users cannot provision PersistentVolumeClaims, pass
   fully PVC-less flow.
 - Scenarios with `storage.hostPath.enabled: true` fail fast — hostPath
   creates PV/PVC objects and contradicts the flag.
-- Scenario `customCommand`s should serve `$MODEL_SERVE_REF` (exported to
-  every serving pod) instead of hardcoding `/model-cache/...` paths -- it
-  resolves to the staged PVC path in PVC mode and the HF model ID in hf
-  mode, so the same scenario works under both.
+- A role's `engine.command` names the model by its plain Hugging Face id,
+  which is what makes the same scenario work under both protocols: `pvc+hf`
+  stages a hub cache on the PVC and points the pod's `HF_HUB_CACHE` at it,
+  `hf` lets the engine resolve the same id over the network. A command that
+  hardcodes a `/model-cache/...` path does not survive the switch.
 - Guide/kustomize deployments that declare their own PVCs inside guide
   manifests are out of scope for this flag.
 - Note: the `plan` subcommand previews the un-switched scenario (`--no-pvc`
@@ -139,7 +140,7 @@ Contains scripts executed during standalone deployment setup:
 | File | Description |
 |------|-------------|
 | `set_llmdbench_environment.py` | Network environment detection (IP addresses, RDMA/IB devices, GID mapping) for NIXL connectivity |
-| `standalone-preprocess.py` | Serialize tensorizer files if needed; runs as a pre-deployment step |
+| `vllm-load-format-preprocess.py` | Serialize tensorizer files if needed; runs as a pre-deployment step |
 
 ## Files
 
@@ -148,7 +149,7 @@ standup/
 +-- __init__.py              -- Package marker
 +-- preprocess/
 |   +-- set_llmdbench_environment.py
-|   +-- standalone-preprocess.py
+|   +-- vllm-load-format-preprocess.py
 +-- steps/
     +-- __init__.py           -- Step registry (get_standup_steps)
     +-- step_00_ensure_infra.py

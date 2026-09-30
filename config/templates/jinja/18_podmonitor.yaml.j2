@@ -39,7 +39,8 @@ spec:
   podMetricsEndpoints:
 {% if _fma_enabled %}
   - interval: {{ monitoring.scrapeInterval | default('30s') }}
-    path: {{ monitoring.metricsPath | default('/metrics') }}
+{# Engine knowledge, from the resolved spec -- see 17_standalone-podmonitor. #}
+    path: {{ monitoring.metricsPath | default(decode.engine.metricsPath, true) | default('/metrics', true) }}
     relabelings:
       - sourceLabels: [__meta_kubernetes_pod_container_name]
         action: keep
@@ -58,7 +59,8 @@ spec:
 {% endif %}
 {% else %}
   - port: {{ monitoring.podmonitor.portName | default('metrics') }}
-    path: {{ monitoring.metricsPath | default('/metrics') }}
+{# Engine knowledge, from the resolved spec -- see 17_standalone-podmonitor. #}
+    path: {{ monitoring.metricsPath | default(decode.engine.metricsPath, true) | default('/metrics', true) }}
     interval: {{ monitoring.scrapeInterval | default('30s') }}
 {% if _wva_enabled %}
     relabelings:

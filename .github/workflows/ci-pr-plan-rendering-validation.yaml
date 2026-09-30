@@ -4,13 +4,70 @@ on:
   pull_request:
 
 jobs:
+  # Renders every scenario -- no cluster, no accelerator -- across the deploy
+  # methods and engines this repo claims to support.
+  #
+  # `util/test-scenarios.sh --plan` is this job: render only, ~2s per scenario,
+  # and it exits non-zero if any render fails. What runs is read from
+  # config/scenarios/ by util/scenario-inventory.py, so adding a scenario, or a
+  # `# @engine` block to an existing one, is covered with no edit here.
+  #
+  # Why the matrix legs are per (method, engine) rather than one big run:
+  #
+  #   * Method: a scenario renders under the method(s) it enables itself, and
+  #     almost none of them enable standalone. Standalone has its own
+  #     Deployment/Service/PodMonitor templates and no routing sidecar, so
+  #     without an explicit `-t standalone` leg those templates were exercised
+  #     for a single scenario at PR time.
+  #   * Engine: `--engine NAME` switches in a scenario's commented-out
+  #     `# @engine NAME` command, and it switches in exactly one engine per run
+  #     (see `switch_for` in the script). Asking for two engines in one leg would
+  #     therefore test the first and silently skip the second.
+  #
+  # Engine legs are cheap because they are narrow: only the scenarios that carry
+  # a `# @engine` block are selected, which today is two. They are worth a leg
+  # anyway -- switching engines is meant to be switching one command, and
+  # everything that claim rests on is decided at render time: the image picked
+  # from the parsed launcher, the port read from `--port`, the health and metrics
+  # paths taken from the engine spec.
+  #
+  # NOTE: --plan leaves chart versions at "auto", so the post-render
+  # `helmfile template` check cannot run here and logs an "improper constraint"
+  # error that is not a scenario failure. Chart values are covered by the standup
+  # jobs in ci-pr-benchmark.yaml.
   render-templates:
-    name: Render All Templates
+    name: "Render (${{ matrix.label }})"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
-    env:
-      LLMDBENCH_WORKSPACE: /tmp/render-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each scenario with the method(s) and engine it declares -- what this
+          # job checked before the matrix existed, widened to every scenario.
+          - label: "as declared"
+            args: ""
+            min: 30
+          # The same scenarios under standalone. Deliberately no `--engine` here:
+          # it would filter out the simulator scenarios, and cicd/kind is the one
+          # the e2e job actually stands up.
+          - label: "standalone"
+            args: "--method standalone"
+            min: 30
+          # The `# @engine` switch, per engine, under both methods.
+          - label: "standalone / sglang"
+            args: "--method standalone --engine sglang"
+            min: 2
+          - label: "standalone / trtllm"
+            args: "--method standalone --engine trtllm"
+            min: 2
+          - label: "modelservice / sglang"
+            args: "--method modelservice --engine sglang"
+            min: 2
+          - label: "modelservice / trtllm"
+            args: "--method modelservice --engine trtllm"
+            min: 2
 
     steps:
       - name: Checkout Code
@@ -27,37 +84,37 @@ jobs:
         run: |
           ./install.sh -y 2>&1
 
-      - name: Render all specification templates
+      # One invocation, checked two ways: that every render passed (the script's
+      # own exit code) and that there were renders to pass. test-scenarios.sh
+      # reports "0 checks" and exits 0 when its filters select nothing, so a leg
+      # whose scenarios disappeared would otherwise stay green while testing
+      # nothing at all.
+      #
+      # The two broad legs carry a floor well under their real count (45 and 41
+      # today), so adding or removing a scenario does not fail the build. The
+      # engine legs are the ones actually at risk -- they exist only as long as
+      # some scenario carries a `# @engine` block, and exactly two do -- so their
+      # floor is that count exactly. Dropping one of those blocks therefore fails
+      # here by design: engine coverage is the point of the layout, and losing
+      # half of it should take a deliberate edit to this file rather than
+      # happening quietly.
+      - name: Render scenarios
         run: |
-          FAILED=0
-          PASSED=0
-          SPECS=$(find config/specification -name "*.yaml.j2" | sort)
+          log="${RUNNER_TEMP}/render.log"
+          set -o pipefail
+          set +e
+          ./util/test-scenarios.sh --plan --all --no-skip \
+            ${{ matrix.args }} \
+            --workspace "${RUNNER_TEMP}/render-check" \
+            render-check 2>&1 | tee "$log"
+          rc=$?
+          set -e
 
-          for spec_path in $SPECS; do
-            # Strip config/specification/ prefix and .yaml.j2 suffix
-            spec_name="${spec_path#config/specification/}"
-            spec_name="${spec_name%.yaml.j2}"
-
-            echo ""
-            echo "=========================================="
-            echo "Rendering: $spec_name"
-            echo "=========================================="
-
-            if llmdbenchmark --spec "$spec_name" --dry-run plan -p render-check 2>&1; then
-              echo "  ✅ $spec_name"
-              PASSED=$((PASSED + 1))
-            else
-              echo "  ❌ $spec_name"
-              FAILED=$((FAILED + 1))
-            fi
-          done
-
-          echo ""
-          echo "=========================================="
-          echo "RESULTS: $PASSED passed, $FAILED failed ($(echo "$SPECS" | wc -l) total)"
-          echo "=========================================="
-
-          if [ "$FAILED" -gt 0 ]; then
-            echo "::error::$FAILED specification(s) failed to render"
+          total=$(sed -n 's/^Total: \([0-9]\{1,\}\) checks.*/\1/p' "$log" | tail -1)
+          total=${total:-0}
+          echo "Rendered ${total} checks (floor for this leg: ${{ matrix.min }})"
+          if [ "$total" -lt "${{ matrix.min }}" ]; then
+            echo "::error::This leg rendered ${total} checks, fewer than its floor of ${{ matrix.min }}. Either the scenarios it selects are gone or its filters no longer match them -- it is not testing what its name says."
             exit 1
           fi
+          exit "$rc"

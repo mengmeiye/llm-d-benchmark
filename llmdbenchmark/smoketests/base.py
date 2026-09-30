@@ -5,8 +5,17 @@ import json
 import time
 from pathlib import Path
 
+from llmdbenchmark.engine import (
+    detect_engine,
+    get_engine_spec,
+    is_known_engine,
+    serving_engine,
+    serving_port,
+    tokenize,
+)
 from llmdbenchmark.executor.command import CommandExecutor
 from llmdbenchmark.executor.context import ExecutionContext
+from llmdbenchmark.parser.cluster_resource_resolver import effective_accelerator_count
 from llmdbenchmark.smoketests.nok8s import (
     health_check as nok8s_health_check,
     inference_test as nok8s_inference_test,
@@ -39,6 +48,38 @@ _RETRYABLE_INDICATORS = ("502", "503", "504", "ServiceUnavailable", "not ready")
 # chart grows native prefill autoscaling and we render a second HPA,
 # add "prefill" here and the relaxation kicks in automatically.
 _WVA_HPA_MANAGED_ROLES: frozenset[str] = frozenset({"decode"})
+
+#: llm-d's engine-neutral name for the serving container (``engine.containerName``
+#: in defaults.yaml). A pod running SGLang should not be inspected under the name
+#: "vllm", and ``kubectl logs -c modelserver`` reads the same whichever engine the
+#: role's command launches.
+ENGINE_CONTAINER = "modelserver"
+
+#: Containers that share an engine pod without being the engine. Used only to
+#: pick the serving container out of a pod whose engine container carries some
+#: other name (a scenario that set ``engine.containerName``, or a manifest from
+#: before the rename).
+_SIDECAR_CONTAINERS: frozenset[str] = frozenset(
+    {"routing-proxy", "istio-proxy", "uds-tokenizer"}
+)
+
+
+def _engine_container(pod_spec: dict) -> str:
+    """Name of the serving container in *pod_spec*.
+
+    ``modelserver`` when the pod has it, which is what llm-d-benchmark renders.
+    Otherwise the first container that is not a known sidecar, so a pod whose
+    engine container was renamed is still inspected rather than checked against
+    an empty dict -- a check that reads "flag not found" when the truth is
+    "container not found" is worse than no check.
+    """
+    names = [c.get("name", "") for c in pod_spec.get("spec", {}).get("containers", [])]
+    if ENGINE_CONTAINER in names:
+        return ENGINE_CONTAINER
+    for name in names:
+        if name and name not in _SIDECAR_CONTAINERS:
+            return name
+    return names[0] if names else ENGINE_CONTAINER
 
 
 def _is_retryable(text: str) -> bool:
@@ -112,9 +153,7 @@ class BaseSmoketest:
         is_kustomize = "kustomize" in context.deployed_methods
         namespace = context.require_namespace()
 
-        inference_port = (
-            _nested_get(plan_config, "vllmCommon", "inferencePort") or "8000"
-        )
+        inference_port = serving_port(plan_config)
         release = _nested_get(plan_config, "release") or ""
         gateway_class = _nested_get(plan_config, "gateway", "className") or ""
         model_id_label = plan_config.get("model_id_label", "") or ""
@@ -491,9 +530,7 @@ class BaseSmoketest:
             )
 
         # 5. Test pod IPs directly (use the first role -- decode for ms, standalone for standalone)
-        inference_port = (
-            _nested_get(plan_config, "vllmCommon", "inferencePort") or "8000"
-        )
+        inference_port = serving_port(plan_config)
         primary_role = ("decode", "decode")
         if roles_to_check:
             for role_info in roles_to_check:
@@ -772,8 +809,9 @@ class BaseSmoketest:
             return []
 
     @staticmethod
-    def get_pod_args(pod_spec: dict, container: str = "vllm") -> str:
-        """Extract the command/args string for a named container."""
+    def get_pod_args(pod_spec: dict, container: str | None = None) -> str:
+        """Extract the command/args string for a container (the engine's by default)."""
+        container = container or _engine_container(pod_spec)
         for c in pod_spec.get("spec", {}).get("containers", []):
             if c.get("name") == container:
                 args = c.get("args", [])
@@ -781,8 +819,18 @@ class BaseSmoketest:
         return ""
 
     @staticmethod
-    def get_pod_env(pod_spec: dict, container: str = "vllm") -> dict[str, str]:
-        """Extract env vars as a dict for a named container."""
+    def get_pod_image(pod_spec: dict, container: str | None = None) -> str:
+        """Extract the image reference for a container (the engine's by default)."""
+        container = container or _engine_container(pod_spec)
+        for c in pod_spec.get("spec", {}).get("containers", []):
+            if c.get("name") == container:
+                return str(c.get("image", ""))
+        return ""
+
+    @staticmethod
+    def get_pod_env(pod_spec: dict, container: str | None = None) -> dict[str, str]:
+        """Extract env vars as a dict for a container (the engine's by default)."""
+        container = container or _engine_container(pod_spec)
         for c in pod_spec.get("spec", {}).get("containers", []):
             if c.get("name") == container:
                 return {
@@ -793,8 +841,9 @@ class BaseSmoketest:
         return {}
 
     @staticmethod
-    def get_pod_resources(pod_spec: dict, container: str = "vllm") -> dict:
-        """Extract resources (limits + requests) for a named container."""
+    def get_pod_resources(pod_spec: dict, container: str | None = None) -> dict:
+        """Extract resources (limits + requests) for a container (the engine's by default)."""
+        container = container or _engine_container(pod_spec)
         for c in pod_spec.get("spec", {}).get("containers", []):
             if c.get("name") == container:
                 return c.get("resources", {})
@@ -826,8 +875,9 @@ class BaseSmoketest:
         return pod_spec.get("metadata", {}).get("annotations", {})
 
     @staticmethod
-    def get_container_ports(pod_spec: dict, container: str = "vllm") -> list[dict]:
-        """Return container port entries for a named container."""
+    def get_container_ports(pod_spec: dict, container: str | None = None) -> list[dict]:
+        """Return container port entries for a container (the engine's by default)."""
+        container = container or _engine_container(pod_spec)
         for c in pod_spec.get("spec", {}).get("containers", []):
             if c.get("name") == container:
                 return c.get("ports", [])
@@ -842,12 +892,12 @@ class BaseSmoketest:
                 False,
                 expected=f"{flag} present",
                 actual="not found",
-                message=f"{flag} not found in container vllm args",
+                message=f"{flag} not found in engine container args",
             )
         return CheckResult(
             f"arg_{flag.lstrip('-')}",
             True,
-            message=f"{flag} present in container vllm args",
+            message=f"{flag} present in engine container args",
         )
 
     @staticmethod
@@ -863,7 +913,7 @@ class BaseSmoketest:
                 False,
                 expected=f"{flag} present",
                 actual="not found",
-                message=f"{flag} not found in container vllm args",
+                message=f"{flag} not found in engine container args",
             )
         if value is not None and value not in pod_args:
             return CheckResult(
@@ -871,12 +921,12 @@ class BaseSmoketest:
                 False,
                 expected=f"{flag} with {value}",
                 actual=f"{flag} present but value mismatch",
-                message=f"{flag} found in container vllm args but expected value '{value}' not present",
+                message=f"{flag} found in engine container args but expected value '{value}' not present",
             )
         msg = (
             f"{flag} present"
             + (f" with {value}" if value else "")
-            + " in container vllm args"
+            + " in engine container args"
         )
         return CheckResult(f"arg_{flag.lstrip('-')}", True, message=msg)
 
@@ -889,12 +939,12 @@ class BaseSmoketest:
                 False,
                 expected=f"{flag} absent",
                 actual="present",
-                message=f"{flag} should not be in container vllm args",
+                message=f"{flag} should not be in engine container args",
             )
         return CheckResult(
             f"no_{flag.lstrip('-')}",
             True,
-            message=f"{flag} correctly absent from container vllm args",
+            message=f"{flag} correctly absent from engine container args",
         )
 
     @staticmethod
@@ -902,7 +952,7 @@ class BaseSmoketest:
         pod_env: dict[str, str],
         var_name: str,
         expected: str,
-        container: str = "vllm",
+        container: str = ENGINE_CONTAINER,
         pod_name: str = "",
     ) -> CheckResult:
         """Check that env var *var_name* equals *expected* in the given container."""
@@ -935,23 +985,245 @@ class BaseSmoketest:
         )
 
     @staticmethod
+    def expected_engine_repository(config: dict, *roles: str) -> str:
+        """Image repository the first of *roles* with a resolved engine will run.
+
+        ``<role>.engine.image`` is what resolve_engines filled in for whichever
+        engine that role's command launches, so it is the right answer for a
+        pod running SGLang as much as for one running vLLM. ``images.vllm`` is
+        the last-resort fallback for a config that predates the per-role image.
+        """
+        for role in roles or ("decode", "standalone"):
+            repo = _nested_get(config, role, "engine", "image", "repository")
+            if repo:
+                return str(repo)
+        engine_name = _nested_get(config, "engine", "name") or "vllm"
+        return str(_nested_get(config, "images", engine_name, "repository") or "")
+
+    @staticmethod
+    def _repository_of(image: str) -> str:
+        """The repository out of an image reference.
+
+        ``repo:tag``, ``repo@sha256:...`` and a bare ``repo`` all reduce to
+        ``repo``. The tag is deliberately dropped: which build of an engine a
+        pod runs is the image-pin tests' business, and a digest-pinned pod
+        should still be recognised as that engine.
+        """
+        ref = str(image).split("@", 1)[0]
+        head, sep, tail = ref.rpartition(":")
+        # A colon in the last path segment is a tag; one before a `/` is a
+        # registry port (`localhost:5000/vllm`), which is part of the repository.
+        return head if sep and "/" not in tail else ref
+
+    @classmethod
+    def assert_engine_identity(
+        cls,
+        pod_spec: dict,
+        engine_name: str,
+        *,
+        check_name: str = "engine",
+        expected_repository: str = "",
+        pod_name: str = "",
+    ) -> CheckResult:
+        """Check the pod is running the engine the plan says it is.
+
+        ``<role>.engine.name`` is not evidence about a cluster: ``resolve_engines``
+        wrote it by reading the scenario's own command, so a check that compares
+        it against the plan compares the plan to itself and passes whatever is
+        actually running. This asks the *pod*, and each fact is one the plan
+        cannot supply:
+
+          the launcher   ``detect_engine`` over the container's own args -- the
+                         same signature matcher the resolver used, so no engine's
+                         spelling is repeated here and a new ``EngineSpec`` is
+                         covered by arriving.
+          the image      the repository ``engine.imageKey`` resolved to. An
+                         SGLang pod inspected against a TRT-LLM plan differs
+                         here on the first token.
+          the container  the serving container exists under the name every other
+                         check inspects -- "flag not found" when the truth is
+                         "container not found" is the one failure worse than
+                         none.
+
+        Two standups of one scenario in one namespace render the same Deployment
+        name, so a pod from the *other* run answers this role's selector while
+        every plan-versus-plan check still passes. That is what this catches.
+        """
+        spec = get_engine_spec(engine_name)
+        # `spec.name` normalises an alias (`tensorrt-llm` -> `trtllm`) so the
+        # comparison below is against the same spelling `detect_engine` returns.
+        # A name no spec claims resolves to the generic spec, whose name would
+        # otherwise be reported in place of the one the plan actually states.
+        want = spec.name if is_known_engine(engine_name) else str(engine_name).strip()
+        loc = f"pod/{pod_name} " if pod_name else ""
+        containers = cls.get_pod_containers(pod_spec)
+        serving = _engine_container(pod_spec)
+        image = cls.get_pod_image(pod_spec)
+        tokens, _ = tokenize(cls.get_pod_args(pod_spec))
+
+        facts: list[str] = []
+        problems: list[str] = []
+
+        if serving in containers:
+            facts.append(f"container '{serving}'")
+        else:
+            problems.append(
+                f"no serving container (containers: [{', '.join(containers) or 'none'}])"
+            )
+
+        # A launcher signature is what there is to match, and two engines have
+        # none: one this harness does not model at all, and `generic` -- the name
+        # `resolve_engines` writes for a command whose launcher it did not
+        # recognise, which is a supported way to run a scenario, not a fault. A
+        # pod that carries its command in `command:` rather than `args:` likewise
+        # gives us nothing to read. In each case the image below is the only
+        # evidence available, and saying so beats inventing a pass.
+        if not spec.launchers:
+            facts.append(f"launcher unchecked (no launcher signature for '{want}')")
+        elif not tokens:
+            facts.append("launcher unchecked (no args on the container)")
+        else:
+            detected = detect_engine(tokens)
+            if detected is None:
+                problems.append(
+                    f"args launch no engine this harness knows, not '{want}'"
+                )
+            elif detected.name != want:
+                problems.append(f"args launch '{detected.name}', not '{want}'")
+            else:
+                facts.append("launcher in args")
+
+        if expected_repository and image:
+            got = cls._repository_of(image)
+            # Suffix either way: a plan may name a repository the registry
+            # prefixes (or the reverse) without that being a different engine.
+            same = got == expected_repository or any(
+                a.endswith("/" + b)
+                for a, b in ((got, expected_repository), (expected_repository, got))
+            )
+            if same:
+                facts.append(f"image {got}")
+            else:
+                problems.append(f"image is {got}, expected {expected_repository}")
+
+        if problems:
+            wanted = f"engine '{want}'"
+            if expected_repository:
+                wanted += f" from {expected_repository}"
+            return CheckResult(
+                check_name,
+                False,
+                expected=wanted,
+                actual="; ".join(problems),
+                message=f"{loc}is not running {wanted}: {'; '.join(problems)}",
+            )
+        return CheckResult(
+            check_name,
+            True,
+            message=f"{loc}runs engine '{want}' ({', '.join(facts)})",
+        )
+
+    @staticmethod
+    def _normalize_command(text: str) -> str:
+        """Reduce a shell command to a comparable token stream.
+
+        Backslash-newline continuations, indentation and the block folding the
+        chart applies change the text without changing what runs, so compare
+        tokens rather than characters.
+        """
+        return " ".join(text.replace("\\\n", " ").split())
+
+    @classmethod
+    def assert_command_rendered(
+        cls,
+        pod_args: str,
+        expected_command: str,
+        pod_name: str = "",
+    ) -> CheckResult:
+        """Check that the scenario's engine command reached the container intact.
+
+        The rendered args are the preprocess step chained to the command, so
+        containment (not equality) is the right relation. On a mismatch the
+        message names the first token that diverges, because "the command does
+        not match" on a 20-flag serve line is not an actionable sentence.
+        """
+        want = cls._normalize_command(expected_command)
+        got = cls._normalize_command(pod_args)
+        loc = f"pod/{pod_name} " if pod_name else ""
+        flags = len([t for t in want.split() if t.startswith("-")])
+
+        if want and want in got:
+            return CheckResult(
+                "engine_command",
+                True,
+                message=(
+                    f"{loc}engine command rendered verbatim "
+                    f"({len(want.split())} tokens, {flags} flags)"
+                ),
+            )
+
+        # Name the divergence. Anchor on the command's first token (`vllm`,
+        # `python3`, `trtllm-serve`, ...): everything before it in the args is
+        # the preprocess step, which is not what we are comparing.
+        want_tokens = want.split()
+        head = want_tokens[0] if want_tokens else ""
+        got_tokens = got.split()
+        if head not in got_tokens:
+            return CheckResult(
+                "engine_command",
+                False,
+                expected=want,
+                actual=got,
+                message=(
+                    f"{loc}engine command does not match the scenario: it does "
+                    f"not start in the container args at all (no '{head}')"
+                ),
+            )
+        tail = got_tokens[got_tokens.index(head) :]
+        diff = "command absent from container args"
+        for i, token in enumerate(want_tokens):
+            if i >= len(tail):
+                diff = f"truncated after '{' '.join(want_tokens[max(0, i - 1) : i]) or head}'"
+                break
+            if tail[i] != token:
+                diff = f"expected '{token}', got '{tail[i]}'"
+                break
+
+        return CheckResult(
+            "engine_command",
+            False,
+            expected=want,
+            actual=got,
+            message=f"{loc}engine command does not match the scenario: {diff}",
+        )
+
+    @staticmethod
     def assert_env_variant_list(
         pod_env: dict[str, str],
         var_name: str,
         expected_values: list,
-        container: str = "vllm",
+        container: str = ENGINE_CONTAINER,
         pod_name: str = "",
     ) -> CheckResult:
-        """Check a ``,,``-delimited per-replica env var built from `vllmVariants`.
+        """Check a ``,,``-delimited per-replica env var.
 
-        When a role sets `vllmVariants`, `_macros.j2` renders one env var holding
-        every replica's value joined by ``,,`` (e.g.
-        ``VLLM_MAX_MODEL_LEN="8000,,32768"``) rather than a single scalar. The
-        pod template is shared by all replicas, so the list is what lands in the
-        pod spec; the preprocess script (`set_llmdbench_environment.py`) splits
-        it at container start and re-exports the entry matching the pod's LWS
-        index. Comparing the raw spec value against one scalar therefore always
-        fails -- compare against the joined list instead.
+        A scenario varies one value across replicas by writing a ``,,``-joined
+        list in ``<role>.extraEnvVars`` and referencing the variable from its
+        engine command::
+
+            decode:
+              extraEnvVars:
+                - name: MY_MAX_LEN
+                  value: "8192,,32768"
+              engine:
+                command: vllm serve Qwen/Qwen3-32B --max-model-len $MY_MAX_LEN
+
+        The pod template is shared by all replicas, so the whole list is what
+        lands in the pod spec; the preprocess script
+        (`set_llmdbench_environment.py`) splits it at container start and
+        re-exports the entry matching the pod's LWS index. Comparing the raw
+        spec value against one scalar therefore always fails -- compare against
+        the joined list instead.
 
         Only the list is verifiable from the pod spec. The per-index selection
         happens in the running container's shell and leaves no trace in the
@@ -1053,13 +1325,19 @@ class BaseSmoketest:
         expected_value: str,
         resource_path: str,
     ) -> CheckResult:
-        """Check a resource field like limits.memory or requests.cpu."""
-        parts = resource_path.split(".")
-        val = actual_resources
-        for p in parts:
-            val = val.get(p, {}) if isinstance(val, dict) else None
-            if val is None:
-                break
+        """Check a resource field like limits.memory or limits.nvidia.com/gpu.
+
+        The path is ``<section>.<resourceName>`` and a Kubernetes extended
+        resource name carries dots of its own (``nvidia.com/gpu``,
+        ``habana.ai/gaudi``), so only the first dot separates the two.
+        """
+        section, _, field = resource_path.partition(".")
+        val = (
+            actual_resources.get(section)
+            if isinstance(actual_resources, dict)
+            else None
+        )
+        val = val.get(field) if isinstance(val, dict) else None
 
         if val is None:
             return CheckResult(
@@ -1067,7 +1345,7 @@ class BaseSmoketest:
                 False,
                 expected=expected_value,
                 actual="not set",
-                message=f"container vllm resources.{resource_path} not set (expected {expected_value})",
+                message=f"engine container resources.{resource_path} not set (expected {expected_value})",
             )
         if str(val) != str(expected_value):
             return CheckResult(
@@ -1075,12 +1353,12 @@ class BaseSmoketest:
                 False,
                 expected=expected_value,
                 actual=str(val),
-                message=f"container vllm resources.{resource_path}={val} (expected {expected_value})",
+                message=f"engine container resources.{resource_path}={val} (expected {expected_value})",
             )
         return CheckResult(
             f"resource_{resource_path}",
             True,
-            message=f"container vllm resources.{resource_path}={val}",
+            message=f"engine container resources.{resource_path}={val}",
         )
 
     def validate_role_pods(
@@ -1097,7 +1375,7 @@ class BaseSmoketest:
         """Validate all aspects of pods for a given role (decode/prefill/standalone).
 
         Checks replica count, resources, parallelism, env vars, init containers,
-        security context, volumes, probes, and vLLM args against the rendered config.
+        security context, volumes, probes, and engine args against the rendered config.
 
         Returns the list of matching pods.
         """
@@ -1253,30 +1531,29 @@ class BaseSmoketest:
                         )
                     )
 
-        # --- Parallelism ---
-        parallelism = role_config.get("parallelism", {})
-        tp = parallelism.get("tensor")
-        if tp is not None and "VLLM_TENSOR_PARALLELISM" in env:
+        # --- Accelerators per pod, as the plan stated them ---
+        # A device count is a Kubernetes fact, so it is resolved exactly the way
+        # the renderer resolved it (`resources.limits.<resource>` ->
+        # `accelerator.count` per role -> plan-wide -> `parallelism.tensor x
+        # dataLocal`) and compared against what the pod actually got. A mismatch
+        # means the chart and the plan disagree, which shows up at runtime as a
+        # cryptic engine-side failure, so it is worth naming here. Zero means the
+        # role is CPU-only and there is nothing to check.
+        wanted_accelerators, _count_source = effective_accelerator_count(
+            role_config, config
+        )
+        accel_resource = (
+            _nested_get(config, "accelerator", "resource")
+            or _nested_get(role_config, "accelerator", "resourceName")
+            or _nested_get(config, "accelerator", "resourceName")
+        )
+        if wanted_accelerators and accel_resource:
             report.add(
                 _tag(
-                    self.assert_env_equals(
-                        env, "VLLM_TENSOR_PARALLELISM", str(tp), pod_name=pod_name
-                    )
-                )
-            )
-
-        dp = parallelism.get("data")
-        if dp is not None and "DP_SIZE" in env:
-            report.add(
-                _tag(self.assert_env_equals(env, "DP_SIZE", str(dp), pod_name=pod_name))
-            )
-
-        dp_local = parallelism.get("dataLocal")
-        if dp_local is not None and "DP_SIZE_LOCAL" in env:
-            report.add(
-                _tag(
-                    self.assert_env_equals(
-                        env, "DP_SIZE_LOCAL", str(dp_local), pod_name=pod_name
+                    self.assert_resource_matches(
+                        resources,
+                        str(wanted_accelerators),
+                        f"limits.{accel_resource}",
                     )
                 )
             )
@@ -1375,8 +1652,8 @@ class BaseSmoketest:
                 )
             )
 
-        # --- Volumes from vllmCommon ---
-        expected_volumes = _nested_get(config, "vllmCommon", "volumes") or []
+        # --- Volumes from the plan-wide `engine` section ---
+        expected_volumes = _nested_get(config, "engine", "volumes") or []
         for vol in expected_volumes:
             vol_name = vol.get("name")
             if vol_name:
@@ -1393,8 +1670,8 @@ class BaseSmoketest:
                     )
                 )
 
-        # --- Volume mounts from vllmCommon ---
-        expected_mounts = _nested_get(config, "vllmCommon", "volumeMounts") or []
+        # --- Volume mounts from the plan-wide `engine` section ---
+        expected_mounts = _nested_get(config, "engine", "volumeMounts") or []
         actual_mounts = self._get_container_volume_mounts(pod)
         for mount in expected_mounts:
             mount_name = mount.get("name")
@@ -1419,153 +1696,77 @@ class BaseSmoketest:
         probe_config = role_config.get("probes", {})
         self._validate_probes(pod, prefix, probe_config, report, group=group_name)
 
-        # --- vLLM flags ---
-        # When customCommand is set, the auto-generated flags (from
-        # vllmCommon.flags, model.blockSize, etc.) are not applied --
-        # the custom command is responsible for its own flags.
-        has_custom_command = bool(_nested_get(role_config, "vllm", "customCommand"))
-
-        if not has_custom_command:
-            flags = _nested_get(config, "vllmCommon", "flags") or {}
-            if flags.get("enforceEager") is True:
-                report.add(_tag(self.assert_arg_contains(args, "--enforce-eager")))
-            if flags.get("noPrefixCaching") is True:
-                report.add(
-                    _tag(self.assert_arg_contains(args, "--no-enable-prefix-caching"))
-                )
-            if flags.get("disableLogRequests") is True:
-                report.add(
-                    _tag(self.assert_arg_contains(args, "--no-enable-log-requests"))
-                )
-            if flags.get("disableUvicornAccessLog") is True:
-                report.add(
-                    _tag(self.assert_arg_contains(args, "--disable-uvicorn-access-log"))
-                )
-
-            # --- Model args (block size, max model len) ---
-            # The auto-generated command uses env var references ($VLLM_BLOCK_SIZE,
-            # $VLLM_MAX_MODEL_LEN) instead of hardcoded values. We verify:
-            # 1. The flag is present in the args (with env var or literal value)
-            # 2. The corresponding env var on the pod has the correct value
-            model_config = config.get("model", {})
-            block_size = model_config.get("blockSize")
-            if block_size is not None:
-                # Check flag present (either $VLLM_BLOCK_SIZE or literal value)
-                report.add(_tag(self.assert_arg_present(args, "--block-size")))
-                # Check env var has the right value
-                report.add(
-                    _tag(
-                        self.assert_env_equals(
-                            env,
-                            "VLLM_BLOCK_SIZE",
-                            str(block_size),
-                            pod_name=pod_name,
-                        )
-                    )
-                )
-
-            # `vllmVariants` (context-length-aware routing) overrides the
-            # scalar model.* values with one ,,-joined list per env var --
-            # see assert_env_variant_list and _macros.j2. The gating below
-            # mirrors the template's exactly: maxModelLen is emitted whenever
-            # variants exist, the other two only when the first variant
-            # declares them.
-            variants = role_config.get("vllmVariants") or []
-
-            max_model_len = model_config.get("maxModelLen")
-            if variants:
-                report.add(_tag(self.assert_arg_present(args, "--max-model-len")))
-                report.add(
-                    _tag(
-                        self.assert_env_variant_list(
-                            env,
-                            "VLLM_MAX_MODEL_LEN",
-                            [v.get("maxModelLen") for v in variants],
-                            pod_name=pod_name,
-                        )
-                    )
-                )
-            elif max_model_len is not None:
-                report.add(_tag(self.assert_arg_present(args, "--max-model-len")))
-                report.add(
-                    _tag(
-                        self.assert_env_equals(
-                            env,
-                            "VLLM_MAX_MODEL_LEN",
-                            str(max_model_len),
-                            pod_name=pod_name,
-                        )
-                    )
-                )
-
-            for var_name, variant_key in (
-                ("VLLM_MAX_NUM_SEQ", "maxNumSeq"),
-                ("VLLM_MAX_NUM_BATCHED_TOKENS", "maxNumBatchedTokens"),
-            ):
-                if variants and variants[0].get(variant_key) is not None:
-                    report.add(
-                        _tag(
-                            self.assert_env_variant_list(
-                                env,
-                                var_name,
-                                [v.get(variant_key) for v in variants],
-                                pod_name=pod_name,
-                            )
-                        )
-                    )
-
-            # --- Additional flags from role config ---
-            additional_flags = _nested_get(role_config, "vllm", "additionalFlags") or []
-            for flag in additional_flags:
-                if isinstance(flag, str) and flag.startswith("--"):
-                    report.add(_tag(self.assert_arg_contains(args, flag)))
-
-        # --- KV transfer (checked for both auto-generated and custom commands) ---
-        kv_transfer = _nested_get(config, "vllmCommon", "kvTransfer") or {}
-        if kv_transfer.get("enabled"):
-            kv_connector = kv_transfer.get("connector")
-            if kv_connector:
-                report.add(
-                    _tag(
-                        self.assert_arg_contains(
-                            args,
-                            "--kv-transfer-config",
-                            str(kv_connector),
-                        )
-                    )
-                )
-
-        # --- KV events (checked for both auto-generated and custom commands) ---
-        kv_events = _nested_get(config, "vllmCommon", "kvEvents") or {}
-        if kv_events.get("enabled"):
-            kv_port = kv_events.get("port")
-            if kv_port is not None:
-                has_port = any(p.get("containerPort") == int(kv_port) for p in ports)
-                report.add(
-                    _tag(
-                        CheckResult(
-                            f"{prefix}_kv_events_port",
-                            has_port,
-                            expected=str(kv_port),
-                            message=f"KV events containerPort {kv_port} {'present' if has_port else 'not found'} in container ports",
-                        )
-                    )
-                )
-
-        # --- Role env vars (injected by helm chart, not from config) ---
-        if role == "decode":
+        # --- The engine command, verbatim ---
+        # The scenario's command is the contract, and llm-d-benchmark's job is
+        # to deliver it to the container unchanged. So assert exactly that. It
+        # catches every way the chain between scenario and pod can damage a
+        # command -- a dropped line continuation, a quote eaten by a shell
+        # layer, ${...} substitution that left a placeholder behind, a role that
+        # silently inherited the plan-wide command when it meant to override it
+        # -- and it does so for vLLM, SGLang and TRT-LLM alike, with no
+        # per-engine knowledge. Checking flag by flag instead would mean
+        # re-deriving every engine's own spelling here, which is the bookkeeping
+        # the verbatim contract exists to avoid.
+        #
+        # Whether the flags inside the command are the right flags is the
+        # engine's judgement, not ours; a wrong one fails loudly at startup.
+        expected_command = (
+            _nested_get(role_config, "engine", "command")
+            or _nested_get(config, "engine", "command")
+            or ""
+        )
+        if str(expected_command).strip():
             report.add(
                 _tag(
-                    self.assert_env_equals(
-                        env, "VLLM_IS_DECODE", "1", pod_name=pod_name
+                    self.assert_command_rendered(
+                        args, str(expected_command), pod_name=pod_name
                     )
                 )
             )
-        elif role == "prefill":
+
+        # --- The engine the pod is actually running ---
+        # resolve_engines detected the engine from the scenario's command and
+        # picked the image, health path and metrics path from it. Assert the
+        # running pod agrees -- see `assert_engine_identity` for why the plan's
+        # own `engine.name` is not evidence that it does.
+        engine_cfg = role_config.get("engine") or {}
+        engine_name = engine_cfg.get("name") or _nested_get(config, "engine", "name")
+        if engine_name:
             report.add(
                 _tag(
-                    self.assert_env_equals(
-                        env, "VLLM_IS_PREFILL", "1", pod_name=pod_name
+                    self.assert_engine_identity(
+                        pod,
+                        str(engine_name),
+                        check_name=f"{prefix}_engine",
+                        expected_repository=str(
+                            _nested_get(role_config, "engine", "image", "repository")
+                            or ""
+                        ),
+                        pod_name=pod_name,
+                    )
+                )
+            )
+
+        # --- The port the engine binds ---
+        # Read out of the command by resolve_engines, then used for the
+        # container port and the probes. A pod whose containerPort disagrees
+        # with the command's --port passes its probes against nothing.
+        engine_port = engine_cfg.get("port")
+        if engine_port and ports:
+            declared = [p.get("containerPort") for p in ports]
+            has_port = int(engine_port) in [p for p in declared if p is not None]
+            report.add(
+                _tag(
+                    CheckResult(
+                        f"{prefix}_engine_port",
+                        has_port,
+                        expected=str(engine_port),
+                        actual=", ".join(str(d) for d in declared),
+                        message=(
+                            f"engine port {engine_port} (from the command) "
+                            f"{'present' if has_port else 'not found'} in "
+                            f"containerPorts [{', '.join(str(d) for d in declared)}]"
+                        ),
                     )
                 )
             )
@@ -1575,9 +1776,10 @@ class BaseSmoketest:
     @staticmethod
     def _get_container_security_caps(
         pod_spec: dict,
-        container: str = "vllm",
+        container: str | None = None,
     ) -> list[str]:
         """Extract security context capabilities for a container."""
+        container = container or _engine_container(pod_spec)
         for c in pod_spec.get("spec", {}).get("containers", []):
             if c.get("name") == container:
                 return (
@@ -1588,9 +1790,10 @@ class BaseSmoketest:
     @staticmethod
     def _get_container_volume_mounts(
         pod_spec: dict,
-        container: str = "vllm",
+        container: str | None = None,
     ) -> dict[str, str]:
         """Return volume mount names mapped to mount paths."""
+        container = container or _engine_container(pod_spec)
         for c in pod_spec.get("spec", {}).get("containers", []):
             if c.get("name") == container:
                 return {
@@ -1605,10 +1808,11 @@ class BaseSmoketest:
         prefix: str,
         probe_config: dict,
         report: SmoketestReport,
-        container: str = "vllm",
+        container: str | None = None,
         group: str = "",
     ):
         """Validate probe configuration against config."""
+        container = container or _engine_container(pod_spec)
         for c in pod_spec.get("spec", {}).get("containers", []):
             if c.get("name") != container:
                 continue
@@ -1679,14 +1883,22 @@ class BaseSmoketest:
         poll_interval: int = 10,
         url_path_prefix: str = "",
     ) -> str | None:
+        # The engine and its health path come from the plan, where
+        # `resolve_engines` published them for whichever launcher the scenario's
+        # command names -- so this log line says "sglang" on an SGLang stack, and
+        # an engine that serves its health elsewhere is polled where it serves.
+        engine_cfg = serving_engine(plan_config or {})
+        engine = str(engine_cfg.get("name") or "") or "the engine"
+        health_path = str(engine_cfg.get("healthPath") or "/health")
         protocol = "https" if str(port) == "443" else "http"
         prefix = _normalize_url_prefix(url_path_prefix)
-        url = f"{protocol}://{host}:{port}{prefix}/health"
+        url = f"{protocol}://{host}:{port}{prefix}{health_path}"
         curl_image = "quay.io/fedora/fedora"
         override_args = _build_overrides(plan_config)
 
         context.logger.log_info(
-            f"Health check: verifying vLLM is listening at {host}:{port}/health... Using curl image: {curl_image}"
+            f"Health check: verifying {engine} is listening at "
+            f"{host}:{port}{prefix}{health_path}... Using curl image: {curl_image}"
         )
         start = time.time()
         attempt = 0
@@ -1695,8 +1907,8 @@ class BaseSmoketest:
             elapsed = time.time() - start
             if elapsed > timeout:
                 return (
-                    f"vLLM health check failed: /health did not respond "
-                    f"after {timeout}s -- process may not be running"
+                    f"{engine} health check failed: {health_path} did not "
+                    f"respond after {timeout}s -- process may not be running"
                 )
 
             attempt += 1
@@ -1728,13 +1940,13 @@ class BaseSmoketest:
 
             if status_code == "200":
                 context.logger.log_info(
-                    f"vLLM health check passed (ok) ({int(elapsed)}s elapsed)"
+                    f"{engine} health check passed (ok) ({int(elapsed)}s elapsed)"
                 )
                 return None
 
             remaining = int(timeout - elapsed)
             context.logger.log_info(
-                f"vLLM not listening yet (attempt {attempt}, "
+                f"{engine} not listening yet (attempt {attempt}, "
                 f"status={status_code or 'N/A'}, {remaining}s remaining)..."
             )
             time.sleep(poll_interval)
@@ -1810,7 +2022,7 @@ class BaseSmoketest:
                     f"wait via `harness.smoketest.modelReadyTimeout: 3600` "
                     f"in your scenario, or check the model-server logs:\n"
                     f"  kubectl logs -n {namespace} "
-                    f"-l llm-d.ai/role=decode -c vllm --tail=100"
+                    f"-l llm-d.ai/role=decode -c {ENGINE_CONTAINER} --tail=100"
                 )
                 context.logger.log_error(err)
                 return err

@@ -96,6 +96,12 @@ class ContainerState:
     waiting_reason: str = ""
     terminated: Termination | None = None
     last_terminated: Termination | None = None
+    #: The image the kubelet was asked for. Only interesting on a pull failure,
+    #: where it is the one fact the reason token cannot carry.
+    image: str = ""
+    #: The kubelet's own sentence about the waiting state, e.g. the registry's
+    #: refusal behind an ImagePullBackOff.
+    waiting_message: str = ""
 
     @property
     def terminated_reason(self) -> str:
@@ -135,6 +141,27 @@ class ContainerState:
 
         return details
 
+    @property
+    def failure_report(self) -> str:
+        """This container's failure, spelled out for someone who has to fix it.
+
+        :attr:`failure_details` answers *which state*. That is enough to decide
+        whether to wait, and not enough to act: ``ImagePullBackOff`` names
+        neither the image the kubelet asked for nor the registry's answer, and a
+        pod in that state is usually replaced before a human can look. Both
+        facts are in the status the poll already read, so they are reported here.
+        """
+        details = self.failure_details
+        if not details:
+            return ""
+
+        report = f"{self.name} ({', '.join(details)})"
+        if self.image:
+            report += f" image={self.image}"
+        if self.waiting_message:
+            report += f" -- {self.waiting_message}"
+        return report
+
 
 def _parse_termination(state: dict, key: str) -> Termination | None:
     """Build a Termination from ``state[key]`` when present."""
@@ -161,6 +188,10 @@ def _parse_container(status: dict, kind: ContainerKind) -> ContainerState:
         waiting_reason=waiting.get("reason") or "",
         terminated=_parse_termination(state, "terminated"),
         last_terminated=_parse_termination(last_state, "terminated"),
+        # `image` is what the kubelet resolved the spec to; on a pull failure it
+        # is the string that could not be pulled.
+        image=status.get("image") or "",
+        waiting_message=(waiting.get("message") or "").strip(),
     )
 
 
@@ -344,6 +375,25 @@ class PodState:
             failures.append(f"{self.name} ({self.status_reason})")
 
         return failures
+
+    @property
+    def crash_report(self) -> list[str]:
+        """:attr:`crash_details`, with the image and the kubelet's message added.
+
+        What an abort prints. The short form is for ledgers and comparisons;
+        this one is for the person reading the failure, who needs the image and
+        the registry's sentence rather than a state token.
+        """
+        lines = [
+            f"{self.name}/{report}"
+            for container in self.all_containers
+            if (report := container.failure_report)
+        ]
+
+        if not lines and self.status_reason in CRASH_STATES:
+            lines.append(f"{self.name} ({self.status_reason})")
+
+        return lines
 
     @property
     def reason(self) -> str:

@@ -329,9 +329,20 @@ class Step(ABC):
             return True
 
         if existing_gi < requested_gi:
+            # A PVC outlives teardown on purpose -- the next standup finds the
+            # weights already staged instead of pulling them again -- so the one
+            # in the way is usually an earlier scenario's, sized for its own
+            # model. It cannot be grown from here (a StorageClass need not
+            # support expansion, and other models' weights are sitting in it),
+            # so say what to do about it rather than only that it is wrong.
             errors.append(
                 f"PVC '{pvc_name}' exists with size {existing_size_str} but "
-                f"{requested_size} is required -- existing PVC is too small"
+                f"{requested_size} is required -- existing PVC is too small. "
+                f"It is left behind by an earlier standup (a model PVC survives "
+                f"teardown so the weights do not have to be downloaded again). "
+                f"Delete it to have this standup recreate it at the larger size "
+                f"-- the weights are then re-downloaded: "
+                f"kubectl delete pvc {pvc_name} -n {namespace}"
             )
             return True
 

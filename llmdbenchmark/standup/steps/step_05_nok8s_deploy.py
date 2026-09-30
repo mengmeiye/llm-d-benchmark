@@ -83,7 +83,6 @@ class NoK8sDeployStep(Step):
             return self._fail(stack_path, str(exc))
 
         hf_token_env = spec.get("hfTokenEnv", "HUGGING_FACE_HUB_TOKEN")
-        model = spec["model"]
         endpoint = spec["endpoint"]
         containers = spec.get("containers", [])
 
@@ -111,14 +110,14 @@ class NoK8sDeployStep(Step):
         if hf_token_env not in os.environ and not context.dry_run:
             context.logger.log_warning(
                 f"{hf_token_env} not set in the environment; gated Hugging Face "
-                f"models will fail to download in the vLLM container."
+                f"models will fail to download in the engine container."
             )
 
         # Stage the EPP/Envoy config files where the daemon will mount them.
         epp_dir = workspace / "epp"
         if not context.dry_run:
             stage_err = self._stage_configs(
-                stack_path, workspace, epp_dir, cmd, host, context
+                stack_path, workspace, epp_dir, cmd, host, context, containers
             )
             if stage_err:
                 return self._fail(stack_path, stage_err, [stage_err])
@@ -134,7 +133,7 @@ class NoK8sDeployStep(Step):
             # Idempotency: remove any prior container with this name.
             cmd.execute(host.runtime_cmd("rm", "-f", name), check=False)
             run_cmd, run_stdin = self._build_run_command(
-                c, runtime, workspace, epp_dir, hf_cache, hf_token_env, model, host
+                c, runtime, workspace, epp_dir, hf_cache, hf_token_env, host
             )
             result = cmd.execute(run_cmd, check=False, stdin=run_stdin)
             if not result.success and not context.dry_run:
@@ -148,7 +147,7 @@ class NoK8sDeployStep(Step):
                 return self._fail(stack_path, err, [err])
             launched.append(name)
 
-        # Readiness: each vLLM worker, then Envoy.
+        # Readiness: each engine worker, then Envoy.
         if not context.dry_run:
             ready_err = self._wait_ready(cmd, host, spec, context)
             if ready_err:
@@ -214,9 +213,42 @@ class NoK8sDeployStep(Step):
                 f"Could not read $HOME on {host.destination} "
                 f"({(result.stderr or '').strip()[:200]}); paths containing '~' "
                 f"may not resolve. Use absolute paths for "
-                f"nok8s.workspaceHostDir and nok8s.vllm.hfCacheDir."
+                f"nok8s.workspaceHostDir and nok8s.engine.hfCacheDir."
             )
         return home
+
+    LAUNCH_SCRIPT_DIR = "launch"
+    #: Where a worker's launch script is mounted inside its container.
+    LAUNCH_MOUNT_PATH = "/etc/llmdbench/launch.sh"
+
+    @classmethod
+    def _launch_script_name(cls, container: dict) -> str:
+        """File name of one engine worker's launch script."""
+        return f"{container['name']}.sh"
+
+    @classmethod
+    def _write_launch_scripts(cls, containers: list[dict], root: Path) -> None:
+        """Write each engine worker's verbatim command to its own script.
+
+        The command comes straight from the scenario and is run unchanged. It
+        goes to a file rather than into the ``docker run`` line because it
+        legitimately contains quotes, newlines and backslash continuations (a
+        ``--kv-transfer-config`` JSON blob, for one), and under the ssh
+        transport the whole run command is quoted once more on the way to the
+        node -- two layers of shell between the scenario and the engine is a
+        quoting bug waiting to happen. A file has no such layers.
+        """
+        launch_dir = root / cls.LAUNCH_SCRIPT_DIR
+        launch_dir.mkdir(parents=True, exist_ok=True)
+        for container in containers:
+            if container.get("kind") != "engine":
+                continue
+            command = (container.get("command") or "").strip()
+            if not command:
+                continue
+            script = launch_dir / cls._launch_script_name(container)
+            script.write_text(f"#!/bin/sh\nset -e\n{command}\n", encoding="utf-8")
+            script.chmod(0o755)
 
     def _stage_configs(  # pylint: disable=too-many-arguments
         self,
@@ -226,6 +258,7 @@ class NoK8sDeployStep(Step):
         cmd: CommandExecutor,
         host: ContainerHost,
         context: ExecutionContext,
+        containers: list[dict] | None = None,
     ) -> str | None:
         """Put the rendered EPP/Envoy configs where the daemon will mount them.
 
@@ -248,6 +281,7 @@ class NoK8sDeployStep(Step):
                 if src and self._has_yaml_content(src):
                     dest = (epp_dir if sub else workspace) / filename
                     dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            self._write_launch_scripts(containers or [], workspace)
             return None
 
         # Remote: assemble the exact directory tree locally, then push it in one
@@ -259,6 +293,7 @@ class NoK8sDeployStep(Step):
             if src and self._has_yaml_content(src):
                 dest = local_stage / sub / filename if sub else local_stage / filename
                 dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        self._write_launch_scripts(containers or [], local_stage)
 
         result = cmd.execute(
             host.push_dir(str(local_stage), str(workspace)), check=False
@@ -283,7 +318,6 @@ class NoK8sDeployStep(Step):
         epp_dir: Path,
         hf_cache: str,
         hf_token_env: str,
-        model: str,
         host: ContainerHost,
         environ=None,
     ) -> tuple[str, str]:
@@ -303,10 +337,16 @@ class NoK8sDeployStep(Step):
         kind = c["kind"]
         image = c["image"]
         run = "run"
-        if kind == "vllm":
+        if kind == "engine":
             device = self._device_args(runtime, c)
             pin = self._pin_env(c)
-            extra = " ".join(c.get("extraArgs") or [])
+            # The launch line is the scenario's, unchanged: it was staged to
+            # <workspace>/launch/<container>.sh and is mounted read-only, so the
+            # container runs `<shell> /etc/llmdbench/launch.sh` and nothing here
+            # has to know a single engine flag -- not even the model, which the
+            # command names itself and the mounted HF cache below resolves.
+            script = workspace / self.LAUNCH_SCRIPT_DIR / self._launch_script_name(c)
+            shell = c.get("shell") or "/bin/bash"
             # `-e VAR` with no value is expanded by whoever runs the CLI: the
             # local client under the native transport, the node's shell under
             # ssh. Either way the token is never written to the node's disk --
@@ -319,12 +359,11 @@ class NoK8sDeployStep(Step):
                 + f" --shm-size={c.get('shmSize', '20g')} "
                 f"-p {c['hostPort']}:{c.get('containerPort', 8000)} "
                 f"-e {hf_token_env} "
+                f"-e ENGINE_PORT={c.get('containerPort', 8000)} "
                 f"-v {hf_cache}:/root/.cache/huggingface "
-                f"--entrypoint vllm {image} "
-                f"serve {model} "
-                f"--disable-access-log-for-endpoints=/health,/metrics,/v1/models "
-                f"--tensor-parallel-size={c.get('tensorParallel', 1)}"
-                + (f" {extra}" if extra else "")
+                f"-v {script}:{self.LAUNCH_MOUNT_PATH}:ro "
+                f"--entrypoint {shell} {image} "
+                f"{self.LAUNCH_MOUNT_PATH}"
             )
             return host.wrap_runtime(tail, prefix), stdin
         if kind == "epp":
@@ -395,8 +434,10 @@ class NoK8sDeployStep(Step):
         """Per-replica GPU pinning flag (``-e <VISIBLE_DEVICES>=<slice>``).
 
         With ``replicas > 1`` each replica is pinned to its own contiguous slice
-        of ``tensorParallel`` device indices (replica *i* -> devices
-        ``i*TP .. i*TP+TP-1``) so workers don't contend for the same GPUs.
+        of ``acceleratorCount`` device indices (replica *i* -> devices
+        ``i*N .. i*N+N-1``) so workers don't contend for the same GPUs. The
+        count is ``nok8s.engine.acceleratorCount`` as stated -- pinning happens
+        before the engine process exists, so it cannot come from the command.
         Returns "" for a single replica (keeps the current --gpus all behaviour),
         when ``deviceArgs`` is set (caller controls devices), or for accelerators
         without an index-based visible-devices env (gaudi/cpu/spyre).
@@ -408,14 +449,16 @@ class NoK8sDeployStep(Step):
         var = cls._VISIBLE_DEVICE_ENV.get(accel)
         if not var:
             return ""
-        tp = int(c.get("tensorParallel", 1) or 1)
+        per_replica = int(c.get("acceleratorCount", 1) or 1)
         idx = int(c.get("replicaIndex", 0) or 0)
-        devices = ",".join(str(d) for d in range(idx * tp, idx * tp + tp))
+        devices = ",".join(
+            str(d) for d in range(idx * per_replica, idx * per_replica + per_replica)
+        )
         return f"-e {var}={devices}"
 
     @staticmethod
     def _device_args(runtime: str, c: dict) -> str:
-        """Runtime flags to expose the accelerator to the vLLM container.
+        """Runtime flags to expose the accelerator to the engine container.
 
         ``deviceArgs`` (if set) is a raw override -- use it for anything not
         covered by the presets below (e.g. IBM Spyre/AIU). Otherwise the
@@ -441,7 +484,7 @@ class NoK8sDeployStep(Step):
         if accel == "gaudi":
             return "--runtime=habana -e HABANA_VISIBLE_DEVICES=all"
         if accel in ("cpu", "spyre"):
-            # cpu: no device; spyre/AIU: supply nok8s.vllm.deviceArgs.
+            # cpu: no device; spyre/AIU: supply nok8s.engine.deviceArgs.
             return ""
         # Unknown accelerator: fall back to NVIDIA behaviour.
         return f"--gpus {gpus}"
@@ -453,16 +496,16 @@ class NoK8sDeployStep(Step):
         spec: dict,
         context: ExecutionContext,
     ) -> str | None:
-        """Poll vLLM workers then Envoy for /v1/models. Returns error string or None.
+        """Poll engine workers then Envoy for /v1/models. Returns error string or None.
 
         The probe runs *on the daemon host*, so ``localhost`` is the machine
         actually serving. Probing from the client instead would report the
-        client's ports and would additionally require every vLLM port to be
+        client's ports and would additionally require every engine port to be
         reachable across the network, which is not something a bare-metal node's
         firewall owes us.
         """
         readiness = spec.get("readiness", {})
-        ports = list(readiness.get("vllmPorts", [])) + [readiness.get("envoyPort")]
+        ports = list(readiness.get("enginePorts", [])) + [readiness.get("envoyPort")]
         timeout = context.nok8s_deploy_timeout
         for port in ports:
             if port is None:

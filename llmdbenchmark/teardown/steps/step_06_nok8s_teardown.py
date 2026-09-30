@@ -1,6 +1,6 @@
 """Step 06 -- Teardown the nok8s container stack (no Kubernetes).
 
-Removes the vLLM/EPP/Envoy containers launched by
+Removes the engine/EPP/Envoy containers launched by
 step_05_nok8s_deploy.py, driven by the rendered ``34_nok8s-containers.yaml``
 launch spec, on whichever host ``nok8s.connection`` names.
 """
@@ -24,7 +24,7 @@ class NoK8sTeardownStep(Step):
         super().__init__(
             number=6,
             name="nok8s_teardown",
-            description="Remove nok8s containers (vLLM + EPP + Envoy)",
+            description="Remove nok8s containers (engine + EPP + Envoy)",
             phase=Phase.TEARDOWN,
             per_stack=True,
         )
@@ -79,7 +79,7 @@ class NoK8sTeardownStep(Step):
         # belong to whichever stack rendered without a suffix, so removing
         # them here would tear down another stack's containers.
         if not names and len(context.rendered_stacks or []) <= 1:
-            names = ["envoy", "epp", "vllm-0"]
+            names = ["envoy", "epp", "modelserver-0"]
 
         if not names:
             return StepResult(

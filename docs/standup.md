@@ -86,8 +86,8 @@ scenario file; commas inside `[]`, `{}` or quotes belong to the value.
 > spaces -- which silently changes the meaning of a shell command
 > (`export FOO=1`⏎`vllm serve` becomes `export FOO=1 vllm serve`). To keep
 > the breaks, wrap the value in double quotes so `\n` is an escape:
-> `--set 'decode.vllm.customCommand="export FOO=1\nvllm serve /model-cache/x"'`.
-> For a full multi-line `customCommand`, prefer the scenario file or
+> `--set 'decode.engine.command="export FOO=1\nvllm serve /model-cache/x"'`.
+> For a full multi-line engine command, prefer the scenario file or
 > `--cluster-config` -- `--set` is best suited to single-line values.
 
 > [!IMPORTANT]
@@ -162,11 +162,11 @@ Every applied override is logged with its previous value
 whose *parent* path does not exist warns about a possible typo.
 
 **Lists are assigned whole, never indexed.** A dotted path cannot address a
-list element, so `--set vllmCommon.volumeMounts.0.mountPath=/x` is rejected
+list element, so `--set engine.volumeMounts.0.mountPath=/x` is rejected
 rather than silently replacing the whole list. Assign the list instead:
 
 ```bash
---set 'vllmCommon.volumeMounts=[{name: dshm, mountPath: /dev/shm}]'
+--set 'engine.volumeMounts=[{name: dshm, mountPath: /dev/shm}]'
 ```
 
 (This differs from `run -o`, which overrides the workload profile and *does*
@@ -234,97 +234,68 @@ Default is `0` (disabled), which behaves exactly as standup always has.
 > the previous-container logs are usually the ones that explain a crash loop.
 
 ## Use
-A scenario file has to be manually crafted as a YAML file. Once crafted, it can be used by `llmdbenchmark standup`, `llmdbenchmark run` or `llmdbenchmark teardown` commands. Its access is controlled by the following parameters.
+A scenario is a YAML file you write by hand. Once written, it is what `llmdbenchmark standup`, `llmdbenchmark run` and `llmdbenchmark teardown` operate on: it names the stack, states each role's engine launch command, and says everything Kubernetes needs to put around it.
 
 > [!NOTE]
 > `llmdbenchmark experiment` is a command that **combines** `llmdbenchmark standup`, `llmdbenchmark run` and `llmdbenchmark teardown` into a single operation. Therefore, the command line parameters supported by the former is a combination of the latter three.
 
-The scenario parameters can be roughly categorized in four groups:
-- Target-specific (Cluster API access, authentication tokens, standup methods and models)
+### What comes from the command line
 
-| Variable                                     | Meaning                                        | Note                                                  |
-| -------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------- |
-| LLMDBENCH_CLUSTER_URL                        | URL to API access to Kubernetes cluster        | "auto" means "current" (e.g. `~/.kube/config`) is used|
-| LLMDBENCH_CLUSTER_TOKEN                      | Used to authenticate to the cluster            | Ignored for LLMDBENCH_CLUSTER_URL="auto"              |
-| LLMDBENCH_HF_TOKEN                           | Hugging face token                             | Required for gated models; optional for public models (auto-detected) |
-| LLMDBENCH_DEPLOY_SCENARIO                    | File containing multiple environment variables which will override defaults | If not specified, defaults to (empty) `none.yaml`. Can be overriden with CLI parameter `-c/--scenario` |
-| LLMDBENCH_DEPLOY_MODEL_LIST                  | List (comma-separated values) of models to be run against | Default=`meta-llama/Llama-3.2-1B-Instruct`. Can be overriden with CLI parameter `-m/--models` |
-| LLMDBENCH_DEPLOY_METHODS                       | List (comma-separated values) of standup methods | Default=`modelservice`. Can be overriden with CLI parameter `-t/--methods` |
+A few things are properties of *this invocation* rather than of the deployment, so they are passed per run instead of written in the file. Each has an environment-variable form: `LLMDBENCH_` plus the flag's long name, upper-cased.
 
-> [!TIP]
-> In case the full path is ommited for the scenario file (either by setting `LLMDBENCH_DEPLOY_SCENARIO` or CLI parameter `-c/--scenario`, it is assumed that the scenario exists inside the `config/scenarios` folder
+| Flag                            | Environment variable      | Meaning                                                                                                                                                     |
+| ------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--spec`/`--specification_file` | `LLMDBENCH_SPEC`          | The scenario file. A path without a leading directory resolves inside `config/scenarios`, so `--spec guides/optimized-baseline` is enough.                   |
+| `--stack`                       | `LLMDBENCH_STACK`         | Which named stacks of a multi-stack file to act on (see [Multi-Stack Scenarios](#multi-stack-scenarios)). Omit it and every stack in the file is deployed.   |
+| `-p`/`--namespace`              | `LLMDBENCH_NAMESPACE`     | Namespace to stand the stack up in; overrides `namespace.name`.                                                                                              |
+| `-m`/`--models`                 | `LLMDBENCH_MODELS`        | Comma-separated model list to stand up, one stack per model; overrides `model.name`.                                                                         |
+| `-t`/`--methods`                | `LLMDBENCH_METHODS`       | Comma-separated standup methods: `modelservice`, `standalone`, `kustomize`, `nok8s`, `fma`.                                                                  |
+| `--gateway-class`               | `LLMDBENCH_GATEWAY_CLASS` | Router topology for this run; overrides `gateway.className`.                                                                                                |
+| `--set`                         | `LLMDBENCH_SET`           | Override any scenario key inline (see [Overriding scenario values from the CLI](#overriding-scenario-values-from-the-cli---set)).                            |
+| `--kubeconfig`                  | `LLMDBENCH_KUBECONFIG`    | Kubeconfig to use. Without it, the current context is used.                                                                                                 |
+| `--non-admin`                   | `LLMDBENCH_NON_ADMIN`     | Skip the steps that require cluster-admin (CRDs, gateway provider install).                                                                                 |
+| `--dry-run`                     | `LLMDBENCH_DRY_RUN`       | Render the plan under `<workspace>/<run-id>/plan/` and stop before changing the cluster.                                                                     |
 
-- "Common" VLLM parameters, applicable to any standup method
+`llmdbenchmark <subcommand> --help` is the authoritative list; the same `LLMDBENCH_`-prefixed rule applies to every flag it shows.
 
-| Variable                                     | Meaning                                                                 | Note                                                                                                                                     |
-|----------------------------------------------|-------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
-| LLMDBENCH_VLLM_COMMON_NAMESPACE              | Namespace where stack gets stood up                                     | Default=`llmdbench`. Can be overriden with CLI parameter `-p/--namespace`                                                                |
-| LLMDBENCH_IGNORE_FAILED_VALIDATION           | Ignore failed sanity checks and continue to deployment                  | Default=`True`. Capacity Planner will perform a sanity check on vLLM parameters such as valid TP, max-model-len, KV cache availability.  |
-| LLMDBENCH_VLLM_COMMON_ACCELERATOR_MEMORY     | GPU memory for `LLMDBENCH_VLLM_COMMON_ACCELERATOR_RESOURCE` (e.g. `80`) | Default=`auto`, will try to guess GPU memory from `LLMDBENCH_VLLM_COMMON_ACCELERATOR_RESOURCE`                                           |
-| LLMDBENCH_VLLM_COMMON_SERVICE_ACCOUNT        | Service Account for stack                                               |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_ACCELERATOR_RESOURCE   | Accelerator type (e.g., `nvidia.com/gpu`)                               | "auto" means, will query the cluster to discover                                                                                         |
-| LLMDBENCH_VLLM_COMMON_NETWORK_RESOURCE       | Network type (e.g., `rdma/roce_gdr`)                                    |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_VLLM_ALLOW_LONG_MAX_MODEL_LEN |                                            |                                                |
-| LLMDBENCH_VLLM_COMMON_VLLM_SERVER_DEV_MODE          |                                            |  e.g., `0, 1` |
-| LLMDBENCH_VLLM_COMMON_VLLM_LOAD_FORMAT              |                                            |  e.g., `safetensors, tensorizer, runai_streamer, fastsafetensors` |
-| LLMDBENCH_VLLM_COMMON_VLLM_LOGGING_LEVEL            |                                            |  e.g., `DEBUG, INFO, WARNING`                                              |
-| LLMDBENCH_VLLM_COMMON_ENABLE_SLEEP_MODE             |                                            |  e.g., `true, false` |
-| LLMDBENCH_VLLM_COMMON_NETWORK_NR             |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_AFFINITY               |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_REPLICAS               |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_TENSOR_PARALLELISM     |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_DATA_PARALLELISM       |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_ACCELERATOR_NR         |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_ACCELERATOR_MEM_UTIL   |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_CPU_NR                 |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_CPU_MEM                |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_MAX_MODEL_LEN          |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_BLOCK_SIZE             |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_MAX_NUM_BATCHED_TOKENS |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_PVC_NAME               |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS      |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE   |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_PVC_DOWNLOAD_TIMEOUT   |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_HF_TOKEN_KEY           |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_HF_TOKEN_NAME          |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_INFERENCE_PORT         |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_FQDN                   |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_TIMEOUT                |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_ANNOTATIONS            |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_ENVVARS_TO_YAML        |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_INITIAL_DELAY_PROBE    |                                                                         |                                                                                                                                          |
-| LLMDBENCH_VLLM_COMMON_POD_SCHEDULER          |                                                                         |                                                                                                                                          |
+Hugging Face credentials are read from the environment, never from the scenario, so a token does not end up in a committed file: export `HF_TOKEN` (or `LLMDBENCH_HF_TOKEN`). Gated models require it; public models need nothing. How the token is presented *inside* the cluster is a scenario matter -- `huggingface.secretName` and `huggingface.tokenKey`.
+
+### What comes from the scenario file
+
+Everything else. The single rule that shapes the file: **an engine flag is never a scenario key.** A role states its own launch command, verbatim, in the engine's own spelling; llm-d-benchmark reads that text for the handful of facts Kubernetes needs before the process starts (which engine, which port, how many accelerators, the model reference) and passes the rest through untouched. So there is no key for `--max-model-len`, `--tp-size` or `--kv-transfer-config`: they go in the command, exactly as the llm-d guides write them.
+
+[`config/README.md`](../config/README.md) is the full key reference -- every key, its default, and what reads it. The areas standup draws on:
+
+| Area                       | Keys                                                                                                                                                                              |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Engine launch              | `<role>.engine.command` (`decode`, `prefill`, `standalone`, `nok8s`), `standalone.engine.args`, `engine.preprocessScript`, `<role>.engine.port`, `engine.servicePort`, `engine.name` |
+| Model                      | `model.name`, `model.shortName`, `model.size`, `modelservice.uriProtocol` (`pvc` \| `hf`)                                                                                          |
+| Scale and hardware         | `<role>.replicas`, `<role>.resources`, `<role>.parallelism`, `accelerator.resource`, `accelerator.type`, `accelerator.memory`, `<role>.acceleratorType`, `affinity`                 |
+| Storage                    | `storage.modelPvc.*`, `storage.workloadPvc.*`, `storage.downloadTimeout`, `storage.hostPath.*`, `standalone.modelMountPath`                                                        |
+| Routing                    | `gateway.className`, `routing.proxy.enabled`, `routing.connector`, `router.epp.*`, `httpRoute.*`                                                                                   |
+| Pod plumbing               | `<role>.extraEnvVars`, `<role>.extraContainerConfig`, `<role>.initContainers`, `<role>.additionalVolumes`/`additionalVolumeMounts`, `engine.volumes`/`engine.volumeMounts`, `engine.networkResource`, `engine.networkNr`, `engine.ephemeralStorage` |
+| Images and charts          | `images.vllm`, `images.sglang`, `images.trtllm`, `images.llmdInferenceSim`, `chartVersions.*`, `helmRepositories.*`                                                                |
+| Namespace and identity     | `namespace.name`, `serviceAccount.name`, `serviceAccountOverride`, `schedulerName`, `release`, `labels.*`                                                                          |
+| Timing and validation      | `control.waitTimeout`, `control.ignoreFailedValidation`                                                                                                      |
+| Monitoring                 | `monitoring.*`, `<role>.monitoring.podmonitor.*`                                                                                                                                   |
+| Harness and workload       | `harness.name`, `harness.experimentProfile`, `harness.resources`, `workDir`                                                                                                        |
+
+Anything a scenario does not state falls back to [`config/templates/values/defaults.yaml`](../config/templates/values/defaults.yaml). A good scenario reads as the difference between its deployment and that baseline; a value restated from defaults is one more thing that silently goes stale.
+
+`control.ignoreFailedValidation` (default `true`) decides what happens when the capacity planner's sanity check -- the role's stated parallelism widths against the devices its pod requests, context length and KV cache against accelerator memory -- comes back unhappy: continue to deployment, or stop. It reads the context length and memory fraction back out of the engine command, so a scenario states them once, in the flag the engine itself reads.
 
 On clusters where users cannot provision PersistentVolumeClaims, pass `standup --no-pvc` to avoid creating the model PVC. The workload PVC and data-access pod are a run-phase concern -- they first appear at `run`, and `run --no-pvc` skips them too. See [Standing up without PVCs](../llmdbenchmark/standup/README.md#standing-up-without-pvcs---no-pvc) for details.
-
-- "Standalone"-specific VLLM parameters
-
-| Variable                                                | Meaning                                    | Note                                           |
-| ------------------------------------------------------- | ------------------------------------------ | ---------------------------------------------- |
-| LLMDBENCH_VLLM_COMMON_MODEL_LOADER_EXTRA_CONFIG     |                                            |                                                |
-| LLMDBENCH_VLLM_STANDALONE_PVC_MOUNTPOINT                |                                            |                                                |
-| LLMDBENCH_VLLM_STANDALONE_PREPROCESS                    |                                            | e.g., `source /setup/preprocess/standalone-preprocess.sh ; /setup/preprocess/standalone-preprocess.py`                                              |
-| LLMDBENCH_VLLM_STANDALONE_ROUTE                         |                                            |                                                |
-| LLMDBENCH_VLLM_STANDALONE_HTTPROUTE                     |                                            |                                                |
-| LLMDBENCH_VLLM_STANDALONE_ARGS                          |                                            |                                                |
-| LLMDBENCH_VLLM_STANDALONE_EPHEMERAL_STORAGE             |                                            |                                                |
-
-- Gateway provider
-
-| Variable                                     | Meaning                                                                | Note                                                                                                     |
-| -------------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| LLMDBENCH_VLLM_MODELSERVICE_GATEWAY_CLASS_NAME | Gateway implementation used for the inference gateway                 | Default=`istio`. Supported: `none`, `istio`, `agentgateway`, `gke`, `data-science-gateway-class`, `epponly`.     |
 
 Gateway class options (set via `gateway.className` in the scenario YAML):
 
 | `className`                  | What it deploys                                                                                                  | Use when                                                          |
 |------------------------------|------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
 | `none`                       | ModelService decode pods plus a plain ClusterIP Service; **no** Gateway, HTTPRoute, EPP, Envoy, or routing proxy | Measuring direct model-server performance and routing overhead    |
-| `istio` (default)            | istio-base + istiod control plane, a Gateway + HTTPRoute, the `llm-d-router-gateway-dev` chart                       | Default; most flexible / production deployments                   |
+| `istio`                      | istio-base + istiod control plane, a Gateway + HTTPRoute, the `llm-d-router-gateway-dev` chart                       | Most flexible / production deployments                            |
 | `agentgateway`               | agentgateway-crds + agentgateway controller, a Gateway + HTTPRoute, the `llm-d-router-gateway-dev` chart             | Want agentgateway's data plane instead of Envoy/Istio             |
 | `gke`                        | Uses GKE-managed Gateway controller; same `llm-d-router-gateway-dev` chart                                           | Running on GKE                                                    |
 | `data-science-gateway-class` | OpenDataHub / OpenShift AI managed Gateway                                                                           | Running on OpenShift AI                                           |
-| `epponly`                    | **No** Kubernetes Gateway, **no** HTTPRoute, the `llm-d-router-standalone-dev` chart (EPP with an Envoy sidecar serving HTTP) | You want llm-d's standalone router topology without any gateway   |
+| `epponly` (default)          | **No** Kubernetes Gateway, **no** HTTPRoute, the `llm-d-router-standalone-dev` chart (EPP with an Envoy sidecar serving HTTP) | Default; llm-d's standalone router topology, no gateway needed     |
 
 `none` is a baseline lane, not a routing topology. It requires at least one
 decode replica and does not support P/D disaggregation.
@@ -347,7 +318,7 @@ LLMDBENCH_GATEWAY_CLASS=agentgateway \
 ```
 
 Precedence (highest wins): `--gateway-class` CLI flag → scenario
-`gateway.className` → `defaults.yaml` (`istio`).
+`gateway.className` → `defaults.yaml` (`epponly`).
 
 #### Method-aware validation
 
@@ -475,31 +446,27 @@ When `epponly` is selected, standup automatically:
   `istio`/`agentgateway`/`gke`/`data-science-gateway-class` to switch
   topology without touching anything else in the scenario.
 
-- "llm-d"-specific VLLM paramaters
+### Keys for the llm-d charts themselves
 
-| Variable                                          | Meaning                                         | Note                                            |
-| ------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------- |
-| LLMDBENCH_VLLM_INFRA_CHART_NAME                   |                                                 |                                                 |
-| LLMDBENCH_VLLM_INFRA_CHART_VERSION                |                                                 |                                                 |
-| LLMDBENCH_VLLM_INFRA_GATEWAY_CPU_REQUEST          | Gateway CPU request                             | Default=`4`                                     |
-| LLMDBENCH_VLLM_INFRA_GATEWAY_CPU_LIMIT            | Gateway CPU limit                               | Default=`16`                                    |
-| LLMDBENCH_VLLM_INFRA_GATEWAY_MEMORY_REQUEST       | Gateway memory request                          | Default=`4Gi`                                   |
-| LLMDBENCH_VLLM_INFRA_GATEWAY_MEMORY_LIMIT         | Gateway memory limit                            | Default=`16Gi`                                  |
-| LLMDBENCH_VLLM_GAIE_CHART_NAME                    |                                                 |                                                 |
-| LLMDBENCH_VLLM_GAIE_CHART_VERSION                 |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_RELEASE               |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_VALUES_FILE           |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_ADDITIONAL_SETS       |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_CHART_VERSION         |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_CHART_NAME            |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_HELM_REPOSITORY       |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_HELM_REPOSITORY_URL   |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_URI_PROTOCOL          |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_DECODE_INFERENCE_PORT |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_GATEWAY_CLASS_NAME    |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_ROUTE                 |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_EPP                   |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_INFERENCE_MODEL       |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_INFERENCE_POOL        |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE |                                                 |                                                 |
-| LLMDBENCH_VLLM_MODELSERVICE_GAIE_MONITORING_PROMETHEUS_ENABLED | Enable Prometheus ServiceMonitor for GAIE EPP component metrics                                                 | `true` (default) or `false` false                                            |
+Standup deploys the llm-d charts -- modelservice, the router/endpoint picker, and (for gateway-backed topologies) the infra chart -- and every knob on them is a scenario key. The ones scenarios reach for most:
+
+| Key                                       | Meaning                                                                                                          |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `modelservice.enabled`                    | Deploy via the modelservice chart (`decode`/`prefill` roles). The alternative lanes are `standalone`, `kustomize`, `nok8s` and `fma`. |
+| `modelservice.uriProtocol`                | `pvc` (default: a download Job stages the weights and the engine reads them from the PVC) or `hf` (the chart hands the engine an `hf://` artifact and it pulls at start). Read at this level -- under `storage:` it parses and nothing reads it. |
+| `decode.engine.port`, `prefill.engine.port` | Override the port a role binds. Normally omit: it is read from the command, and the default follows the topology -- decode binds 8200 behind the routing sidecar, 8000 without it; prefill and standalone bind 8000. |
+| `gateway.className`                       | Router topology -- see the table above.                                                                          |
+| `gateway.name`, `gateway.namespace`, `gateway.logLevel`, `gateway.service.type`, `gateway.resources` | The Gateway object and its data plane, for the gateway-backed classes. |
+| `router.epp.replicas`, `router.epp.resources`, `router.epp.env`, `router.epp.verbosity` | The endpoint picker pod.                                        |
+| `router.epp.pluginsConfigFile`, `router.epp.pluginsCustomConfig` | Which scheduling plugins the EPP runs, and their inline config. Write these under `router.epp` -- one level up, under `router`, they render into chart values that nothing reads and the EPP falls back to its default config. |
+| `router.tokenizer.enabled`                | Run the UDS tokenizer sidecar alongside the EPP.                                                                 |
+| `router.inferencePool.failureMode`        | `FailOpen` (default) or `FailClose` when the EPP is unreachable.                                                  |
+| `router.monitoring.prometheus.enabled`, `router.monitoring.interval` | ServiceMonitor for EPP metrics.                                        |
+| `routing.proxy.enabled`                   | Whether decode pods get the routing sidecar. This decides the decode port.                                        |
+| `routing.connector`, `routing.secure`, `routing.debugLevel` | KV transfer connector and sidecar behaviour for P/D disaggregation.               |
+| `httpRoute.requestTimeout`, `httpRoute.backendRequestTimeout` | HTTPRoute timeouts, for the gateway-backed classes.                            |
+| `chartVersions.llmDModelservice`, `chartVersions.llmDRouter`, `chartVersions.llmDInfra`, `chartVersions.inferencePool` | Chart versions. `auto` resolves to the newest published release at standup time; pin a version to make a run reproducible. |
+| `helmRepositories.*`                      | Where those charts are fetched from.                                                                              |
+| `images.routerEndpointPicker`, `images.routingSidecar`, `images.udsTokenizer` | Override an llm-d component image.                             |
+
+Full list, with defaults, in [`config/README.md`](../config/README.md) and [`config/templates/values/defaults.yaml`](../config/templates/values/defaults.yaml).

@@ -86,7 +86,18 @@ def test_nok8s_scenario_renders_templates_and_flags(tmp_path: Path) -> None:
     )
     assert spec["endpoint"] == "http://localhost:8081"
     kinds = sorted(c["kind"] for c in spec["containers"])
-    assert kinds == ["envoy", "epp", "vllm"]
+    assert kinds == ["engine", "envoy", "epp"]
+
+    # The scenario's launch command is carried through byte-for-byte, with
+    # `${model.name}` already substituted: nothing re-assembles it from flags.
+    worker = next(c for c in spec["containers"] if c["kind"] == "engine")
+    assert worker["engine"] == "vllm"
+    assert worker["command"].split("\n")[0] == (
+        "vllm serve Qwen/Qwen2.5-0.5B-Instruct \\"
+    )
+    assert "--tensor-parallel-size 1" in worker["command"]
+    # --port is the one flag read back out, to publish and probe the port.
+    assert worker["containerPort"] == 8000
 
 
 def test_nok8s_scenario_skips_the_kubernetes_template_set(tmp_path: Path) -> None:
@@ -286,7 +297,7 @@ def test_nok8s_preflight_checks_every_replica_port(tmp_path: Path) -> None:
     ctx = _nok8s_ctx(
         tmp_path,
         _FakeCmd(stdout_for={"ss -ltn": ss_out}),
-        nok8s={"vllm": {"replicas": 3, "hostPort": 8000, "accelerator": "cpu"}},
+        nok8s={"engine": {"replicas": 3, "hostPort": 8000, "accelerator": "cpu"}},
     )
     EnsureInfraStep().execute(ctx)
     assert "8002" in _busy_warning(ctx)
@@ -300,7 +311,7 @@ def test_nok8s_preflight_checks_envoy_admin_port(tmp_path: Path) -> None:
     ctx = _nok8s_ctx(
         tmp_path,
         _FakeCmd(stdout_for={"ss -ltn": ss_out}),
-        nok8s={"vllm": {"accelerator": "cpu"}},
+        nok8s={"engine": {"accelerator": "cpu"}},
     )
     EnsureInfraStep().execute(ctx)
     assert "19000" in _busy_warning(ctx)
@@ -317,7 +328,7 @@ def test_nok8s_preflight_falls_back_to_lsof(tmp_path: Path) -> None:
             fail_substrings=("command -v ss",),
             stdout_for={"lsof": lsof_out},
         ),
-        nok8s={"vllm": {"accelerator": "cpu"}},
+        nok8s={"engine": {"accelerator": "cpu"}},
     )
     EnsureInfraStep().execute(ctx)
     assert "8081" in _busy_warning(ctx)
@@ -330,7 +341,7 @@ def test_nok8s_preflight_warns_when_no_port_probe_available(tmp_path: Path) -> N
     ctx = _nok8s_ctx(
         tmp_path,
         _FakeCmd(fail_substrings=("command -v ss", "command -v lsof")),
-        nok8s={"vllm": {"accelerator": "cpu"}},
+        nok8s={"engine": {"accelerator": "cpu"}},
     )
     EnsureInfraStep().execute(ctx)
     assert any("Cannot verify host ports" in w for w in ctx.logger.warnings)
@@ -346,7 +357,7 @@ _STRING_PORT_CASES = (
     ({"epp": {"grpcPort": "9002"}}, 9002),
     ({"epp": {"grpcHealthPort": "9003"}}, 9003),
     ({"epp": {"metricsPort": "9090"}}, 9090),
-    ({"vllm": {"hostPort": "8000"}}, 8000),
+    ({"engine": {"hostPort": "8000"}}, 8000),
 )
 
 
@@ -357,7 +368,7 @@ def test_nok8s_preflight_accepts_quoted_ports(
     """A quoted port is still checked, not a TypeError from sorted()."""
     from llmdbenchmark.standup.steps.step_00_ensure_infra import EnsureInfraStep
 
-    nok8s = {"vllm": {"accelerator": "cpu"}}
+    nok8s = {"engine": {"accelerator": "cpu"}}
     for section, fields in override.items():
         nok8s.setdefault(section, {}).update(fields)
 
@@ -378,7 +389,7 @@ def test_nok8s_preflight_reports_unusable_port_instead_of_crashing(
     ctx = _nok8s_ctx(
         tmp_path,
         _FakeCmd(stdout_for={"ss -ltn": "State  Recv-Q\n"}),
-        nok8s={"vllm": {"accelerator": "cpu"}, "envoy": {"listenPort": value}},
+        nok8s={"engine": {"accelerator": "cpu"}, "envoy": {"listenPort": value}},
     )
     result = EnsureInfraStep().execute(ctx)
     assert result.success is True
@@ -396,7 +407,7 @@ def test_nok8s_preflight_treats_empty_port_as_default(tmp_path: Path) -> None:
     ctx = _nok8s_ctx(
         tmp_path,
         _FakeCmd(stdout_for={"ss -ltn": ss_out}),
-        nok8s={"vllm": {"accelerator": "cpu"}, "envoy": {"listenPort": None}},
+        nok8s={"engine": {"accelerator": "cpu"}, "envoy": {"listenPort": None}},
     )
     result = EnsureInfraStep().execute(ctx)
     assert result.success is True
@@ -411,21 +422,30 @@ def test_nok8s_preflight_survives_any_replicas_value(tmp_path: Path, replicas) -
     ctx = _nok8s_ctx(
         tmp_path,
         _FakeCmd(stdout_for={"ss -ltn": "State  Recv-Q\n"}),
-        nok8s={"vllm": {"accelerator": "nvidia", "replicas": replicas}},
+        nok8s={"engine": {"accelerator": "nvidia", "replicas": replicas}},
     )
     result = EnsureInfraStep().execute(ctx)
     assert result.success is True
 
 
-def test_nok8s_preflight_survives_non_numeric_tensor_parallel(tmp_path: Path) -> None:
-    """tensorParallel multiplies replicas in the GPU-capacity check."""
+def test_nok8s_preflight_survives_non_numeric_accelerator_count(tmp_path: Path) -> None:
+    """acceleratorCount multiplies replicas in the GPU-capacity check.
+
+    It is a number the scenario states -- the runtime pins devices before the
+    engine process exists -- so a non-numeric value is a typo or a hand-edited
+    plan. Neither may abort standup: the check is a courtesy, not a gate.
+    """
     from llmdbenchmark.standup.steps.step_00_ensure_infra import EnsureInfraStep
 
     ctx = _nok8s_ctx(
         tmp_path,
         _FakeCmd(stdout_for={"ss -ltn": "State  Recv-Q\n"}),
         nok8s={
-            "vllm": {"accelerator": "nvidia", "replicas": 2, "tensorParallel": "abc"}
+            "engine": {
+                "accelerator": "nvidia",
+                "replicas": 2,
+                "acceleratorCount": "abc",
+            }
         },
     )
     result = EnsureInfraStep().execute(ctx)
@@ -442,7 +462,7 @@ def test_nok8s_preflight_quoted_replicas_still_spans_replica_ports(
     ctx = _nok8s_ctx(
         tmp_path,
         _FakeCmd(stdout_for={"ss -ltn": ss_out}),
-        nok8s={"vllm": {"replicas": "3", "hostPort": 8000, "accelerator": "cpu"}},
+        nok8s={"engine": {"replicas": "3", "hostPort": 8000, "accelerator": "cpu"}},
     )
     EnsureInfraStep().execute(ctx)
     assert "8002" in _busy_warning(ctx)
@@ -479,15 +499,15 @@ def test_pin_env_per_replica() -> None:
     pin = NoK8sDeployStep._pin_env
     # Single replica -> no pinning (back-compat, uses --gpus all).
     assert pin({"replicas": 1, "accelerator": "nvidia"}) == ""
-    # 3 replicas, TP=1 -> one GPU each, distinct indices.
-    assert pin({"replicas": 3, "replicaIndex": 0, "tensorParallel": 1}) == (
+    # 3 replicas, one device each -> distinct indices.
+    assert pin({"replicas": 3, "replicaIndex": 0, "acceleratorCount": 1}) == (
         "-e CUDA_VISIBLE_DEVICES=0"
     )
-    assert pin({"replicas": 3, "replicaIndex": 2, "tensorParallel": 1}) == (
+    assert pin({"replicas": 3, "replicaIndex": 2, "acceleratorCount": 1}) == (
         "-e CUDA_VISIBLE_DEVICES=2"
     )
-    # 2 replicas, TP=4 -> contiguous 4-GPU slices.
-    assert pin({"replicas": 2, "replicaIndex": 1, "tensorParallel": 4}) == (
+    # 2 replicas, a command asking for 4 devices -> contiguous 4-GPU slices.
+    assert pin({"replicas": 2, "replicaIndex": 1, "acceleratorCount": 4}) == (
         "-e CUDA_VISIBLE_DEVICES=4,5,6,7"
     )
     # accelerator-specific env var.
@@ -545,10 +565,16 @@ def _nok8s_stack(tmp_path: Path) -> Path:
         "endpoint": "http://localhost:8081",
         "containers": [
             {
-                "name": "vllm-0",
-                "kind": "vllm",
+                "name": "modelserver-0",
+                "kind": "engine",
+                "engine": "vllm",
                 "image": "nonexistent:v0",
                 "hostPort": 8000,
+                "containerPort": 8000,
+                "shell": "/bin/bash",
+                # Verbatim, as the scenario wrote it. The step writes this to a
+                # file and mounts it, so nothing here parses a flag.
+                "command": "vllm serve Qwen/Qwen2.5-0.5B-Instruct --port 8000\n",
             },
             {
                 "name": "epp",
@@ -570,14 +596,14 @@ def test_nok8s_launch_failure_stops_and_rolls_back(tmp_path: Path) -> None:
     from llmdbenchmark.standup.steps.step_05_nok8s_deploy import NoK8sDeployStep
 
     stack = _nok8s_stack(tmp_path)
-    # vllm-0 is launched first and fails.
-    cmd = _RecordingCmd(fail_substrings=("--name vllm-0",))
+    # modelserver-0 is launched first and fails.
+    cmd = _RecordingCmd(fail_substrings=("--name modelserver-0",))
     ctx = _nok8s_ctx(tmp_path, cmd)
 
     result = NoK8sDeployStep().execute(ctx, stack)
 
     assert result.success is False
-    assert "vllm-0" in result.message
+    assert "modelserver-0" in result.message
     # Nothing after the failing container is launched.
     assert not any("run -d --name epp" in c for c in cmd.commands)
     assert not any("run -d --name envoy" in c for c in cmd.commands)
@@ -588,14 +614,14 @@ def test_nok8s_rollback_dumps_logs_before_removing(tmp_path: Path) -> None:
     from llmdbenchmark.standup.steps.step_05_nok8s_deploy import NoK8sDeployStep
 
     stack = _nok8s_stack(tmp_path)
-    # vllm-0 and epp come up; envoy (launched last) fails.
+    # modelserver-0 and epp come up; envoy (launched last) fails.
     cmd = _RecordingCmd(fail_substrings=("--name envoy",))
     ctx = _nok8s_ctx(tmp_path, cmd)
 
     result = NoK8sDeployStep().execute(ctx, stack)
 
     assert result.success is False
-    for name in ("vllm-0", "epp"):
+    for name in ("modelserver-0", "epp"):
         logs = cmd.commands.index(f"docker logs {name} --tail 100")
         # rm -f appears twice per container: the idempotency wipe before the
         # launch, and the rollback afterwards. The rollback one must come after
@@ -630,7 +656,7 @@ def test_resolve_deploy_method_forces_nok8s() -> None:
 # Multiple nok8s stacks on one host (issue #1699)
 # ---------------------------------------------------------------------- #
 SECOND_STACK_PORTS = {
-    ("vllm", "hostPort"): 8100,
+    ("engine", "hostPort"): 8100,
     ("epp", "grpcPort"): 9102,
     ("epp", "grpcHealthPort"): 9103,
     ("epp", "metricsPort"): 9190,
@@ -690,8 +716,16 @@ def test_multi_stack_nok8s_identities_are_disjoint(tmp_path: Path) -> None:
 
     names_a = {c["name"] for c in spec_a["containers"]}
     names_b = {c["name"] for c in spec_b["containers"]}
-    assert names_a == {"vllm-0-nok8s-single", "epp-nok8s-single", "envoy-nok8s-single"}
-    assert names_b == {"vllm-0-nok8s-second", "epp-nok8s-second", "envoy-nok8s-second"}
+    assert names_a == {
+        "modelserver-0-nok8s-single",
+        "epp-nok8s-single",
+        "envoy-nok8s-single",
+    }
+    assert names_b == {
+        "modelserver-0-nok8s-second",
+        "epp-nok8s-second",
+        "envoy-nok8s-second",
+    }
     assert not names_a & names_b
 
     assert spec_a["workspaceHostDir"] != spec_b["workspaceHostDir"]
@@ -712,9 +746,9 @@ def test_multi_stack_nok8s_identities_are_disjoint(tmp_path: Path) -> None:
 
 
 def test_single_stack_nok8s_names_stay_unsuffixed(tmp_path: Path) -> None:
-    """Back-compat: one stack keeps vllm-0 / epp / envoy and the shared workspace."""
+    """Back-compat: one stack keeps modelserver-0 / epp / envoy and the workspace."""
     spec = _spec_of(_stack_dir(_render(tmp_path)))
-    assert {c["name"] for c in spec["containers"]} == {"vllm-0", "epp", "envoy"}
+    assert {c["name"] for c in spec["containers"]} == {"modelserver-0", "epp", "envoy"}
     assert spec["workspaceHostDir"] == "~/.llmdbench/nok8s"
 
 
@@ -865,14 +899,14 @@ def test_nok8s_one_stack_claiming_a_port_twice_is_a_render_error() -> None:
         {
             "nok8s": {
                 "enabled": True,
-                "vllm": {"hostPort": 8000},
+                "engine": {"hostPort": 8000},
                 "envoy": {"listenPort": 8000},
             }
         },
         "solo",
     )
     assert any(
-        "8000" in e and "nok8s.vllm.hostPort" in e and "nok8s.envoy.listenPort" in e
+        "8000" in e and "nok8s.engine.hostPort" in e and "nok8s.envoy.listenPort" in e
         for e in errors
     ), errors
 
@@ -884,7 +918,7 @@ def test_nok8s_claims_validator_survives_a_non_int_replicas() -> None:
             {
                 "nok8s": {
                     "enabled": True,
-                    "vllm": {"replicas": "auto", "hostPort": 8000},
+                    "engine": {"replicas": "auto", "hostPort": 8000},
                 }
             },
             "solo",
@@ -899,7 +933,7 @@ def test_nok8s_quoted_replicas_still_spans_every_worker_port() -> None:
         {
             "nok8s": {
                 "enabled": True,
-                "vllm": {"replicas": "2", "hostPort": 8000},
+                "engine": {"replicas": "2", "hostPort": 8000},
                 "envoy": {"listenPort": 8001},
             }
         },
@@ -908,7 +942,7 @@ def test_nok8s_quoted_replicas_still_spans_every_worker_port() -> None:
     assert any("8001" in e and "claimed by both" in e for e in errors), errors
 
 
-# A non-integer port is only caught by template arithmetic on `vllm.hostPort`.
+# A non-integer port is only caught by template arithmetic on `engine.hostPort`.
 # The other five interpolate verbatim, so without this validation they render a
 # nonsense port into the Envoy bootstrap and the endpoint URL and exit 0.
 _BAD_PORT_VALUES = ("auto", "", "80a1", "8081x", True, [8081], {"a": 1}, 8.5)
@@ -944,7 +978,7 @@ def test_nok8s_quoted_port_is_accepted_as_its_number(value: str) -> None:
         {
             "nok8s": {
                 "enabled": True,
-                "vllm": {"hostPort": 8000},
+                "engine": {"hostPort": 8000},
                 "envoy": {"listenPort": value},
             }
         },
@@ -957,7 +991,7 @@ def test_nok8s_absent_port_is_not_a_render_error() -> None:
     """defaults.yaml supplies every port; presence is not this check's contract."""
     assert (
         _validator()._validate_nok8s_host_claims(
-            {"nok8s": {"enabled": True, "vllm": {"hostPort": 8000}}},
+            {"nok8s": {"enabled": True, "engine": {"hostPort": 8000}}},
             "solo",
         )
         == []
@@ -1030,7 +1064,7 @@ def test_nok8s_teardown_leaves_siblings_alone_without_a_spec(tmp_path: Path) -> 
     solo = _nok8s_ctx(tmp_path, _RecordingCmd())
     solo.rendered_stacks = [specless]
     NoK8sTeardownStep().execute(solo, specless)
-    assert solo.cmd.removed() == {"envoy", "epp", "vllm-0"}
+    assert solo.cmd.removed() == {"envoy", "epp", "modelserver-0"}
 
 
 class _RecordingVersionResolver:
@@ -1168,7 +1202,7 @@ def _remote_stack(
         spec["transport"] = transport
     spec["clientEndpoint"] = "http://10.0.0.7:8081"
     spec["workspaceHostDir"] = "~/.llmdbench/nok8s"
-    spec["readiness"] = {"vllmPorts": [8000], "envoyPort": 8081}
+    spec["readiness"] = {"enginePorts": [8000], "envoyPort": 8081}
     # Give the stack the config files the step stages, so the staging path is
     # exercised rather than skipped.
     for prefix in ("31_nok8s-epp-config", "32_nok8s-epp-endpoints", "33_nok8s-envoy"):
@@ -1244,11 +1278,11 @@ def test_the_hf_token_reaches_the_node_without_being_logged(tmp_path: Path) -> N
         os.environ.pop("HUGGING_FACE_HUB_TOKEN", None)
     assert result.success is True, result.message
 
-    vllm = next(c for c in cmd.commands if "--name vllm-0" in c)
-    assert "hf_supersecret" not in vllm
+    engine = next(c for c in cmd.commands if "--name modelserver-0" in c)
+    assert "hf_supersecret" not in engine
     # It is still requested, and the remote shell has it by then.
-    assert "-e HUGGING_FACE_HUB_TOKEN" in vllm
-    assert 'eval "$(cat)" &&' in vllm
+    assert "-e HUGGING_FACE_HUB_TOKEN" in engine
+    assert 'eval "$(cat)" &&' in engine
     token_stdin = next(s for s in cmd.stdins if s)
     assert "hf_supersecret" in token_stdin
     # Nothing anywhere in the log carries the value.
@@ -1352,7 +1386,7 @@ def test_remote_teardown_removes_containers_on_the_node(tmp_path: Path) -> None:
 
     assert result.success is True
     assert "10.0.0.7" in result.message
-    assert cmd.removed() == {"vllm-0", "epp", "envoy"}
+    assert cmd.removed() == {"modelserver-0", "epp", "envoy"}
     for c in cmd.commands:
         assert c.startswith("ssh ")
         assert "bench@10.0.0.7 'docker rm -f " in c
@@ -1374,7 +1408,7 @@ def test_native_transport_teardown_reaches_the_same_daemon(tmp_path: Path) -> No
     result = NoK8sTeardownStep().execute(ctx, stack)
 
     assert result.success is True
-    assert cmd.removed() == {"vllm-0", "epp", "envoy"}
+    assert cmd.removed() == {"modelserver-0", "epp", "envoy"}
     for c in cmd.commands:
         assert c.startswith("docker -H ssh://bench@10.0.0.7/var/run/docker.sock rm")
 
@@ -1567,7 +1601,7 @@ def _remote_ctx(
     runtime: str = "docker",
     transport: str = "",
 ):
-    nok8s = {"enabled": True, "connection": connection, "vllm": {}}
+    nok8s = {"enabled": True, "connection": connection, "engine": {}}
     if transport:
         nok8s["transport"] = transport
     ctx = _nok8s_ctx(tmp_path, cmd, nok8s=nok8s)
@@ -1794,7 +1828,7 @@ def test_podman_refusing_a_supplied_key_blames_the_node(tmp_path: Path) -> None:
             "connection": "root@10.0.0.7",
             "transport": "native",
             "sshIdentity": "/home/me/.ssh/id_rsa",
-            "vllm": {},
+            "engine": {},
         },
     )
     ctx.container_runtime = "podman"

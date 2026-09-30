@@ -3,7 +3,12 @@
 from pathlib import Path
 
 from llmdbenchmark.executor.context import ExecutionContext
-from llmdbenchmark.smoketests.base import BaseSmoketest, _load_config, _nested_get
+from llmdbenchmark.smoketests.base import (
+    BaseSmoketest,
+    _engine_container,
+    _load_config,
+    _nested_get,
+)
 from llmdbenchmark.smoketests.report import CheckResult, SmoketestReport
 
 
@@ -101,19 +106,12 @@ class CpuValidator(BaseSmoketest):
             )
             return report
 
-        # Find the correct container name
+        # The serving container, by llm-d's engine-neutral name (falling back to
+        # the first non-sidecar container for a pod that renamed it).
         containers = serving_pod.get("spec", {}).get("containers", [])
-        container_name = None
-        for c in containers:
-            if "vllm" in c.get("name", ""):
-                container_name = c.get("name")
-                break
-        if not container_name and containers:
-            container_name = containers[0].get("name", "vllm")
+        container_name = _engine_container(serving_pod)
 
-        resources = self.get_pod_resources(
-            serving_pod, container=container_name or "vllm"
-        )
+        resources = self.get_pod_resources(serving_pod, container=container_name)
         limits = resources.get("limits", {})
 
         # No GPU resources
@@ -130,21 +128,21 @@ class CpuValidator(BaseSmoketest):
             )
         )
 
-        # Correct vLLM image
+        # The engine image the role resolved to
         for c in containers:
             if c.get("name") == container_name:
                 image = c.get("image", "")
-                expected_repo = (
-                    _nested_get(config, "images", "vllm", "repository") or ""
+                expected_repo = self.expected_engine_repository(
+                    config, "decode", "standalone"
                 )
                 if expected_repo:
                     report.add(
                         CheckResult(
-                            "cpu_vllm_image",
+                            "cpu_engine_image",
                             expected_repo in image,
                             expected=expected_repo,
                             actual=image,
-                            message=f"vLLM image: {image}",
+                            message=f"engine image: {image}",
                         )
                     )
                 break
@@ -166,7 +164,7 @@ class CpuValidator(BaseSmoketest):
             )
         )
         # Shared memory volume -- only check if scenario defines it
-        configured_volumes = _nested_get(config, "vllmCommon", "volumes") or []
+        configured_volumes = _nested_get(config, "engine", "volumes") or []
         configured_vol_names = [
             v.get("name", "") for v in configured_volumes if isinstance(v, dict)
         ]

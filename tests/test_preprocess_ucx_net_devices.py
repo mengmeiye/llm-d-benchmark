@@ -203,7 +203,7 @@ class TestRoutingSurvivesEmptyDiscovery:
         )
 
         assert "WARNING: no usable HCA was found" in stdout
-        assert "vllmCommon.ucxNetDevices" in stdout
+        assert "UCX_NET_DEVICES in the role's extraEnvVars" in stdout
         assert "do not include all of the selected" in stdout
 
     def test_routing_rules_are_emitted_when_discovery_succeeds(self, tmp_path):

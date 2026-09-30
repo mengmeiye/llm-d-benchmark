@@ -45,22 +45,59 @@ def resolver():
 
 
 class TestEffectiveAcceleratorCount:
+    """The one chain that decides how many devices a pod holds.
+
+    Kubernetes' own spelling first, then the shorthands, then the chart's
+    parallelism widths. ``13_ms-values.yaml.j2`` and
+    ``14_standalone-deployment_yaml.j2`` walk the same chain, so a change here
+    that is not mirrored there shows up as a render diff.
+    """
+
+    def test_resources_limits_wins(self):
+        """What the pod spec asks for is what the kubelet grants."""
+        assert effective_accelerator_count(
+            {
+                "resources": {"limits": {"nvidia.com/gpu": 2}},
+                "accelerator": {"count": 8},
+                "parallelism": {"tensor": 4},
+            }
+        ) == (2, "resources.limits.nvidia.com/gpu")
+
+    def test_resources_limits_uses_the_declared_resource_name(self):
+        assert effective_accelerator_count(
+            {
+                "accelerator": {"resource": "amd.com/gpu"},
+                "resources": {"limits": {"amd.com/gpu": 8, "nvidia.com/gpu": 1}},
+            }
+        ) == (8, "resources.limits.amd.com/gpu")
+
     def test_explicit_count_wins(self):
         assert effective_accelerator_count({"accelerator": {"count": 4}}) == (
             4,
-            "accelerator.count (explicit)",
+            "accelerator.count",
+        )
+
+    def test_plan_wide_count_applies_to_a_role_that_states_none(self):
+        assert effective_accelerator_count({}, {"accelerator": {"count": 3}}) == (
+            3,
+            "accelerator.count (plan-wide)",
         )
 
     def test_falls_back_to_tensor_parallelism(self):
         assert effective_accelerator_count({"parallelism": {"tensor": 2}}) == (
             2,
-            "parallelism.tensor (fallback)",
+            "parallelism.tensor x dataLocal",
         )
+
+    def test_data_local_replicas_multiply_the_tensor_width(self):
+        assert effective_accelerator_count(
+            {"parallelism": {"tensor": 2, "dataLocal": 4}}
+        ) == (8, "parallelism.tensor x dataLocal")
 
     def test_explicit_count_of_zero_treated_as_cpu(self):
         assert effective_accelerator_count(
             {"accelerator": {"count": 0}, "parallelism": {"tensor": 2}}
-        ) == (0, "accelerator.count (explicit)")
+        ) == (0, "accelerator.count")
 
     def test_unset_returns_zero(self):
         assert effective_accelerator_count({}) == (0, "unset")

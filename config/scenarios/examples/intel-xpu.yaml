@@ -1,0 +1,193 @@
+# Intel XPU (Arc B60 / Data Center GPU) Example Scenario
+#
+# The same aggregated stack as examples/gpu.yaml, on Intel XPU instead of CUDA.
+# The difference is entirely in the text of one command, and it is spelled out
+# below rather than assembled from substitution points:
+#
+#   CUDA   --block-size 64 --gpu-memory-utilization 0.95
+#   XPU    (no --block-size at all) --gpu-memory-utilization 0.35
+#          --enforce-eager --disable-sliding-window
+#
+# Why a scenario file and not an accelerator-neutral guide:
+#
+#   An earlier design gave `accelerator:` a set of command fragments
+#   (`dtypeArgs`, `blockSizeArgs`, `executionArgs`, ...) so one guide command
+#   could interpolate them and run on any backend. It worked, and it cost every
+#   reader of every guide four or five `${accelerator.*}` substitution points
+#   whose values were invisible in the file -- two of which rendered to the
+#   empty string on CUDA, which is what almost everyone runs. The flags are
+#   stated here instead. This is how examples/spyre.yaml and examples/cpu.yaml
+#   have always handled their hardware.
+#
+#   The parts of an accelerator profile that are *values* rather than command
+#   text -- the image, a fitting model, resource sizing, storage and router
+#   sizing -- still come from config/templates/values/overlays/intel-xpu.yaml
+#   and are still auto-detected from the cluster, so they are not repeated here.
+#
+# Selecting it: `accelerator.profile` below is explicit so the scenario renders
+# identically off-cluster (CI dry runs, `llmdbench standup --dry-run`). On a
+# real XPU cluster `profile: auto` detects `gpu.intel.com` and resolves to the
+# same overlay.
+#
+# IMPORTANT NOTE:
+# All parameters not defined here will use the default values from defaults.yaml.
+scenario:
+  # ============================================================================
+  # Intel XPU Example - single-role aggregated deployment on Intel GPUs
+  # ============================================================================
+  - name: "intel-xpu-example"
+
+    # =========================================================================
+    # COMMON -- Applies to all deployment methods
+    # =========================================================================
+    common:
+      # -------------------------------------------------------------------------
+      # Accelerator selection.
+      # `intel-xe` and `intel-i915` are the classic device-plugin spellings and
+      # both resolve to the shared `intel-xpu` overlay; `intel-xpu` is the DRA
+      # spelling. Set `profile: auto` to take whatever the cluster advertises.
+      # -------------------------------------------------------------------------
+      accelerator:
+        profile: intel-xe
+        resource: "gpu.intel.com/xe"
+
+      # -------------------------------------------------------------------------
+      # Model Configuration
+      # `decode.engine.command` below names the model, and that is the single
+      # place it is named: name, huggingfaceId, PVC path, idLabel and the
+      # capacity numbers are all read back off the command. What is left here is
+      # what a command cannot say -- and PVC `size` is not here either, because
+      # the `intel-xe` profile knows how much a B60 holds.
+      # -------------------------------------------------------------------------
+      model:
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # A model id is a fact the command states; a short name is a choice, so
+        # it stays here -- derived, it is a `{first8}-{sha8}-{last8}`
+        # hash.
+        shortName: qwen-qwen3-06b
+
+      # -------------------------------------------------------------------------
+      # Engine Configuration -- the pod shape shared by every role.
+      # No engine flags here and nothing XPU-specific: this is what
+      # llm-d-benchmark builds around whatever engine runs.
+      # -------------------------------------------------------------------------
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # step writes the network facts only the node can tell us (device names,
+        # GID index) plus a CUDA library path when there is one -- on XPU there
+        # is not, and the block self-guards to a no-op.
+        preprocessScript: "python3 /setup/preprocess/set_llmdbench_environment.py && . $HOME/llmdbench_env.sh"
+
+        volumes:
+          - name: dshm
+            type: emptyDir
+            emptyDir:
+              medium: Memory
+          - name: preprocesses
+            type: configMap
+            configMap:
+              name: llm-d-benchmark-preprocesses
+              defaultMode: 493  # 0755
+          - name: k8s-llmdbench-context
+            type: secret
+            secret:
+              secretName: llmdbench-context
+
+        volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          - name: preprocesses
+            mountPath: /setup/preprocess
+          - name: k8s-llmdbench-context
+            mountPath: /etc/kubeconfig
+            readOnly: true
+
+    # =========================================================================
+    # STANDALONE -- Only applies when standalone.enabled: true
+    # A standalone pod has no routing sidecar, so its command binds
+    # `engine.servicePort` (8000) itself. To run this scenario standalone, flip
+    # the two `enabled` flags and give the role decode's command with
+    # `--port 8000`.
+    # =========================================================================
+    standalone:
+      enabled: false
+      replicas: 1
+
+    # =========================================================================
+    # MODELSERVICE -- Only applies when modelservice.enabled: true
+    # =========================================================================
+    modelservice:
+      enabled: true
+
+      # `epponly` is the llm-d "Standalone Mode" router topology: no Kubernetes
+      # Gateway, the EPP pod runs an Envoy sidecar that serves HTTP directly.
+      gateway:
+        className: epponly
+
+      # -------------------------------------------------------------------------
+      # Prefill Configuration -- disabled.
+      # P/D on XPU needs a second command, not new configuration keys: both
+      # roles take `--kv-transfer-config`, and on XPU the JSON also needs
+      # `"kv_buffer_device":"cpu"` because the NIXL transport stages through
+      # host memory rather than device-to-device. See the commented block at the
+      # end of decode.engine.command below.
+      # -------------------------------------------------------------------------
+      prefill:
+        enabled: false
+        replicas: 0
+
+      # -------------------------------------------------------------------------
+      # Decode Configuration
+      # -------------------------------------------------------------------------
+      decode:
+        replicas: 1
+
+        # The XPU NIXL transport uses host memory/TCP rather than device IPC or
+        # GDR. Only needed once P/D is switched on above.
+        # extraEnvVars:
+        #   - name: UCX_TLS
+        #     value: tcp
+        extraEnvVars: []
+
+        engine:
+          # A working `vllm serve` line for the llm-d XPU image, verbatim. Four
+          # things differ from the CUDA spelling, and all four are visible:
+          #
+          #   1. No `--block-size`. The XPU FMHA kernel in this image selects
+          #      its own supported page size; passing the canonical CUDA value
+          #      fails on first inference with "Unsupported page size for fmha".
+          #   2. `--gpu-memory-utilization 0.35`, not 0.95. The single-device
+          #      validation path may run two decode processes (or a compact
+          #      2-decode/1-prefill topology) on one 22.7 GiB B60.
+          #   3. `--enforce-eager`: no torch.compile/CUDA-graph capture path.
+          #   4. `--disable-sliding-window`.
+          #
+          # The model is named once, here. Everything outside the engine (the
+          # model PVC, pod labels, the HTTPRoute, the harness target) is keyed
+          # off what this line says.
+          command: |
+            vllm serve Qwen/Qwen3-0.6B \
+            --host 0.0.0.0 \
+            --port 8200 \
+            --max-model-len 16000 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 1 \
+            --gpu-memory-utilization 0.35 \
+            --dtype bfloat16 \
+            --enforce-eager \
+            --disable-sliding-window \
+            --disable-uvicorn-access-log \
+            --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
+            --no-enable-prefix-caching
+          # For P/D, add to both roles (prefill on --port 8000):
+          #   --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"cpu"}'
+
+    # =========================================================================
+    # HARNESS
+    # =========================================================================
+    harness:
+      name: inference-perf
+      experimentProfile: sanity_random.yaml
+
+    workDir: "~/data/intel-xpu"

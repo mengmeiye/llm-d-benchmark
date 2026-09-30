@@ -130,7 +130,7 @@ _PLAN_LEVEL_PREFIXES: tuple[str, ...] = (
     "fma.",
     "kustomize.",
     "router.",
-    "vllmCommon.",
+    "engine.",
     "model.",
     "scheduler.",  # gentle warning -- could also be the K8s pod scheduler
     "schedulerName",  # top-level K8s pod scheduler

@@ -2,8 +2,9 @@
 
 ## Concept
 
-The `nok8s` deployment method runs the llm-d routing stack — **vLLM + EPP
-(router) + Envoy** — as plain `docker`/`podman` containers on a single host,
+The `nok8s` deployment method runs the llm-d routing stack — **an inference
+engine + EPP (router) + Envoy** — as plain `docker`/`podman` containers on a
+single host,
 with **no Kubernetes cluster**. The benchmark harness (`llmdbenchmark run`)
 also runs as a **local container** against the Envoy front door, so the entire
 standup → run → teardown lifecycle is cluster-free.
@@ -11,7 +12,7 @@ standup → run → teardown lifecycle is cluster-free.
 ```
 client ──▶ Envoy :8081 ──ext_proc──▶ EPP :9002 ──▶ picks a worker
               │                        (reads endpoints.yaml, file-discovery)
-              └──────────────────────▶ vLLM :8000  (OpenAI-compatible API)
+              └──────────────────────▶ engine :8000 (OpenAI-compatible API)
 ```
 
 Instead of watching a Kubernetes `InferencePool`, the EPP reads its worker
@@ -35,12 +36,12 @@ broken container runtime is fatal, the rest are warnings.
 
 | Requirement | Notes |
 |-------------|-------|
-| Linux host + NVIDIA GPU(s) | Images/flags are NVIDIA + vLLM specific |
+| Linux host + NVIDIA GPU(s) | Device flags default to NVIDIA; other accelerators are presets (see [Accelerators](#accelerators)) |
 | NVIDIA driver | `nvidia-smi` must work |
 | Container runtime | **docker** or **podman** (`nok8s.runtime`), on the host named by `nok8s.connection` — for a remote node that means *there*, not here |
 | NVIDIA Container Toolkit | docker: `nvidia-ctk runtime configure --runtime=docker`; podman: `nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` |
 | Hugging Face token | `export HUGGING_FACE_HUB_TOKEN=hf_...` (only for gated models) |
-| Free host ports | 8000 (vLLM), 8081 (Envoy), 9002/9003/9090 (EPP), 19000 (Envoy admin) |
+| Free host ports | 8000 (the engine), 8081 (Envoy), 9002/9003/9090 (EPP), 19000 (Envoy admin) |
 | Outbound network | to pull images (docker.io, ghcr.io) and model weights (Hugging Face) |
 | `llmdbenchmark` CLI | `./install.sh` (Python 3.11+) |
 
@@ -89,7 +90,7 @@ llmdbenchmark --spec config/specification/guides/nok8s.yaml.j2 --base-dir . --dr
 | `--dry-run run` | **Works** -- endpoint resolves locally with no cluster query, profiles render, the harness `docker run` is logged |
 | `--dry-run teardown --methods nok8s` | **Works** -- logs one `docker rm -f` per container |
 | `teardown --methods nok8s` (live) | **Works** -- `docker rm -f` is idempotent, so it is safe with nothing running |
-| `standup` (live) | **Fails at step 05.** It emits `docker run -d --name vllm-0 --gpus all ...`, which a GPU-less docker rejects: `could not select device driver "" with capabilities: [[gpu]]` |
+| `standup` (live) | **Fails at step 05.** It emits `docker run -d --name modelserver-0 --gpus all ...`, which a GPU-less docker rejects: `could not select device driver "" with capabilities: [[gpu]]` |
 | `run` / `smoketest` (live) | **Fails** -- nothing is serving the model |
 
 Two caveats before you read a green dry-run as "my host is fine":
@@ -100,7 +101,7 @@ Two caveats before you read a green dry-run as "my host is fine":
   container runtime: only a missing or broken runtime is fatal, so the missing
   accelerator is a warning, not an error:
   ```
-  WARNING  'nvidia-smi' found no nvidia accelerator; vLLM needs the device + driver present, ...
+  WARNING  'nvidia-smi' found no nvidia accelerator; the engine needs the device + driver present, ...
   WARNING  $HUGGING_FACE_HUB_TOKEN is not set; gated Hugging Face models will fail to download ...
   INFO     nok8s preflight passed (runtime=docker).
   ```
@@ -112,7 +113,7 @@ Two caveats before you read a green dry-run as "my host is fine":
 ```bash
 export HUGGING_FACE_HUB_TOKEN=hf_...     # for gated models
 
-# Bring up vLLM + EPP + Envoy as local containers (step 00 runs the preflight).
+# Bring up the engine + EPP + Envoy as local containers (step 00 runs the preflight).
 llmdbenchmark --spec config/specification/guides/nok8s.yaml.j2 --base-dir . standup --methods nok8s
 
 # Probe the stack over HTTP (no cluster needed); standup does not chain this one.
@@ -158,7 +159,7 @@ directory the scenario's `workDir` names. The shipped guide uses
 
 ```
 ~/data/nok8s/<user>-20260821-173703-475/
-├── setup/logs/nok8s-{vllm-0,epp,envoy}.log   # captured container logs
+├── setup/logs/nok8s-{modelserver-0,epp,envoy}.log  # captured container logs
 ├── logs/                                     # the CLI's own logs, per module
 │   └── llmdbenchmark-stdout.log              #   plus this combined stream
 └── plan/                                     # the rendered launch spec
@@ -189,9 +190,10 @@ single-GPU example. Key fields (full defaults in
 | `nok8s.connection` | Host whose runtime runs the stack. `localhost` (default), or `ssh://[user@]host[:port][/socket]`. A bare `10.0.0.7` / `user@node` is read as `ssh://`. Settable per run with `--set nok8s.connection=…` instead of editing the scenario. See [Remote host](#remote-host) |
 | `nok8s.sshIdentity` | SSH private key for a remote connection (default: the agent / `~/.ssh` keys) |
 | `nok8s.sshArgs` | Extra `ssh`/`scp` options. **Replaces** the defaults (`BatchMode=yes`, `ConnectTimeout=10`), so restate them if you override |
-| `nok8s.hfTokenEnv` | Host env var passed to vLLM for HF auth |
+| `nok8s.hfTokenEnv` | Host env var passed to the engine container for HF auth |
 | `nok8s.workspaceHostDir` | Host dir where EPP/Envoy configs are staged + bind-mounted |
-| `nok8s.vllm.{image,tag,hostPort,tensorParallel,accelerator,gpus,deviceArgs,shmSize,replicas,extraArgs}` | vLLM worker(s); worker *i* is published on `hostPort + i` (see Accelerators for `accelerator`/`deviceArgs`) |
+| `nok8s.engine.command` | The engine launch line, written exactly as you would type it on the node. It runs inside the container unchanged; only the launcher, the model, `--port` and the capacity pair are read back out (see [Engine command](#engine-command)) |
+| `nok8s.engine.{name,port,image,hostPort,accelerator,acceleratorCount,gpus,deviceArgs,shmSize,hfCacheDir,replicas}` | The worker(s) around that command; worker *i* is published on `hostPort + i` (see Accelerators for `accelerator`/`deviceArgs`) |
 | `nok8s.epp.{image,tag,grpcPort,grpcHealthPort,metricsPort}` | Endpoint Picker |
 | `nok8s.envoy.{image,tag,listenPort,adminPort,baseId}` | Envoy front door (the run target); `adminPort` is the admin interface, bound on the host (`--network host`). `baseId` is the hot-restart `--base-id`; leave it `0` and it is resolved per stack from `listenPort` |
 | `nok8s.nameSuffix` | Appended to every container name. Filled automatically with `-<stack>` in a multi-stack scenario (see below); leave empty for one stack |
@@ -199,37 +201,81 @@ single-GPU example. Key fields (full defaults in
 | `workDir` | Directory the per-invocation workspace (plan, logs, results) is created in. Omitting it falls back to a fresh temp dir each run — see [Where the logs go](#where-the-logs-go-workdir) |
 
 Sizing (fp16, single GPU): ~16 GB → 7–8B · ~24 GB → 8B · ~40 GB → 14B ·
-~80 GB → 32B. For bigger models use `nok8s.vllm.extraArgs`
-(e.g. `["--max-model-len","16384","--gpu-memory-utilization","0.95"]`) or an
-FP8 checkpoint.
+~80 GB → 32B. For bigger models add the flags that trim
+the footprint to `nok8s.engine.command` itself (`--max-model-len 16384
+--gpu-memory-utilization 0.95` for vLLM, `--context-length` /
+`--mem-fraction-static` for SGLang), or use an FP8 checkpoint.
+
+### Engine command
+
+`nok8s.engine.command` follows the same contract as the Kubernetes roles: the
+text reaches the container byte-for-byte, so any flag the engine accepts works
+and none of them is known to llm-d-benchmark. Switching engines is a different
+command and nothing else -- the image follows the launcher it names
+(`images.vllm`, `images.sglang`, `images.trtllm`), as does the health path the
+readiness probe dials.
+
+```yaml
+nok8s:
+  engine:
+    command: |
+      vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --tensor-parallel-size 2
+```
+
+Three facts are read back out of that text, because a container cannot be
+started without them: the launcher (which engine, hence the image and the health
+path), `--port` (the container port that is published on `hostPort + i` and
+probed for readiness), and the model reference -- the id written here is what the
+plan serves, so `model.name`, `model.huggingfaceId` and `model.path` are read off
+it and there is no `model:` block to keep in step. Write `${model.name}` instead
+when `-m/--models` or `--set model.name=...` must change the model without
+editing the command. Everything else passes through untouched.
+
+How many devices one worker is pinned to is **not** read out of the command: the
+container runtime pins devices before the engine process exists, so the count is
+stated as `nok8s.engine.acceleratorCount` and has to agree with whatever width
+the command gives the engine (see [Multiple GPUs](#multiple-gpus)).
+
+When the launcher is a wrapper script llm-d-benchmark cannot recognise, name the
+engine with `nok8s.engine.name` so its flags are still read in the right
+spelling; when the command cannot say which port it binds, state
+`nok8s.engine.port`. See
+[`config/README.md`](../config/README.md#engine-command) for the full contract.
 
 ## Accelerators
 
 The router (EPP + Envoy) and the benchmark harness are accelerator-agnostic;
-only the **vLLM worker** is accelerator-specific. Select the accelerator with
-`nok8s.vllm.accelerator` and set `nok8s.vllm.image` to the matching vLLM
+only the **engine worker** is accelerator-specific. Select the accelerator with
+`nok8s.engine.accelerator` and set `nok8s.engine.image` to the matching engine
 backend. Only **NVIDIA is validated end-to-end**; the others use each backend's
 documented device flags.
 
-| `accelerator` | Device flags emitted | vLLM image (example) |
-|---------------|----------------------|----------------------|
-| `nvidia` (default) | `--gpus all` (docker) / `--device nvidia.com/gpu=all` (podman) | `vllm/vllm-openai` |
-| `amd` | `--device /dev/kfd --device /dev/dri --group-add video` | `rocm/vllm` |
+| `accelerator` | Device flags emitted | Engine image (example) |
+|---------------|----------------------|------------------------|
+| `nvidia` (default) | `--gpus all` (docker) / `--device nvidia.com/gpu=all` (podman) | `vllm/vllm-openai`, `lmsysorg/sglang` |
+| `amd` | `--device /dev/kfd --device /dev/dri --group-add video` | `rocm/vllm`, `lmsysorg/sglang:*-rocm*` |
 | `intel` | `--device /dev/dri` | Intel vLLM XPU image |
 | `gaudi` | `--runtime=habana -e HABANA_VISIBLE_DEVICES=all` | Habana vLLM image |
-| `cpu` | *(none)* | vLLM CPU build |
+| `cpu` | *(none)* | a CPU build of the engine |
 | `spyre` | *(none -- set `deviceArgs`)* | IBM vLLM-Spyre image |
 
 For anything not covered by a preset — including **IBM Spyre / AIU** — use the
-raw escape hatch `nok8s.vllm.deviceArgs`, which overrides the preset entirely:
+raw escape hatch `nok8s.engine.deviceArgs`, which overrides the preset entirely.
+Any backend-specific engine flags go in the command, where they always did:
 
 ```yaml
 nok8s:
-  vllm:
+  engine:
     accelerator: spyre
-    image: <ibm-vllm-spyre-image>
+    image:
+      repository: <ibm-vllm-spyre-image>
+      tag: <tag>
     deviceArgs: ["--device", "/dev/vfio/vfio", "--device", "/dev/vfio/<grp>"]
-    extraArgs: ["--..."]   # any Spyre-specific vLLM flags
+    command: |
+      vllm serve ibm-granite/granite-3.3-8b-instruct --port 8000 --...   # Spyre flags here
 ```
 
 Step 00 probes the accelerator when it can (`nvidia-smi`/`rocm-smi`/`xpu-smi`/
@@ -272,7 +318,7 @@ for a different reason:
 
 | Phase | What `nok8s.connection` decides |
 |-------|---------------------------------|
-| `standup` | Which host's runtime starts vLLM / EPP / Envoy, and where the configs are staged |
+| `standup` | Which host's runtime starts the engine / EPP / Envoy, and where the configs are staged |
 | `smoketest` | Which address is probed — the node's (`http://10.0.0.7:8081`), from the client |
 | `run` | Which host's runtime runs the harness container, and where its inputs are staged and results pulled from |
 | `teardown` | Which host's containers are removed |
@@ -355,7 +401,7 @@ least of your machine.
 **`transport: ssh` (default)** runs the runtime *on the node*:
 
 ```bash
-ssh bench@10.0.0.7 'docker run -d --name vllm-0 ...'
+ssh bench@10.0.0.7 'docker run -d --name modelserver-0 ...'
 ```
 
 `llmdbenchmark` needs **no docker or podman installed locally**. Nothing is
@@ -422,7 +468,7 @@ container commands (`ssh remote@10.0.0.7 'docker …'`, or the runtime client's
 `-H ssh://remote@10.0.0.7/var/run/docker.sock` under `transport: native`), the
 `ssh` probes, and `scp` staging.
 
-Note that `~` in `nok8s.workspaceHostDir` and `nok8s.vllm.hfCacheDir` expands
+Note that `~` in `nok8s.workspaceHostDir` and `nok8s.engine.hfCacheDir` expands
 against the **node's** `$HOME` (read live with `ssh … printenv HOME`), so it
 becomes `/home/remote/…`, never your local `/Users/local/…`. A `~other/path`
 names a specific other user and is left alone.
@@ -543,7 +589,7 @@ a `localhost` means different things on each side:
 | | Runs on | Why |
 |---|---------|-----|
 | `llmdbenchmark` itself | Client | It only issues commands; under the default transport it needs no container runtime of its own |
-| vLLM / EPP / Envoy | Node | That is the point |
+| Engine / EPP / Envoy | Node | That is the point |
 | **Benchmark harness** | **Node** | Driving load from the client would add the SSH round-trip to every request and report it as the stack's latency |
 | EPP/Envoy configs | Pushed to the node (`scp`) | Bind-mount sources are resolved by the daemon |
 | Readiness probes (`curl`) | Node | `curl localhost:8081` from the client would probe the client |
@@ -572,7 +618,7 @@ curl -s http://10.0.0.7:8081/v1/completions -H 'Content-Type: application/json' 
 ```
 
 Envoy's `listenPort` has to be reachable from the client for the smoketest (or
-tunnel it: `ssh -L 8081:localhost:8081 bench@10.0.0.7`). The vLLM and EPP ports
+tunnel it: `ssh -L 8081:localhost:8081 bench@10.0.0.7`). The engine and EPP ports
 never need to be — they are probed on the node.
 
 Where things land on the node:
@@ -580,10 +626,10 @@ Where things land on the node:
 | Path | Contents |
 |------|----------|
 | `nok8s.workspaceHostDir` (default `~/.llmdbench/nok8s`) | Staged EPP/Envoy configs. `~` is expanded against the **node's** `$HOME`, not yours |
-| `nok8s.vllm.hfCacheDir` (default `~/.cache/huggingface`) | Model weights, so a re-run does not re-download |
+| `nok8s.engine.hfCacheDir` (default `~/.cache/huggingface`) | Model weights, so a re-run does not re-download |
 | `~/.llmdbench/nok8s-runs/<stack>/<workspace-name>/` | Per-run harness inputs and results. Kept after the pull, so a failed run stays inspectable |
 
-The Hugging Face token reaches the vLLM container without ever being written to
+The Hugging Face token reaches the engine container without ever being written to
 the node's disk, but *how* depends on the transport, because `-e VAR` with no
 value is expanded by whoever runs the CLI:
 
@@ -665,7 +711,7 @@ A scenario with more than one stack runs every stack's containers on the same
 host, with no namespace to keep them apart, so each stack needs its own
 identity. Three things are automatic and two are on you:
 
-- **Container names** get a `-<stack name>` suffix, e.g. `vllm-0-chat`,
+- **Container names** get a `-<stack name>` suffix, e.g. `modelserver-0-chat`,
   `epp-chat`, `envoy-chat`. Without this, stack B's idempotency sweep
   (`docker rm -f epp`) deletes stack A's running router. Two stacks that
   still end up with the same container name (names differing only by
@@ -676,7 +722,7 @@ identity. Three things are automatic and two are on you:
   `listenPort`) is distinct per stack. Envoy runs with `--network host`, and
   the default base ID of `0` names a shared-memory region and domain socket
   claimed host-wide, so a second Envoy exits with `errno=98` *before* binding
-  its listener — visible only as a readiness timeout on a port whose vLLM is
+  its listener — visible only as a readiness timeout on a port whose engine is
   healthy. This applies to single-stack standups too, where the other claimant
   is usually an Envoy an earlier run left behind.
 - **Host ports are yours to assign.** They are never derived, because guessing
@@ -687,11 +733,11 @@ identity. Three things are automatic and two are on you:
   `--gpus all`, so two such stacks both claim every device and the second one
   runs out of memory. Give each stack its own devices (preflight warns when
   more than one stack is left unpinned). Total demand is the sum of
-  `replicas x tensorParallel` over all stacks.
+  `replicas x nok8s.engine.acceleratorCount` over all stacks.
 
-A single-stack scenario is unaffected: names stay `vllm-0` / `epp` / `envoy`
-and the workspace stays `~/.llmdbench/nok8s`. Converting an existing one? Run
-`teardown` first (or `docker rm -f vllm-0 epp envoy`): the unsuffixed
+A single-stack scenario is unaffected: names stay `modelserver-0` / `epp` /
+`envoy` and the workspace stays `~/.llmdbench/nok8s`. Converting an existing
+one? Run `teardown` first (or `docker rm -f modelserver-0 epp envoy`): the unsuffixed
 containers from the single-stack run are no longer matched by the suffixed
 names, so teardown will not remove them and they keep holding their ports and
 device memory.
@@ -704,14 +750,14 @@ scenario:
   - name: chat
     nok8s:
       enabled: true
-      vllm:
-        gpus: "device=0"        # podman: nok8s.vllm.deviceArgs
+      engine:
+        gpus: "device=0"        # podman: nok8s.engine.deviceArgs
       # ... first stack keeps the default ports: 8000, 8081, 19000, 9002/9003/9090
 
   - name: code
     nok8s:
       enabled: true
-      vllm:
+      engine:
         hostPort: 8100
         gpus: "device=1"
       epp:
@@ -750,48 +796,61 @@ and filing the results under every stack's name.
 
 ## Multiple GPUs
 
-Two modes, driven by `tensorParallel` and `replicas`:
+Two modes, driven by `nok8s.engine.acceleratorCount` (devices one worker is
+given) and `nok8s.engine.replicas` (how many workers).
+
+The count is stated rather than read out of the command, because the runtime pins
+devices before the engine process exists. It has to agree with whatever the engine
+calls its width -- `--tensor-parallel-size` for vLLM, `--tp-size` for SGLang,
+`--tp_size` for TensorRT-LLM -- which llm-d-benchmark passes through and never
+interprets. Writing it twice is the point: once for the runtime, once for the
+engine, each in its own vocabulary.
 
 **One model sharded across GPUs (tensor parallelism)** — serve a large model:
 ```yaml
 nok8s:
-  vllm:
-    tensorParallel: 4      # shard one model across 4 GPUs
+  engine:
     replicas: 1
-    shmSize: "40g"         # bump for NCCL/RCCL with TP > 1
+    acceleratorCount: 4    # what the runtime grants this worker
+    shmSize: "40g"         # bump for NCCL/RCCL when sharding
+    command: |
+      vllm serve meta-llama/Llama-3.1-70B-Instruct --port 8000 --tensor-parallel-size 4
 ```
-→ `--gpus all --tensor-parallel-size=4`.
+→ one container with `--gpus all`, serving a 4-way sharded model.
 
 **Multiple independent workers (throughput / router load-balancing)** — set
 `replicas: N`. Each worker is published on `hostPort + i`, added to the EPP
 endpoints file (so the router load-balances / prefix-routes across them), and
-**pinned to its own slice of `tensorParallel` GPU indices** (replica *i* →
-devices `i*TP .. i*TP+TP-1`) via the accelerator's visible-devices env
+**pinned to its own slice of `acceleratorCount` devices** (replica *i* →
+devices `i*N .. i*N+N-1`) via the accelerator's visible-devices env
 (`CUDA_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` / `ZE_AFFINITY_MASK`) so workers
 don't contend for the same GPUs.
 
-**Total GPUs used = `replicas × tensorParallel`.** Examples on an 8-GPU host:
-| Goal | `replicas` | `tensorParallel` |
-|------|-----------|------------------|
+**Total GPUs used = `replicas × acceleratorCount`.** Examples on an 8-GPU host
+(the command's own width matches `acceleratorCount` in every row):
+| Goal | `replicas` | `acceleratorCount` |
+|------|-----------|--------------------|
 | One big model sharded 8-way | 1 | 8 |
 | 8 workers, 1 GPU each (max throughput) | 8 | 1 |
 | 2 workers, each sharded over 4 | 2 | 4 |
 
-Step 00 warns if `replicas × tensorParallel` exceeds the detected GPU count
-(NVIDIA). Per-replica pinning uses index-based env vars for nvidia/amd/intel;
-for gaudi/spyre or custom wiring, set `nok8s.vllm.deviceArgs` (which disables
+Step 00 warns if `replicas × acceleratorCount` exceeds the detected GPU count
+(NVIDIA).
+Per-replica pinning uses index-based env vars for nvidia/amd/intel; for
+gaudi/spyre or custom wiring, set `nok8s.engine.deviceArgs` (which disables
 auto-pinning and puts you in control).
 
 ## Troubleshooting
 
 - **Preflight fails on runtime** — install docker/podman or set `nok8s.runtime`.
-- **vLLM container exits at load** — usually a too-large model for VRAM or a bad
-  HF token; check `docker logs vllm-0` (`docker logs vllm-0-<stack>` in a
-  multi-stack scenario). Lower the model size or add
-  `--max-model-len`/`--gpu-memory-utilization` via `nok8s.vllm.extraArgs`.
+- **The engine container exits at load** — usually a too-large model for VRAM or
+  a bad HF token; check `docker logs modelserver-0` (`docker logs
+  modelserver-0-<stack>` in a multi-stack scenario). Lower the model size, or add
+  the flags that trim the footprint (`--max-model-len` /
+  `--gpu-memory-utilization` for vLLM) directly to `nok8s.engine.command`.
 - **Envoy 503** — a worker isn't up; confirm `curl http://localhost:8000/v1/models`.
-- **`Timed out waiting for http://localhost:<listenPort>/v1/models` while vLLM
-  is healthy** — Envoy never bound. Read
+- **`Timed out waiting for http://localhost:<listenPort>/v1/models` while the
+  engine is healthy** — Envoy never bound. Read
   `<workspace>/setup/logs/nok8s-envoy*.log`: `unable to bind domain socket with
   base_id=0` means another Envoy on the host already holds that hot-restart ID.
   Current renders assign one per stack; a plan rendered before that did not, so

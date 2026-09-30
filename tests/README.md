@@ -32,7 +32,7 @@ Validates the Pydantic config schema (`llmdbenchmark/parser/config_schema.py`) a
 |---|---|
 | `TestDefaultsValidation` | `defaults.yaml` passes validation, produces expected model values |
 | `TestScenarioValidation` | Every scenario in `config/scenarios/` (merged with defaults) passes validation |
-| `TestTypoDetection` | Misspelled keys in `decode`, `model`, `vllmCommon`, `harness`, `prefill.vllm` are caught |
+| `TestTypoDetection` | Misspelled keys in `decode`, `model`, `engine`, `harness`, `prefill.engine` are caught |
 | `TestTypeErrors` | Constraint violations (`gpuMemoryUtilization > 1`, negative `replicas`, negative `waitTimeout`) |
 | `TestNonBlocking` | `validate_config()` returns a list on valid, invalid, garbage, and empty input -- never raises |
 | `TestAllowSections` | `extra="allow"` sections accept arbitrary keys (GPU resources, flags, top-level) |
@@ -60,15 +60,29 @@ Validates the DoE experiment parser (`llmdbenchmark/experiment/parser.py`) and s
 
 ## Integration Testing
 
-For end-to-end testing against a live cluster, `util/test-scenarios.sh` runs standup/teardown cycles across scenarios:
+For end-to-end testing, `util/test-scenarios.sh` renders scenarios without a cluster (`--plan`) or runs standup/teardown cycles against a live one:
 
 ```bash
-util/test-scenarios.sh --stable     # Run known-stable scenarios
-util/test-scenarios.sh --trouble    # Run scenarios that have had issues
-util/test-scenarios.sh --all        # Run all scenarios
-util/test-scenarios.sh --ms-only    # Modelservice scenarios only
-util/test-scenarios.sh --sa-only    # Standalone scenarios only
+util/test-scenarios.sh --plan --all                 # render every scenario (no cluster)
+util/test-scenarios.sh --list --all                 # what would run, with engines
+util/test-scenarios.sh "$NS"                        # standup/teardown, default set
+util/test-scenarios.sh --engine sglang "$NS"        # by inference engine
+util/test-scenarios.sh --method standalone "$NS"    # by deploy method
+util/test-scenarios.sh --plan --engine sglang        # incl. commented-in SGLang
 ```
+
+Selection comes from the scenario files themselves (see
+`util/scenario-inventory.py`), so nothing in the script goes stale as scenarios
+are added. `--help` lists every selector.
+
+`--engine <name>` covers the one thing rendering a scenario as written cannot: a
+commented-out command for another engine, which no test would otherwise parse.
+It selects the scenarios that launch that engine *and* the ones that merely offer
+it, running the latter through `llmdbenchmark --engine <name>` so the groups
+tagged `# @engine <name>` are uncommented into the workspace and rendered from
+there. `tests/test_engine_alternatives.py` asserts the same switch in process --
+that the command launches the engine its tag names, that the image follows it,
+and that no capacity number is lost on the way.
 
 This is useful for validating that template changes do not break deployment across different scenario configurations.
 
@@ -82,7 +96,7 @@ The config schema validates `defaults.yaml` and all scenario files automatically
 
 If the new scenario introduces a key that does not exist in `defaults.yaml` or the schema, the test will fail with a validation warning showing the unrecognized key. To fix:
 
-1. Add the field to the appropriate model in `llmdbenchmark/parser/config_schema.py` (e.g. `VllmCommonConfig`, `DeploymentBaseConfig`, etc.)
+1. Add the field to the appropriate model in `llmdbenchmark/parser/config_schema.py` (e.g. `EngineCommonConfig`, `DeploymentBaseConfig`, etc.)
 2. Use `Optional` with a `None` default for fields that are not in `defaults.yaml`
 3. Add a targeted test in `TestScenarioOnlyFields` to document the field
 

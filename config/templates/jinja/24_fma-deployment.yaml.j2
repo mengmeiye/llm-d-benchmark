@@ -35,37 +35,32 @@ spec:
 {% endif %}
     env_vars:
       HF_HOME: "{{ fma.modelMountPath }}"
+{% if model.hubCacheSubdir %}
+      {# The hub cache the download job staged on the mounted PVC. HF_HUB_CACHE
+         outranks HF_HOME for hub lookups, so `--model <repo id>` loads these
+         bytes instead of re-resolving the repo over the network at weight load
+         (#1822). There is no modelservice chart on the FMA path to inject it. #}
+      HF_HUB_CACHE: "{{ fma.modelMountPath }}/{{ model.hubCacheSubdir }}"
+{% endif %}
       VLLM_LOGGING_LEVEL: DEBUG
       VLLM_SERVER_DEV_MODE: "1"
       VLLM_USE_V1: "1"
-{# The download job stages a complete copy of the model at
-   <modelMountPath>/<model.path> on the same PVC the launcher mounts.
-   loadModelFromLocalDir (opt-in, #1822) points the launcher at that
-   staged copy instead of letting vLLM re-resolve the repo ID through the
-   HF hub cache -- a second, network-dependent path that can be partial or
-   hit a full PVC. model.name itself must stay the repo ID regardless: it
-   feeds the derived Helm release name elsewhere, and a path mangles that
-   into an invalid (leading-dash) release name. #}
-{% set _fma_model_arg = (fma.modelMountPath + '/' + model.path) if (fma.launcher.loadModelFromLocalDir | default(false)) else model.name %}
-{# Pin the advertised ID to the repo ID when --model is a local path, or vLLM
-   registers the model as that path and verify_model fails. #}
-{% set _fma_served_model_name = model.name if (fma.launcher.loadModelFromLocalDir | default(false)) else none %}
-{# Prefix caching, block size and logging all inherit from the keys the baseline
-   (non-FMA) chart reads, so an FMA arm cannot silently desync from the arm it is
-   compared against. Override only to diverge on purpose. #}
-{% set _fma_block_size = fma.launcher.blockSize | default(model.blockSize, true) %}
-{# `is not boolean`, not `is none`: an absent key is Undefined, which would fall
-   through and drop the flag. Keeps an explicit `false` working as an override.
-   vllmCommon may be absent entirely (standalone stacks, minimal render contexts),
-   so reach through a defaulted dict rather than dereferencing it directly. #}
-{% set _vllm_flags = (vllmCommon | default({}, true)).flags | default({}, true) %}
-{% set _fma_disable_log_requests = _vllm_flags.disableLogRequests | default(false) if fma.launcher.disableLogRequests is not boolean else fma.launcher.disableLogRequests %}
-{% set _fma_disable_uvicorn = _vllm_flags.disableUvicornAccessLog | default(false) if fma.launcher.disableUvicornAccessLog is not boolean else fma.launcher.disableUvicornAccessLog %}
-{# Inherits vllmCommon.flags.noPrefixCaching, the key _macros.j2 emits
-   --no-enable-prefix-caching from, so a scenario that turns caching off on the
-   baseline turns it off here too. #}
-{% set _fma_no_prefix_caching = _vllm_flags.noPrefixCaching | default(false) if fma.launcher.disablePrefixCaching is not boolean else fma.launcher.disablePrefixCaching %}
-    options: "--model {{ _fma_model_arg }}{% if _fma_served_model_name %} --served-model-name {{ _fma_served_model_name }}{% endif %} --enable-sleep-mode{% if _fma_no_prefix_caching %} --no-enable-prefix-caching{% endif %} --load-format auto{% if (model.gpuMemoryUtilization | default(0.95) | float) > 0 %} --gpu-memory-utilization {{ model.gpuMemoryUtilization | default(0.95) }}{% endif %} --max-model-len {{ model.maxModelLen }}{% if _fma_block_size %} --block-size {{ _fma_block_size }}{% endif %}{% if fma.launcher.kvCacheMemory is defined and fma.launcher.kvCacheMemory %} --kv-cache-memory {{ fma.launcher.kvCacheMemory }}{% endif %} --tensor-parallel-size {{ fma.launcher.tensorParallelSize | default(1) }}{% if fma.launcher.enforceEager | default(false) %} --enforce-eager{% endif %}{% if _fma_disable_log_requests %} --no-enable-log-requests{% endif %}{% if _fma_disable_uvicorn %} --disable-uvicorn-access-log{% endif %}"
+{# The FMA launcher process IS the vLLM entrypoint -- it is what owns
+   --enable-sleep-mode -- so this path has no `vllm serve` line to state: the
+   LauncherConfig CRD takes a flag string instead of a command. That string is
+   `fma.launcher.options`, passed through verbatim, exactly as `engine.command`
+   is passed through verbatim everywhere else. Nothing here assembles flags.
+
+   Write the numbers an FMA arm has to share with the arm it is compared against
+   as `${model.maxModelLen}`, `${model.blockSize}`, `${model.gpuMemoryUtilization}`
+   and they cannot desync. There is no command here for those to be read off, so
+   this is the one path that states them in the scenario's `model:` block.
+
+   `--model` is the repo ID, not a path: HF_HUB_CACHE above points at the hub
+   cache the download job staged on the PVC, so the ID loads those bytes. It has
+   to stay an ID regardless -- it feeds the derived Helm release name, and a path
+   mangles that into an invalid (leading-dash) name. #}
+    options: "{{ fma.launcher.options }}"
     port: 8000
 ---
 apiVersion: fma.llm-d.ai/v1alpha1
@@ -136,6 +131,10 @@ spec:
             value: "{{ fma.modelMountPath }}/config"
           - name: HF_HOME
             value: "{{ fma.modelMountPath }}"
+{% if model.hubCacheSubdir %}
+          - name: HF_HUB_CACHE
+            value: "{{ fma.modelMountPath }}/{{ model.hubCacheSubdir }}"
+{% endif %}
 {% if huggingface.enabled and huggingface.secretName is defined and huggingface.secretName %}
           - name: HF_TOKEN
             valueFrom:
@@ -150,9 +149,11 @@ spec:
           # N-GPU node), leaving requesters Pending with Insufficient nvidia.com/gpu.
           volumeMounts:
 {% if (fma.launcher.tensorParallelSize | default(1) | int) > 1 %}
-          # TP>1: vLLM tensor-parallel workers exchange over a shared-memory
-          # message queue; the pod default 64Mi /dev/shm crashes NCCL/multiproc
-          # at init, so give the launcher a real in-memory /dev/shm.
+          # A tensor-parallel launcher needs a real /dev/shm: vLLM's TP workers
+          # exchange over a shared-memory message queue and the pod default 64Mi
+          # crashes NCCL/multiproc at init. This is a pod-spec fact the kubelet
+          # has to be told before the process exists, which is why the width is
+          # stated here as well as written in `options`.
           - name: dshm
             mountPath: /dev/shm
 {% endif %}
@@ -275,7 +276,7 @@ spec:
           readinessProbe:
             httpGet:
               path: /ready
-              port: 8080
+              port: {{ fma.requester.probePort }}
             initialDelaySeconds: 2
             periodSeconds: 5
           resources:

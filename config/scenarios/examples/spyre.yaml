@@ -1,6 +1,4 @@
 # IBM Spyre Accelerator Example Scenario for LLM-D Deployment
-# Migrated from bash environment variables to YAML format
-# Based on scenarios/examples/spyre.sh
 #
 # This scenario deploys a model on IBM Spyre accelerator hardware.
 # Uses the AIU vLLM image with Spyre-specific configuration including
@@ -21,7 +19,6 @@ scenario:
     common:
       # -------------------------------------------------------------------------
       # Accelerator Configuration -- IBM Spyre VF
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_ACCELERATOR_RESOURCE=ibm.com/spyre_vf
       # -------------------------------------------------------------------------
       accelerator:
         # Custom accelerator type for IBM Spyre.
@@ -38,7 +35,6 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Affinity / Node Selection
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_AFFINITY="ibm.com/spyre.product:IBM_Spyre"
       # By default, affinity is disabled and pods schedule on any available node.
       # Options:
       #   1. Leave commented out -- no node selection constraint
@@ -52,7 +48,8 @@ scenario:
           ibm.com/spyre.product: IBM_Spyre
 
       # Enable multinode (LeaderWorkerSet) for sequential pod naming.
-      # Required when using contextLengthRanges or vllmVariants.
+      # Required when using contextLengthRanges, and by any per-replica
+      # `,,`-joined env var a role's engine command reads.
       # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
       multinode:
         enabled: true
@@ -66,21 +63,15 @@ scenario:
       # Model Configuration
       # -------------------------------------------------------------------------
       model:
-  #      name: ibm-ai-platform/micro-g3.3-8b-instruct-1b
-  #      shortName: micro-g3-3-8b-instruct-1b
-  #      path: models/ibm-ai-platform/micro-g3.3-8b-instruct-1b
-  #      huggingfaceId: ibm-ai-platform/micro-g3.3-8b-instruct-1b
-        name: ibm-granite/granite-3.3-8b-instruct
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id itself is stated once, in the launch command below; a
+        # short name is a choice, so it stays here. To serve a different model
+        # -- `ibm-ai-platform/micro-g3.3-8b-instruct-1b`, say -- change the
+        # command and this prefix, nothing else.
         shortName: granite-3-3-8b-instruct
-        path: models/ibm-granite/granite-3.3-8b-instruct
-        huggingfaceId: ibm-granite/granite-3.3-8b-instruct
-        maxModelLen: 32768
-        maxNumSeq: 32
-        maxNumBatchedTokens: 1024
 
       # -------------------------------------------------------------------------
       # Extra PVC for precompiled Spyre models
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_EXTRA_PVC_NAME=spyre-precompiled-model
       # -------------------------------------------------------------------------
       storage:
         # Uncomment to override storage class:
@@ -95,44 +86,46 @@ scenario:
           name: spyre-precompiled-model
 
       images:
-        vllmOpenai:
-          repository: registry.redhat.io/rhaii-early-access/vllm-spyre-rhel9
-          tag: 3.4.0-ea.2
-          pullPolicy: IfNotPresent
-
         vllm:
           repository: registry.redhat.io/rhaii-early-access/vllm-spyre-rhel9
           tag: 3.4.0-ea.2
+          # Early-access registry: pull once per node rather than on every pod
+          # start. This needs a pull secret, and `Always` turns a transient
+          # registry failure into a CrashLoop on a pod whose image is already
+          # local.
+          pullPolicy: IfNotPresent
 
       # -------------------------------------------------------------------------
-      # vLLM Common Configuration
-      # Shared settings for both decode and prefill pods.
-      # When no customCommand is set on decode/prefill, the vLLM serve command
-      # is auto-generated from these fields:
-      #   - model.maxModelLen, model.blockSize maps to --max-model-len, --block-size
-      #   - model.gpuMemoryUtilization maps to --gpu-memory-utilization
-      #   - decode/prefill.parallelism.tensor maps to --tensor-parallel-size
-      #   - vllmCommon.flags.* maps to --enforce-eager, --no-enable-log-requests, etc.
-      #   - vllmCommon.kvTransfer.* maps to --kv-transfer-config (if enabled)
-      #   - vllmCommon.kvEvents.* maps to --kv-events-config (if enabled)
-      #   - decode/prefill.vllm.additionalFlags maps to appended as extra CLI args
-      # When decode.vllm.customCommand or prefill.vllm.customCommand IS set, it replaces the auto-generated
-      # command entirely. Only --kv-transfer-config and --kv-events-config are
-      # still appended from vllmCommon if enabled. All other vllmCommon.flags
-      # are ignored -- the custom command must include its own flags.
+      # Engine Configuration
+      # The pod shape shared by every role: the shell the launch line is exec'd
+      # in, shared memory, the preprocess step that runs ahead of it, volumes
+      # and mounts. No engine flags live here -- each role writes its own launch
+      # line in `<role>.engine.command`, in the engine's own spelling, and that
+      # line reaches the container verbatim. llm-d-benchmark reads it only for
+      # the facts it cannot do without (the `--port` for the Service and the
+      # probes, the capacity numbers for the pre-deploy check).
+      #
+      # Tool calling is switched on in both commands below
+      # (`--enable-auto-tool-choice --tool-call-parser granite`). Prefix caching
+      # is deliberately absent: this engine has not been run with it, so adding
+      # `--enable-prefix-caching` is a change in behaviour to measure, not a
+      # default to assume. Add it to a command if you want it.
+      engine:
+        # Both roles launch through the image's own wrapper script
+        # (`/opt/app-root/spyre_entrypoint.sh`), which execs vLLM after setting
+        # up the Spyre runtime. A wrapper is not a launcher llm-d-benchmark can
+        # recognise, so the engine is declared here instead: that is what makes
+        # the flags in both commands readable in vLLM's spelling (and picks the
+        # health and metrics paths). The image itself is pinned below, so the
+        # declaration never selects one.
+        name: vllm
 
-      vllmCommon:
-        # Shell used in the vLLM container `command:` field. Defaults to /bin/bash.
+        # Shell the launch line is exec'd in. Defaults to /bin/bash.
         # shell: /bin/sh
 
         shmMemory: 64Gi
 
         preprocessScript: "python3 /setup/preprocess/set_llmdbench_environment.py && source $HOME/llmdbench_env.sh"
-
-        flags:
-          enablePrefixCaching: true
-          enableAutoToolChoice: true
-          toolCallParser: granite
 
         # Spyre-specific volumes
         volumes:
@@ -166,16 +159,13 @@ scenario:
             mountPath: /etc/kubeconfig
             readOnly: true
 
-    # =========================================================================
-    # STANDALONE -- Only applies when standalone.enabled: true
-    # =========================================================================
-    standalone:
-      enabled: false
-      replicas: 2
-
-      parallelism:
-        tensor: 4
-
+    # -------------------------------------------------------------------------
+    # Shared role configuration
+    # Stated once for every role in this stack, so the live role and the
+    # alternatives below it cannot drift apart. A key a role names for itself
+    # wins over the value here.
+    # -------------------------------------------------------------------------
+    roleDefaults:
       resources:
         limits:
           memory: 200Gi
@@ -183,20 +173,6 @@ scenario:
         requests:
           memory: 200Gi
           cpu: "20"
-
-      vllm:
-        # This image's entrypoint execs `python3 -m vllm.entrypoints.openai.api_server "$@"`,
-        # which takes the model as `--model`, not as a positional argument.
-        customCommand: |
-          /opt/app-root/spyre_entrypoint.sh --model /model-cache/$MODEL_PATH \
-          --served-model-name $MODEL_NAME \
-          --port $VLLM_INFERENCE_PORT \
-          --max-model-len $VLLM_MAX_MODEL_LEN \
-          --max-num-seq $VLLM_MAX_NUM_SEQ \
-          --tensor-parallel-size $VLLM_TENSOR_PARALLELISM \
-          --enable-auto-tool-choice \
-          --tool-call-parser granite \
-          --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS
 
       extraEnvVars:
         - name: FLEX_COMPUTE
@@ -219,6 +195,25 @@ scenario:
           value: "1"
 
     # =========================================================================
+    # STANDALONE -- Only applies when standalone.enabled: true
+    # =========================================================================
+    standalone:
+      enabled: false
+      replicas: 2
+
+      # No engine.command: `-t standalone` inherits decode's line below. The
+      # copy that used to live here differed from it only in `--port` and in the
+      # order of two flags, and the port needs no rewriting -- the Service
+      # targets whatever the command binds.
+      #
+      # `parallelism.tensor` is the same width in Kubernetes' vocabulary: the
+      # kubelet grants the four devices before the engine exists, so the count
+      # cannot come from the command -- it is stated, and has to agree with the
+      # `--tensor-parallel-size 4` in the command it inherits.
+      parallelism:
+        tensor: 4
+
+    # =========================================================================
     # MODELSERVICE -- Only applies when modelservice.enabled: true
     # The following sections configure the llm-d modelservice Helm chart
     # deployment including decode pods, prefill pods, routing, and GAIE.
@@ -229,7 +224,7 @@ scenario:
       # =========================================================================
       # INFERENCE EXTENSION (EPP) -- Context-length-aware routing
       # Uncomment this section along with multinode, contextLengthRanges, and
-      # vllmVariants above to enable context-length-aware routing.
+      # contextLengthRanges above to enable context-length-aware routing.
       # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
       #
       # `router.tokenizer.enabled: true` adds the chart's `vllm-render` sidecar
@@ -253,7 +248,7 @@ scenario:
               plugins:
                 - type: token-producer
                   parameters:
-                    modelName: "${model.name}"
+                    modelName: "ibm-granite/granite-3.3-8b-instruct"
                     vllm:
                       url: http://localhost:8000
                 - type: decode-filter
@@ -280,82 +275,63 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Decode Configuration -- 2 decode pods on Spyre
-      # No customCommand -- the vLLM serve command is auto-generated
-      # from model.*, vllmCommon.flags.*, and decode.vllm.additionalFlags.
       # -------------------------------------------------------------------------
       decode:
         replicas: 2
 
         # Context-length-aware routing: per-pod labels (one per replica).
         # Requires multinode enabled (for LWS sequential pod naming) and
-        # kubeconfig secret mounted (see vllmCommon.volumes below).
-        # Also requires the preprocess script (vllmCommon.preprocessScript) for
+        # kubeconfig secret mounted (see engine.volumes below).
+        # Also requires the preprocess script (engine.preprocessScript) for
         # pod self-labeling and ,,-delimited env var splitting.
         # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
         contextLengthRanges:
           - "0-8000"
           - "8000-32768"
 
-        # Per-pod vllm parameter overrides (one per replica).
-        # Values are converted to ,,-delimited env vars; the preprocess script
-        # selects the right value based on pod index from LWS.
-        vllmVariants:
-          - maxModelLen: 32768
-            maxNumSeq: 32
-          - maxModelLen: 32768
-            maxNumSeq: 32
+        # Both replicas ran the same context length and batch width, so the two
+        # numbers are simply written into the command below. To give replicas
+        # different values, put a `,,`-joined list in `extraEnvVars` and read it
+        # from the command -- `set_llmdbench_environment.py` splits the list at
+        # container start and re-exports the entry for this pod's LWS index:
+        #
+        #   extraEnvVars:
+        #     - name: MY_MAX_LEN
+        #       value: "8000,,32768"
+        #   engine:
+        #     command: |
+        #       ... --max-model-len $MY_MAX_LEN
 
+        # Devices per replica -- a Kubernetes fact, not a reading of the
+        # command. The kubelet grants accelerators before the engine process
+        # exists, so the count is stated here in Kubernetes' vocabulary and the
+        # chart turns it into the pod's device request. It has to agree with the
+        # width the command gives the engine (`--tensor-parallel-size 4` below),
+        # or the engine starves at startup. To request a count the parallelism
+        # widths do not describe, set `resources.limits.<accelerator resource>`.
         parallelism:
           tensor: 4
           data: 1
           dataLocal: 1
           workers: 1
 
-        resources:
-          limits:
-            memory: 200Gi
-            cpu: "20"
-          requests:
-            memory: 200Gi
-            cpu: "20"
-
-        vllm:
-          # See the standalone customCommand above: this image's entrypoint
-          # takes the model via --model, not positionally.
-          customCommand: |
-            /opt/app-root/spyre_entrypoint.sh --model /model-cache/$MODEL_PATH \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_METRICS_PORT \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --tensor-parallel-size $VLLM_TENSOR_PARALLELISM \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
+        # The launch line, verbatim -- see the standalone block above for why
+        # this image takes the model via --model rather than positionally.
+        #
+        # --port 8200: the routing sidecar owns the Service port (8000) on a
+        # decode pod and forwards here. `--tensor-parallel-size 4` tells the
+        # engine its width; `parallelism.tensor` above tells Kubernetes, and the
+        # two have to agree.
+        engine:
+          command: |
+            /opt/app-root/spyre_entrypoint.sh --model ibm-granite/granite-3.3-8b-instruct \
+            --port 8200 \
+            --max-model-len 32768 \
+            --tensor-parallel-size 4 \
+            --max-num-seqs 32 \
             --enable-auto-tool-choice \
             --tool-call-parser granite \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS
-
-        # Same Spyre-specific env vars as standalone -- see the notes on the
-        # standalone extraEnvVars above for why the VLLM_SPYRE_* prefix is used,
-        # why USE_CB is set explicitly, and why the FLEX_HDMA_* / CHUNK_LEN /
-        # VLLM_PLUGINS knobs are absent.
-        extraEnvVars:
-          - name: FLEX_COMPUTE
-            value: SENTIENT
-          - name: FLEX_DEVICE
-            value: PF
-          - name: VLLM_SPYRE_PERF_METRIC_LOGGING_ENABLED
-            value: "1"
-          - name: HF_HUB_DISABLE_XET
-            value: "1"
-          - name: TORCH_SENDNN_CACHE_ENABLE
-            value: "1"
-          - name: TORCH_SENDNN_CACHE_DIR
-            value: /mnt/spyre-precompiled-model
-          - name: VLLM_SPYRE_DYNAMO_BACKEND
-            value: sendnn
-          - name: VLLM_SPYRE_USE_CB
-            value: "1"
-          - name: VLLM_SPYRE_USE_CHUNKED_PREFILL
-            value: "1"
+            --max-num-batched-tokens 1024
 
     # =========================================================================
     # WORKLOAD / HARNESS -- Benchmark execution configuration
@@ -365,6 +341,5 @@ scenario:
       experimentProfile: fixed_dataset.yaml.in
       waitTimeout: 36000
 
-    # Corresponds to: LLMDBENCH_CONTROL_WORK_DIR=~/data/spyre
     # Used as workspace when --workspace is not specified on the CLI.
     workDir: "~/data/spyre"

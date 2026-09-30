@@ -34,24 +34,19 @@ scenario:
 
     common:
       model:
-        name: Qwen/Qwen3.6-27B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen36-27b
-        path: models/Qwen/Qwen3.6-27B
-        huggingfaceId: Qwen/Qwen3.6-27B
         size: 1Ti
-        # 32768, not 16000: at 16k, tasks that carry a repo's worth of context
-        # plus a <think> block hit the ceiling mid-solution and the request is
-        # rejected rather than answered. Note this HALVES per-pod concurrency --
-        # KV cache is a fixed token budget, so doubling context doubles the
-        # per-request reservation. Size -j off free GPUs accordingly.
-        maxModelLen: 32768
-        blockSize: 64
-        gpuMemoryUtilization: 0.95
+        # Context length, page size and memory fraction are stated once, in
+        # `decode.engine.command` below -- the capacity planner reads them back
+        # off the command, so there is no second place to keep in step.
 
       storage:
         modelPvc:
           size: 1Ti
-        uriProtocol: hf
 
       images:
         vllm:
@@ -63,7 +58,7 @@ scenario:
           tag: latest
           pullPolicy: Always
 
-      vllmCommon:
+      engine:
         shmMemory: 2Gi
         volumes:
           - name: dshm
@@ -87,6 +82,14 @@ scenario:
     # =========================================================================
     modelservice:
       enabled: true
+
+      # Where the engine gets the weights. `hf` means no model PVC and no
+      # download Job -- the engine pulls from Hugging Face at pod start. (The
+      # default `pvc+hf` stages the same repo onto a PVC first and points the
+      # pod's HF_HUB_CACHE at it; either way the launch command below names the
+      # model by its plain id.) This key is read at `modelservice.uriProtocol`;
+      # under `storage:` it parses fine and nothing reads it.
+      uriProtocol: hf
 
       inferenceExtension:
         monitoring:
@@ -134,25 +137,45 @@ scenario:
           requests:
             memory: 16Gi
             cpu: "4"
-        vllm:
-          # `custom` auto-generates the full vLLM serve command (build_vllm_command)
-          # honoring model.maxModelLen (--max-model-len), gpuMemoryUtilization, and
-          # parallelism.tensor (--tensor-parallel-size), plus additionalFlags below.
-          # `imageDefault` renders only --model/--port/--served-model-name and lets
-          # the image entrypoint pick the ctx -> vLLM would use Qwen3's native 40960
-          # and OOM the KV cache on one H100.
-          modelCommand: custom
-          # build_vllm_command already emits --max-model-len/--gpu-memory-utilization
-          # /--tensor-parallel-size; only add flags it does NOT emit:
-          additionalFlags:
-            - --enable-auto-tool-choice
-            - --tool-call-parser
-            - qwen3_coder
-            # --reasoning-parser qwen3: Qwen3.6-27B is a hybrid-reasoning model.
-            # Without this flag vLLM returns the <think> trace as ordinary content,
-            # so the agent receives reasoning prose where it expects a tool call.
-            - --reasoning-parser
-            - qwen3
+        # The launch line, verbatim -- paste what you would run by hand. It is
+        # read once for the facts Kubernetes needs before the engine starts
+        # (--port sizes the container port and probes, the capacity flags feed
+        # the pre-deploy check) and
+        # is otherwise passed through untouched.
+        #
+        # --port 8000, not 8200: `routing.proxy.enabled: false` above means no
+        # sidecar holds the Service port in front of decode, so the engine binds
+        # it itself.
+        #
+        # --max-model-len 32768, not 16000: at 16k, tasks that carry a repo's
+        # worth of context plus a <think> block hit the ceiling mid-solution and
+        # the request is rejected rather than answered. Note this HALVES per-pod
+        # concurrency -- KV cache is a fixed token budget, so doubling context
+        # doubles the per-request reservation. Size -j off free GPUs accordingly.
+        #
+        # --reasoning-parser qwen3: Qwen3.6-27B is a hybrid-reasoning model.
+        # Without this flag vLLM returns the <think> trace as ordinary content,
+        # so the agent receives reasoning prose where it expects a tool call.
+        #
+        # The model id is written out, and that is the whole reference: the id
+        # names the weights and the served API model at once, because vLLM
+        # defaults `--served-model-name` to whatever it was asked to serve. This
+        # is the paste-and-go form, and it is exactly what a scenario needs to
+        # say about its model: the `model:` block above carries only the
+        # Kubernetes name prefix and the volume size, and the rest
+        # (huggingfaceId, path, idLabel) is read off this line.
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3.6-27B \
+            --host 0.0.0.0 \
+            --port 8000 \
+            --block-size 64 \
+            --max-model-len 32768 \
+            --tensor-parallel-size 1 \
+            --gpu-memory-utilization 0.95 \
+            --enable-auto-tool-choice \
+            --tool-call-parser qwen3_coder \
+            --reasoning-parser qwen3
 
     harness:
       name: eval-containers

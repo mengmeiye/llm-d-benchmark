@@ -11,6 +11,7 @@ DEFAULTS_PATH = PROJECT_ROOT / "config" / "templates" / "values" / "defaults.yam
 UPSTREAM_VERSIONS_PATH = PROJECT_ROOT / "docs" / "upstream-versions.md"
 CPU_SCENARIO_PATH = PROJECT_ROOT / "config" / "scenarios" / "examples" / "cpu.yaml"
 BUILD_DOCKERFILE_PATH = PROJECT_ROOT / "build" / "Dockerfile"
+NOK8S_SCENARIO_PATH = PROJECT_ROOT / "config" / "scenarios" / "guides" / "nok8s.yaml"
 
 
 def _doc_pin_for(dependency: str) -> str:
@@ -29,7 +30,15 @@ def _docker_arg_value(content: str, name: str) -> str:
     raise AssertionError(f"Did not find ARG {name} in {BUILD_DOCKERFILE_PATH}")
 
 
-def test_vllm_and_vllm_openai_pins_stay_in_sync():
+def test_vllm_image_pins_stay_in_sync():
+    """Both images built from the vLLM release share one pin.
+
+    ``images.udsTokenizer`` runs the same ``docker.io/vllm/vllm-openai``
+    release as ``images.vllm``, so the two tags and the doc row all read from
+    ``_anchors.vllm-openai_version``. (The anchor is named after the upstream
+    image; the scenario-facing key is ``images.vllm``, and the assertion below
+    keeps an ``images.vllmOpenai`` spelling from creeping back in beside it.)
+    """
     defaults = yaml.safe_load(DEFAULTS_PATH.read_text(encoding="utf-8"))
     cpu_scenario = yaml.safe_load(CPU_SCENARIO_PATH.read_text(encoding="utf-8"))
     dockerfile = BUILD_DOCKERFILE_PATH.read_text(encoding="utf-8")
@@ -38,15 +47,17 @@ def test_vllm_and_vllm_openai_pins_stay_in_sync():
     uds_tokenizer_pin = defaults["_anchors"]["llm-d-uds-tokenizer_version"]
 
     assert defaults["images"]["vllm"]["tag"] == vllm_pin
-    assert defaults["images"]["vllmOpenai"]["tag"] == vllm_pin
     assert _doc_pin_for("vllm") == vllm_pin
-    assert _doc_pin_for("vllmOpenai") == vllm_pin
+    assert "vllmOpenai" not in defaults["images"]
+
+    # The CPU scenario pins a CPU build of the same release, and the harness
+    # image builds vLLM's own benchmark scripts from the matching tag.
     scenarios = cpu_scenario["scenario"]
     assert scenarios, f"No scenarios defined in {CPU_SCENARIO_PATH}"
     for scenario in scenarios:
         cpu_images = scenario["common"]["images"]
         assert cpu_images["vllm"]["tag"] == vllm_pin
-        assert cpu_images["vllmOpenai"]["tag"] == vllm_pin
+        assert "vllmOpenai" not in cpu_images
 
     assert _docker_arg_value(dockerfile, "VLLM_BENCHMARK_BRANCH") == vllm_pin
 
@@ -83,8 +94,16 @@ def test_inference_pool_pin_stays_in_sync_with_defaults_and_doc():
 
 
 def test_router_endpoint_picker_pin_stays_in_sync_with_defaults_doc_and_nok8s():
+    """The EPP pin has four homes, and nok8s is the one that drifts.
+
+    ``nok8s`` runs the endpoint picker as a plain container instead of letting
+    the chart place it, so its tag is written out a second time -- once under
+    ``nok8s.epp`` in the defaults and again in every stack of the nok8s
+    scenario. A bump that touches only ``images.routerEndpointPicker`` leaves
+    those behind on the old release.
+    """
     defaults = yaml.safe_load(DEFAULTS_PATH.read_text(encoding="utf-8"))
-    nok8s_scenario = yaml.safe_load((PROJECT_ROOT / "config" / "scenarios" / "guides" / "nok8s.yaml").read_text(encoding="utf-8"))
+    nok8s_scenario = yaml.safe_load(NOK8S_SCENARIO_PATH.read_text(encoding="utf-8"))
 
     epp_pin = defaults["_anchors"]["llm-d-router-endpoint-picker_version"]
 
@@ -93,6 +112,6 @@ def test_router_endpoint_picker_pin_stays_in_sync_with_defaults_doc_and_nok8s():
     assert _doc_pin_for("routerEndpointPicker") == epp_pin
 
     scenarios = nok8s_scenario["scenario"]
-    assert scenarios, "No scenarios defined in nok8s.yaml"
+    assert scenarios, f"No scenarios defined in {NOK8S_SCENARIO_PATH}"
     for scenario in scenarios:
         assert scenario["nok8s"]["epp"]["tag"] == epp_pin

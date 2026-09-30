@@ -111,9 +111,9 @@ class TestQuotedDottedKeys:
 
     def test_quoted_value_keeps_the_multiline_escape_hatch(self):
         parsed, _ = parse_cli_overrides(
-            [r'decode.vllm.customCommand="export FOO=1\nvllm serve /x"']
+            [r'decode.engine.command="export FOO=1\nvllm serve /x"']
         )
-        assert parsed[GLOBAL_SELECTOR]["decode"]["vllm"]["customCommand"] == (
+        assert parsed[GLOBAL_SELECTOR]["decode"]["engine"]["command"] == (
             "export FOO=1\nvllm serve /x"
         )
 
@@ -289,8 +289,8 @@ class TestParseCliOverrides:
         assert parsed == {"llama": {"router": {"epp": {"image": "quay.io/x:v1.2"}}}}
 
     def test_equals_in_value_is_preserved(self):
-        parsed, _ = parse_cli_overrides(["decode.vllm.customCommand=--flag=value"])
-        assert parsed[GLOBAL_SELECTOR]["decode"]["vllm"]["customCommand"] == (
+        parsed, _ = parse_cli_overrides(["decode.engine.command=--flag=value"])
+        assert parsed[GLOBAL_SELECTOR]["decode"]["engine"]["command"] == (
             "--flag=value"
         )
 
@@ -486,13 +486,13 @@ class TestPathHelpers:
         assert unknown == [] and clobbered == []
 
     def test_descending_into_a_list_is_clobber_not_unknown(self):
-        # `vllmCommon.volumeMounts.0.mountPath=x` would replace the list.
+        # `engine.volumeMounts.0.mountPath=x` would replace the list.
         unknown, clobbered = find_broken_parent_paths(
-            {"vllmCommon": {"volumeMounts": {"0": {"mountPath": "/x"}}}},
-            {"vllmCommon": {"volumeMounts": [{"name": "dshm"}]}},
+            {"engine": {"volumeMounts": {"0": {"mountPath": "/x"}}}},
+            {"engine": {"volumeMounts": [{"name": "dshm"}]}},
         )
         assert unknown == []
-        assert clobbered == [("vllmCommon.volumeMounts", "list")]
+        assert clobbered == [("engine.volumeMounts", "list")]
 
     def test_descending_into_a_scalar_is_clobber(self):
         unknown, clobbered = find_broken_parent_paths({"a": {"b": 1}}, {"a": "scalar"})
@@ -559,8 +559,8 @@ class TestFindTypoLeaves:
         # extraArgs vs deviceArgs/sshArgs share a suffix but are different keys.
         assert (
             find_typo_leaves(
-                {"vllm": {"extraArgs": ["--x"]}},
-                {"vllm": {"deviceArgs": [], "gpus": "all"}},
+                {"engine": {"extraArgs": ["--x"]}},
+                {"engine": {"deviceArgs": [], "gpus": "all"}},
             )
             == []
         )
@@ -580,9 +580,9 @@ class TestFindTypoLeaves:
 
     def test_nested_leaf_path_is_fully_qualified(self):
         assert find_typo_leaves(
-            {"nok8s": {"vllm": {"replias": 2}}},
-            {"nok8s": {"vllm": {"replicas": 1, "image": "x"}}},
-        ) == [("nok8s.vllm.replias", "replicas")]
+            {"nok8s": {"engine": {"replias": 2}}},
+            {"nok8s": {"engine": {"replicas": 1, "image": "x"}}},
+        ) == [("nok8s.engine.replias", "replicas")]
 
     def test_only_the_closest_sibling_is_suggested(self):
         typos = find_typo_leaves(
@@ -873,12 +873,12 @@ class TestSingleStackRender:
         assert config["decode"]["replicas"] == 7
 
     def test_kustomize_variant_reproduced_from_base_scenario(self, tmp_path):
-        # The motivating case for `--set`: the repo used to ship a
-        # `*-sglang` twin for each kustomize guide, differing only in the
-        # accelerator backend. Those files are gone -- `-t kustomize` plus
-        # one `--set` reproduces them. `enabled` flips from the CLI method,
-        # `acceleratorBackend` comes from the override, and `guideName`
-        # survives untouched from the scenario.
+        # The motivating case for `--set`: a kustomize guide and its
+        # `*-sglang` twin differ only in the accelerator backend, so one
+        # scenario plus `-t kustomize` and a single `--set` covers both.
+        # `enabled` flips from the CLI method, `acceleratorBackend` comes
+        # from the override, and `guideName` survives untouched from the
+        # scenario.
         result = _renderer(
             tmp_path,
             SINGLE_STACK,
@@ -1164,7 +1164,7 @@ class TestOverrideLogging:
             SINGLE_STACK,
             setup_overrides_by_stack={
                 GLOBAL_SELECTOR: {
-                    "vllmCommon": {"volumeMounts": {"0": {"mountPath": "/x"}}}
+                    "engine": {"volumeMounts": {"0": {"mountPath": "/x"}}}
                 }
             },
         ).eval()
@@ -1174,13 +1174,13 @@ class TestOverrideLogging:
 
     def test_assigning_a_whole_list_still_works(self, tmp_path):
         parsed, _ = parse_cli_overrides(
-            ["vllmCommon.volumeMounts=[{name: only, mountPath: /only}]"]
+            ["engine.volumeMounts=[{name: only, mountPath: /only}]"]
         )
         result = _renderer(
             tmp_path, SINGLE_STACK, setup_overrides_by_stack=parsed
         ).eval()
         assert result.global_errors == []
-        assert _configs(result)["single-pool"]["vllmCommon"]["volumeMounts"] == [
+        assert _configs(result)["single-pool"]["engine"]["volumeMounts"] == [
             {"name": "only", "mountPath": "/only"}
         ]
 

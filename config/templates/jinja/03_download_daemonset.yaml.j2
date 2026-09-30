@@ -34,18 +34,36 @@ spec:
         - name: downloader
           image: {{ images.benchmark.repository }}:{{ images.benchmark.tag }}
           command: ["/bin/sh", "-c"]
+{# Stages the same layout 04_download_job.yaml.j2 does, through the node
+    filesystem instead of a mounted PVC: a Hugging Face hub cache under
+    pvc+hf (so the engine's plain model id resolves against it), a flat
+    per-model directory under pvc (so the engine's path points at it).
+
+    The marker file is what makes the DaemonSet idempotent -- it stays up after
+    the download so the node keeps the SELinux relabel, and a restarted pod must
+    not re-pull. It sits beside the staged content either way. #}
           args:
             - |
               set -e
+{% if model.hubCacheSubdir %}
+              TARGET_DIR="{{ storage.hostPath.path }}/{{ model.hubCacheSubdir }}"
+              export HF_HUB_CACHE="${TARGET_DIR}"
+              MARKER="${TARGET_DIR}/.download-{{ model.shortName }}-complete"
+{% else %}
               TARGET_DIR="{{ storage.hostPath.path }}/{{ model.path }}"
               MARKER="${TARGET_DIR}/.download-complete"
+{% endif %}
               if [ -f "${MARKER}" ]; then
                 echo "Model already present at ${TARGET_DIR}, skipping download."
                 exec sleep infinity
               fi
               echo "Downloading model to ${TARGET_DIR}..."
               mkdir -p "${TARGET_DIR}"
+{% if model.hubCacheSubdir %}
+              hf download "{{ model.huggingfaceId }}" --max-workers {{ downloadJob.maxWorkers }}
+{% else %}
               hf download "{{ model.huggingfaceId }}" --local-dir "${TARGET_DIR}" --max-workers {{ downloadJob.maxWorkers }}
+{% endif %}
               echo "Relabelling for non-spc_t readers..."
               chcon -R -t container_file_t "{{ storage.hostPath.path }}"
               touch "${MARKER}"
@@ -66,9 +84,9 @@ spec:
           volumeMounts:
             - name: model-host-storage
               mountPath: {{ storage.hostPath.path }}
-{% if vllmCommon.pullSecret is defined and vllmCommon.pullSecret %}
+{% if engine.pullSecret is defined and engine.pullSecret %}
       imagePullSecrets:
-        - name: {{ vllmCommon.pullSecret }}
+        - name: {{ engine.pullSecret }}
 {% endif %}
       restartPolicy: Always
       volumes:

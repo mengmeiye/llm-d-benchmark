@@ -14,21 +14,23 @@ scenario:
   - name: "launcher-example"
     common:
       model:
-        name: meta-llama/Llama-3.1-8B-Instruct
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: llama-3.1-8b
-        path: models/meta-llama/Llama-3.1-8B-Instruct
-        huggingfaceId: meta-llama/Llama-3.1-8B-Instruct
 
       images:
         benchmark:
           repository: ghcr.io/llm-d/llm-d-benchmark
           tag: nightly
 
-      vllmCommon:
-        # Shell used in the vLLM container `command:` field. Defaults to /bin/bash.
+      # Pod shape shared by every role. No engine flags here -- those live in
+      # the role's `engine.command`, in the engine's own spelling.
+      engine:
+        # Shell the model-server container `command:` is exec'd in.
+        # Defaults to /bin/bash.
         # shell: /bin/sh
-        flags:
-          enforceEager: false
         volumes:
           - name: preprocesses
             type: configMap
@@ -47,20 +49,50 @@ scenario:
 
     standalone:
       enabled: true
-      image:
-        repository: ghcr.io/llm-d-incubation/llm-d-fast-model-actuation/launcher
-        tag: v0.6.5
-      vllm:
-        customPreprocessCommand: "source /setup/preprocess/standalone-preprocess.sh ; /setup/preprocess/standalone-preprocess.py"
-        loggingLevel: DEBUG
-        additionalFlags:
-          - "--enable-sleep-mode"
+      # The launch line, verbatim. Standalone has no routing sidecar, so the
+      # engine binds the Service port (8000) itself.
+      #
+      # --enable-sleep-mode is what makes this an FMA launcher stack: the
+      # launcher sidecar below puts the engine to sleep and wakes it between
+      # model swaps, which it cannot do unless the engine was started with it.
+      #
+      # The server image is the launcher image here, not a plain vLLM one: this
+      # role's `engine.image` overrides `images.<engine>` for this role only.
+      engine:
+        image:
+          repository: ghcr.io/llm-d-incubation/llm-d-fast-model-actuation/launcher
+          tag: v0.6.5
+        preprocessCommand: "source /setup/preprocess/vllm-load-format-preprocess.sh ; /setup/preprocess/vllm-load-format-preprocess.py"
+        command: |
+          vllm serve meta-llama/Llama-3.1-8B-Instruct \
+          --port 8000 \
+          --enable-sleep-mode
+
+      # Environment the opt-in preprocess reads. These are vLLM's own variables
+      # and this scenario's own choices, so they are declared here rather than
+      # rendered by llm-d-benchmark -- the scenario that asks for the script is
+      # the scenario that states what the script needs.
+      #
+      # VLLM_LOGGING_LEVEL is a vLLM environment variable, not a flag, so it
+      # belongs here rather than in the command. vllm-load-format-preprocess.sh
+      # reads it: at DEBUG it points vLLM at a custom log-format config.
+      #
+      # LLMDBENCH_VLLM_STANDALONE_MODEL is the model id the tensorizer path
+      # serializes under. It keeps its legacy name because that is what the
+      # script and the nop harness both read; the standalone template no longer
+      # injects it, because a name like that has no business being emitted for a
+      # role that might be running SGLang.
+      extraEnvVars:
+        - name: VLLM_LOGGING_LEVEL
+          value: DEBUG
+        - name: LLMDBENCH_VLLM_STANDALONE_MODEL
+          value: meta-llama/Llama-3.1-8B-Instruct
       launcher:
         enabled: true
         image:
           repository: ghcr.io/llm-d-incubation/llm-d-fast-model-actuation/launcher
           tag: v0.6.5
-        customPreprocessCommand: "source /setup/preprocess/standalone-preprocess.sh ; /setup/preprocess/standalone-preprocess.py"
+        customPreprocessCommand: "source /setup/preprocess/vllm-load-format-preprocess.sh ; /setup/preprocess/vllm-load-format-preprocess.py"
 
     harness:
       name: nop

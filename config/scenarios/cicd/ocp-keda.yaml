@@ -18,14 +18,12 @@ scenario:
     # MODEL CONFIGURATION
     # =========================================================================
     model:
-      name: Qwen/Qwen3-32B
+      # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+      # The model id is a fact the launch command states; a short name is a
+      # choice, so it stays here -- derived, it is a
+      # `{first8}-{sha8}-{last8}` hash.
       shortName: qwen-qwen3-32b
-      path: models/Qwen/Qwen3-32B
-      huggingfaceId: Qwen/Qwen3-32B
       size: 1Ti
-      maxModelLen: 16000
-      blockSize: 64
-      gpuMemoryUtilization: 0.95
 
     # =========================================================================
     # DEPLOYMENT METHOD
@@ -137,6 +135,29 @@ scenario:
     decode:
       replicas: 1
 
+      # The launch line, verbatim -- paste what you would run by hand. It is
+      # read once for the facts Kubernetes needs before the engine starts
+      # (--port sizes the container port and probes, the capacity flags feed
+      # the pre-deploy check) and is otherwise passed through untouched.
+      #
+      # --port 8200: the routing sidecar owns the Service port (8000) on a
+      # decode pod and forwards here. --enforce-eager is deliberately absent so
+      # this arm matches the FMA launcher, which never sets it.
+      engine:
+        command: |
+          vllm serve Qwen/Qwen3-32B \
+          --host 0.0.0.0 \
+          --port 8200 \
+          --max-model-len 16000 \
+          --block-size 64 \
+          --gpu-memory-utilization 0.95 \
+          --max-num-seqs 256 \
+          --max-num-batched-tokens 256 \
+          --tensor-parallel-size 1 \
+          --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"}' \
+          --no-enable-log-requests \
+          --disable-uvicorn-access-log
+
       initContainers:
         - name: preprocess
           imageKey: benchmark
@@ -160,7 +181,23 @@ scenario:
           memory: 64Gi
           cpu: "16"
 
-      extraEnvVars: []
+      # VLLM_ALLOW_LONG_MAX_MODEL_LEN and VLLM_SERVER_DEV_MODE are vLLM
+      # environment variables, not flags -- they belong here, not in the
+      # command. The dev-mode one is what exposes /reset_prefix_cache, which
+      # `--reset-caches` POSTs between treatments.
+      extraEnvVars:
+        - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+          value: "1"
+        - name: VLLM_SERVER_DEV_MODE
+          value: "1"
+        # NixlConnector publishes this address to its peer as where the KV blocks
+        # can be read from, and takes it from the environment rather than the
+        # launch line. vLLM defaults it to `localhost`, which no other pod can
+        # reach -- the same declaration the llm-d guides make.
+        - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
 
       extraContainerConfig:
         ports:
@@ -209,21 +246,18 @@ scenario:
             release: llmd
 
     # =========================================================================
-    # VLLM COMMON CONFIGURATION
+    # ENGINE CONFIGURATION (pod shape shared by every role)
+    #
+    # Engine flags are not here: they are in the role's `engine.command`
+    # above, in the engine's own spelling. What lives here is the pod shape
+    # llm-d-benchmark builds around whatever engine runs.
     # =========================================================================
-    vllmCommon:
-      kvTransfer:
-        enabled: true
-        connector: NixlConnector
-        role: kv_both
-
-      flags:
-        enforceEager: false  # match FMA launcher (never --enforce-eager); fair comparison
-        disableLogRequests: true
-        disableUvicornAccessLog: true
-        allowLongMaxModelLen: "1"
-        serverDevMode: "1"
-
+    engine:
+      # Sourced before the engine command, in the same shell: the `preprocess`
+      # initContainer below writes this file with the network facts only the
+      # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+      # library path. Engine commands never mention it.
+      preprocessScript: ". /shared-config/llmdbench_env.sh"
       volumes:
         - name: shared-config
           type: emptyDir

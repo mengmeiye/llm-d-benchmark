@@ -26,8 +26,18 @@ from llmdbenchmark.utilities.kube_helpers import _pod_crash_details
 # ---------------------------------------------------------------------------
 
 
-def _cs(name, ready=False, waiting=None, terminated=None, last=None, restarts=0):
+def _cs(
+    name,
+    ready=False,
+    waiting=None,
+    terminated=None,
+    last=None,
+    restarts=0,
+    image=None,
+):
     status = {"name": name, "ready": ready, "restartCount": restarts, "state": {}}
+    if image is not None:
+        status["image"] = image
     if waiting is not None:
         status["state"]["waiting"] = waiting
     if terminated is not None:
@@ -276,6 +286,82 @@ def test_crash_details_covers_init_containers():
         _cs("fetch-model", terminated={"reason": "Error", "exitCode": 1})
     ]
     assert "fetch-model" in PodState.from_api(item).crash_details[0]
+
+
+# ---------------------------------------------------------------------------
+# Crash report: the actionable form
+# ---------------------------------------------------------------------------
+
+
+def test_crash_report_names_the_image_that_could_not_be_pulled():
+    """An ImagePullBackOff is only actionable once the image is named."""
+    pod = PodState.from_api(
+        _pod(
+            name="qwen3-32b-rou",
+            containers=[
+                _cs(
+                    "latency-predictor",
+                    waiting={
+                        "reason": "ImagePullBackOff",
+                        "message": 'Back-off pulling image "ghcr.io/llm-d/predictor:v0"',
+                    },
+                    image="ghcr.io/llm-d/predictor:v0",
+                )
+            ],
+        )
+    )
+    (line,) = pod.crash_report
+    assert line.startswith("qwen3-32b-rou/latency-predictor (ImagePullBackOff)")
+    assert "image=ghcr.io/llm-d/predictor:v0" in line
+    assert 'Back-off pulling image "ghcr.io/llm-d/predictor:v0"' in line
+
+
+def test_crash_report_carries_the_exit_code_of_a_crash_loop():
+    pod = PodState.from_api(
+        _pod(
+            name="sim-decode",
+            containers=[
+                _cs(
+                    "vllm",
+                    waiting={"reason": "CrashLoopBackOff"},
+                    last={"reason": "Error", "exitCode": 1},
+                    image="ghcr.io/llm-d/llm-d-inference-sim:v0.6.0",
+                )
+            ],
+        )
+    )
+    (line,) = pod.crash_report
+    assert "CrashLoopBackOff" in line
+    assert "last terminated: Error, exit_code=1" in line
+    assert "image=ghcr.io/llm-d/llm-d-inference-sim:v0.6.0" in line
+
+
+def test_crash_report_stays_silent_about_healthy_containers():
+    """Only failing containers are reported, and a clean pod reports nothing."""
+    pod = PodState.from_api(
+        _pod(
+            containers=[
+                _cs("vllm", ready=True, image="vllm:latest"),
+                _cs(
+                    "routing-proxy",
+                    waiting={"reason": "ImagePullBackOff"},
+                    image="proxy:bad",
+                ),
+            ]
+        )
+    )
+    assert [line.split("/", 1)[1].split(" ")[0] for line in pod.crash_report] == [
+        "routing-proxy"
+    ]
+    assert (
+        PodState.from_api(_pod(containers=[_cs("vllm", ready=True)])).crash_report == []
+    )
+
+
+def test_crash_report_falls_back_to_the_pod_level_reason():
+    """A pod whose containers never started has no container status to report."""
+    pod = PodState.from_api(_pod(name="p1", phase="Failed", reason="Error"))
+    assert pod.crash_report == ["p1 (Error)"]
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,12 @@
 from pathlib import Path
 
 from llmdbenchmark.executor.context import ExecutionContext
-from llmdbenchmark.smoketests.base import BaseSmoketest, _load_config, _nested_get
+from llmdbenchmark.smoketests.base import (
+    BaseSmoketest,
+    _engine_container,
+    _load_config,
+    _nested_get,
+)
 from llmdbenchmark.smoketests.report import CheckResult, SmoketestReport
 
 
@@ -81,7 +86,7 @@ class SpyreValidator(BaseSmoketest):
                 logger=context.logger,
             )
             serving_pod = decode_pods[0]
-            container_name = "vllm"
+            container_name = _engine_container(serving_pod)
         elif standalone_pods:
             report.add(
                 CheckResult(
@@ -91,9 +96,7 @@ class SpyreValidator(BaseSmoketest):
                 )
             )
             serving_pod = standalone_pods[0]
-            # Standalone container name varies
-            containers = self.get_pod_containers(serving_pod)
-            container_name = containers[0] if containers else "vllm"
+            container_name = _engine_container(serving_pod)
         else:
             report.add(
                 CheckResult(
@@ -196,7 +199,7 @@ class SpyreValidator(BaseSmoketest):
             )
         )
         # Shared memory volume -- only check if scenario defines it
-        configured_volumes = _nested_get(config, "vllmCommon", "volumes") or []
+        configured_volumes = _nested_get(config, "engine", "volumes") or []
         configured_vol_names = [
             v.get("name", "") for v in configured_volumes if isinstance(v, dict)
         ]
@@ -209,22 +212,22 @@ class SpyreValidator(BaseSmoketest):
                 )
             )
 
-        # Correct vLLM image
+        # The engine image the role resolved to (vllm-spyre, for this guide)
         containers_list = serving_pod.get("spec", {}).get("containers", [])
         for c in containers_list:
             if c.get("name") == container_name:
                 image = c.get("image", "")
-                expected_repo = (
-                    _nested_get(config, "images", "vllm", "repository") or ""
+                expected_repo = self.expected_engine_repository(
+                    config, "decode", "standalone"
                 )
                 if expected_repo:
                     report.add(
                         CheckResult(
-                            "spyre_vllm_image",
+                            "spyre_engine_image",
                             expected_repo in image,
                             expected=expected_repo,
                             actual=image,
-                            message=f"Spyre vLLM image: {image}",
+                            message=f"Spyre engine image: {image}",
                         )
                     )
                 break
@@ -232,8 +235,9 @@ class SpyreValidator(BaseSmoketest):
         return report
 
     @staticmethod
-    def _get_container_env(pod_spec: dict, container: str = "vllm") -> dict:
-        """Extract env vars as a dict from the named container."""
+    def _get_container_env(pod_spec: dict, container: str | None = None) -> dict:
+        """Extract env vars as a dict from a container (the engine's by default)."""
+        container = container or _engine_container(pod_spec)
         for c in pod_spec.get("spec", {}).get("containers", []):
             if c.get("name") == container:
                 return {

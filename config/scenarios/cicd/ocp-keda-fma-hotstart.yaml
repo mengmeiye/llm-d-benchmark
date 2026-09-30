@@ -100,9 +100,20 @@ scenario:
       iterations: 1
 
       launcher:
-        # Cap KV cache so sleep-mode leaves headroom for sampler warmup (avoids OOM).
-        # Re-tune per model/GPU if changed.
-        kvCacheMemory: 11259300148  # bytes (~10.49 GiB)
+        # The launcher process IS the engine on this path, so this is its vLLM
+        # flag string, verbatim -- the FMA equivalent of an `engine.command`.
+        # The capacity numbers are written as references to the same `model.*`
+        # fields the compared arm's command uses, so the two arms cannot desync.
+        # --kv-cache-memory caps KV so sleep-mode leaves headroom for sampler
+        # warmup (avoids OOM); re-tune per model/GPU if changed.
+        options: >-
+          --model ${model.name}
+          --enable-sleep-mode
+          --load-format auto
+          --gpu-memory-utilization ${model.gpuMemoryUtilization}
+          --max-model-len ${model.maxModelLen}
+          --block-size ${model.blockSize}
+          --kv-cache-memory 11259300148
 
       # Opt in to pinning: step_06 picks ONE GPU node whose GPUs are all one
       # type and all free, labels it, and pins the LauncherPopulationPolicy +
@@ -242,21 +253,14 @@ scenario:
         labelValue: NVIDIA-H100-80GB-HBM3
 
     # =========================================================================
-    # VLLM COMMON CONFIGURATION
+    # ENGINE CONFIGURATION (pod shape shared by every role)
+    #
+    # No engine command here: decode and prefill are both disabled, so no
+    # `vllm serve` runs in this stack -- the FMA launcher process is the engine
+    # entrypoint and takes a flag string instead. That string is
+    # `fma.launcher.options` above, the counterpart of `<role>.engine.command`.
     # =========================================================================
-    vllmCommon:
-      kvTransfer:
-        enabled: true
-        connector: NixlConnector
-        role: kv_both
-
-      flags:
-        enforceEager: false
-        disableLogRequests: true
-        disableUvicornAccessLog: true
-        allowLongMaxModelLen: "1"
-        serverDevMode: "1"
-
+    engine:
       volumes:
         - name: shared-config
           type: emptyDir

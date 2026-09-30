@@ -179,15 +179,22 @@ Upstream documents the EPP invariants (single EPP replica, an EPP carrying
 [llm-d-router#2577](https://github.com/llm-d/llm-d-router/pull/2577), model-server monitoring
 applied). These are the ones specific to *this* repo:
 
-### `model.maxNumBatchedTokens` must be set
+### The launch command must carry `--max-num-batched-tokens`
 
-`_macros.j2` falls back to a hardcoded **`256`** when nothing sets it, and no guide scenario does.
-An 8192-token prompt then becomes 32 chunked prefill passes, so a prefill-heavy run measures
-chunking overhead rather than prefill capacity.
+The prefill chunk is an ordinary engine flag, so it lives where every other engine flag lives: in
+`modelservice.decode.engine.command`, verbatim. Nothing here models it, defaults it or renames it —
+whatever the command says is what vLLM gets.
 
-Set it on **`model`** ([`ModelConfig`](../llmdbenchmark/parser/config_schema.py)). `_macros.j2`
-also probes `vllmCommon.maxNumBatchedTokens`, but `STRICT_CONFIG` rejects that path, so it is
-unreachable. It must equal the calibration's `CHUNK_SIZE`.
+What makes it special in *this* guide is that its value has a second consumer. It must equal the
+`CHUNK_SIZE` the calibration measures V_P with, because V_P is `CHUNK_SIZE / median(TTFT)` and a
+chunk larger than the batch budget is prefilled in several passes — the measured TTFT is then not
+one prefill pass and the resulting `peakPrefillThroughput` is silently wrong. Leave the flag out
+and you inherit vLLM's own default for your configuration, which is not guaranteed to be the
+number you calibrated with.
+
+There is one number, in one place: change the flag in the command and re-run the calibration.
+`make calibrate-peak-prefill` reads that flag back off the running pods and refuses to run when it
+disagrees with `CHUNK_SIZE`.
 
 ### What `make calibrate-peak-prefill` adds around the recipe
 
@@ -202,9 +209,9 @@ Around that it supplies the four things the recipe leaves to the operator:
 1. **Endpoint override.** `calibrate.sh` auto-discovers a Service named `${GUIDE_NAME}-epp`; under
    modelservice the EPP Service is named after the *model*, so that lookup misses. The target finds
    the real `*-epp` Service and passes `VLLM_ENDPOINT`.
-2. **Chunk-size guard.** Refuses to run when `CHUNK_SIZE` disagrees with the serving
-   `VLLM_MAX_NUM_BATCHED_TOKENS` read off the live pods — a larger chunk is prefilled in several
-   passes, so the measured TTFT would not be one prefill pass.
+2. **Chunk-size guard.** Refuses to run when `CHUNK_SIZE` disagrees with the
+   `--max-num-batched-tokens` read off the live pods' own launch command — a larger chunk is
+   prefilled in several passes, so the measured TTFT would not be one prefill pass.
 3. **Idle guard.** Refuses to run unless `kv_cache_usage_perc` and `num_requests_running` are quiet
    on every decode pod.
 4. **Spread report.** `calibrate.sh` prints only the median, so the target reads the per-sample TTFT

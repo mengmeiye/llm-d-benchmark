@@ -1,7 +1,8 @@
 {# ============================================================================
    17_standalone-podmonitor.yaml.j2
 
-   PodMonitor for Prometheus to scrape vLLM standalone model metrics.
+   PodMonitor for Prometheus to scrape a standalone engine's metrics
+   (any engine -- the path comes from the resolved engine spec).
    Only rendered when standalone is enabled and monitoring.podmonitor.enabled
    is true. Matches bash step 06 generate_podmonitor_yaml().
    ============================================================================ #}
@@ -9,10 +10,10 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
-  name: vllm-standalone-{{ model_id_label }}
+  name: standalone-{{ model_id_label }}
   namespace: {{ namespace.name }}
   labels:
-    app: vllm-standalone-{{ model_id_label }}
+    app: standalone-{{ model_id_label }}
 {% if standalone.labels is defined %}
 {% for key, value in standalone.labels.items() %}
     {{ key }}: "{{ value }}"
@@ -21,9 +22,13 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: vllm-standalone-{{ model_id_label }}
+      app: standalone-{{ model_id_label }}
   podMetricsEndpoints:
   - port: metrics
-    path: {{ monitoring.metricsPath | default('/metrics') }}
+{# Where the engine serves metrics is engine knowledge, so it comes from the
+   resolved engine spec (TRT-LLM serves /prometheus/metrics, not /metrics) --
+   the same source _macros.j2 uses for the chart-rendered PodMonitor.
+   `monitoring.metricsPath` stays ahead of it as the explicit override. #}
+    path: {{ monitoring.metricsPath | default(standalone.engine.metricsPath, true) | default('/metrics', true) }}
     interval: {{ monitoring.scrapeInterval | default('30s') }}
 {% endif %}

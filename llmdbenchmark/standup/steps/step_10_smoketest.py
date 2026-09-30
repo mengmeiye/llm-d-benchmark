@@ -3,6 +3,7 @@
 import time
 from pathlib import Path
 
+from llmdbenchmark.engine import serving_engine, serving_port
 from llmdbenchmark.executor.step import Step, StepResult, Phase
 from llmdbenchmark.executor.context import ExecutionContext
 from llmdbenchmark.executor.command import CommandExecutor
@@ -53,9 +54,10 @@ class SmoketestStep(Step):
 
         plan_config = self._load_stack_config(stack_path)
         model_name = self._require_config(plan_config, "model", "name")
-        inference_port = self._require_config(
-            plan_config, "vllmCommon", "inferencePort"
-        )
+        # The port to dial a pod on is the one its command binds, which
+        # resolve_engines parsed out of the serve line -- not the Service's
+        # port. See serving_port().
+        inference_port = serving_port(plan_config)
         release = self._require_config(plan_config, "release")
 
         if "fma" in context.deployed_methods:
@@ -299,18 +301,27 @@ class SmoketestStep(Step):
         timeout: int = 120,
         poll_interval: int = 10,
     ) -> str | None:
-        """Check that vLLM is listening by polling /health.
+        """Check that the engine is listening by polling its health path.
 
-        This distinguishes 'vLLM process is down' from 'model still loading'.
-        Returns an error string if /health never responds, None on success.
+        This distinguishes 'the engine process is down' from 'model still
+        loading'. Returns an error string if it never responds, None on success.
+
+        The engine and the path both come from the plan, where `resolve_engines`
+        published them for whichever launcher the scenario's command names: every
+        engine happens to serve /health today, but which engine is being polled
+        belongs in the log line either way.
         """
+        engine_cfg = serving_engine(plan_config or {})
+        engine = str(engine_cfg.get("name") or "") or "the engine"
+        health_path = str(engine_cfg.get("healthPath") or "/health")
         protocol = "https" if str(port) == "443" else "http"
-        url = f"{protocol}://{host}:{port}/health"
+        url = f"{protocol}://{host}:{port}{health_path}"
         curl_image = "quay.io/fedora/fedora"
         override_args = _build_overrides(plan_config)
 
         context.logger.log_info(
-            f"Health check: verifying vLLM is listening at {host}:{port}/health..."
+            f"Health check: verifying {engine} is listening at "
+            f"{host}:{port}{health_path}..."
         )
         start = time.time()
         attempt = 0
@@ -319,8 +330,8 @@ class SmoketestStep(Step):
             elapsed = time.time() - start
             if elapsed > timeout:
                 return (
-                    f"vLLM health check failed: /health did not respond "
-                    f"after {timeout}s -- process may not be running"
+                    f"{engine} health check failed: {health_path} did not "
+                    f"respond after {timeout}s -- process may not be running"
                 )
 
             attempt += 1
@@ -353,13 +364,13 @@ class SmoketestStep(Step):
 
             if status_code == "200":
                 context.logger.log_info(
-                    f"vLLM health check passed ✓ ({int(elapsed)}s elapsed)"
+                    f"{engine} health check passed ✓ ({int(elapsed)}s elapsed)"
                 )
                 return None
 
             remaining = int(timeout - elapsed)
             context.logger.log_info(
-                f"vLLM not listening yet (attempt {attempt}, "
+                f"{engine} not listening yet (attempt {attempt}, "
                 f"status={status_code or 'N/A'}, {remaining}s remaining)..."
             )
             time.sleep(poll_interval)
@@ -434,7 +445,7 @@ class SmoketestStep(Step):
                     f"wait via `harness.smoketest.modelReadyTimeout: 3600` "
                     f"in your scenario, or check the model-server logs:\n"
                     f"  kubectl logs -n {namespace} "
-                    f"-l llm-d.ai/role=decode -c vllm --tail=100"
+                    f"-l llm-d.ai/role=decode -c modelserver --tail=100"
                 )
                 context.logger.log_error(err)
                 return err

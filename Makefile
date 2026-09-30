@@ -314,9 +314,10 @@ calibrate-peak-prefill: check-kubectl check-envsubst ## Measure peakPrefillThrou
 	test -n "$$EPP" || { echo "❌ no *-epp Service in ns/$$NS"; exit 2; }; \
 	MODEL=$$(kubectl get deploy -n "$$NS" -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[?(@.name=="vllm")].env[?(@.name=="MODEL_NAME")]}{.value}{"\n"}{end}{end}' | awk 'NF{print;exit}'); \
 	test -n "$$MODEL" || { echo "❌ could not read MODEL_NAME from the vllm container in ns/$$NS"; exit 2; }; \
-	SERVED=$$(kubectl get deploy -n "$$NS" -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[?(@.name=="vllm")].env[?(@.name=="VLLM_MAX_NUM_BATCHED_TOKENS")]}{.value}{"\n"}{end}{end}' | awk 'NF{print;exit}'); \
+	SERVED=$$(kubectl get deploy -n "$$NS" -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[?(@.name=="vllm")]}{.command}{" "}{.args}{"\n"}{end}{end}' \
+	  | grep -oE -- '--max-num-batched-tokens[ =]+[0-9]+' | head -1 | grep -oE '[0-9]+$$'); \
 	if [ -n "$$SERVED" ] && [ "$$SERVED" != "$(CHUNK_SIZE)" ]; then \
-	  echo "❌ CHUNK_SIZE=$(CHUNK_SIZE) != serving VLLM_MAX_NUM_BATCHED_TOKENS=$$SERVED"; \
+	  echo "❌ CHUNK_SIZE=$(CHUNK_SIZE) != the serving --max-num-batched-tokens=$$SERVED"; \
 	  echo "   A chunk larger than the batch budget is prefilled in several passes,"; \
 	  echo "   so the measured TTFT would not be one prefill pass."; exit 2; fi; \
 	echo "🔎 endpoint=http://$$EPP:80  model=$$MODEL  chunk=$(CHUNK_SIZE)"; \

@@ -73,34 +73,41 @@ class PrecisePrefixCacheAwareValidator(BaseSmoketest):
                 )
             )
 
-            # Scenario-specific: vLLM port should match inference port (no proxy)
-            vllm_port_in_args = None
+            # Scenario-specific: this guide runs without the routing sidecar, so
+            # the engine must bind the Service port itself -- nothing bridges
+            # 8000 to 8200 here. The port in the args is the command's own
+            # --port (llm-d-benchmark does not rewrite it); compare it with what
+            # the Service exposes.
+            engine_port_in_args = None
             if "--port" in args:
                 parts = args.split()
-                for i, p in enumerate(parts):
-                    if p == "--port" and i + 1 < len(parts):
-                        vllm_port_in_args = parts[i + 1].strip("\\").strip()
+                for i, token in enumerate(parts):
+                    if token == "--port" and i + 1 < len(parts):
+                        engine_port_in_args = parts[i + 1].strip("\\").strip()
                         break
 
-            if vllm_port_in_args:
-                expected_port = _nested_get(config, "vllmCommon", "inferencePort")
+            if engine_port_in_args:
+                expected_port = _nested_get(config, "engine", "servicePort")
                 if expected_port is not None:
                     report.add(
                         CheckResult(
-                            "vllm_port",
-                            vllm_port_in_args
-                            in (str(expected_port), "$VLLM_INFERENCE_PORT"),
+                            "engine_port",
+                            engine_port_in_args
+                            in (str(expected_port), "$SERVICE_PORT", "$ENGINE_PORT"),
                             expected=str(expected_port),
-                            actual=vllm_port_in_args,
-                            message=f"vLLM port is {vllm_port_in_args} (expected {expected_port} -- no proxy)",
+                            actual=engine_port_in_args,
+                            message=(
+                                f"engine binds port {engine_port_in_args} "
+                                f"(expected {expected_port} -- no proxy)"
+                            ),
                         )
                     )
 
         # The llm-d-router-{standalone,gateway}-dev charts label the EPP
         # Pod with the mode-specific selector
         # (`llm-d-router-standalone=<release>-epp` or
-        # `llm-d-router-gateway=<release>-epp`); the legacy
-        # `inferencepool=<release>-epp` label is gone. The common
+        # `llm-d-router-gateway=<release>-epp`); they do not apply an
+        # `inferencepool=<release>-epp` label. The common
         # `app.kubernetes.io/*` labels only land on the Deployment, not
         # the Pod. We don't know the gateway mode here, so try both --
         # exactly one will match.
@@ -123,7 +130,7 @@ class PrecisePrefixCacheAwareValidator(BaseSmoketest):
 
         if decode_pods:
             # Shared memory volume -- only check if scenario defines it
-            configured_volumes = _nested_get(config, "vllmCommon", "volumes") or []
+            configured_volumes = _nested_get(config, "engine", "volumes") or []
             configured_vol_names = [
                 v.get("name", "") for v in configured_volumes if isinstance(v, dict)
             ]

@@ -32,15 +32,42 @@ spec:
           # pull, since the container only downloads the model and exits.
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
+{# What gets staged depends on how the engine will be told to find it.
+
+    pvc+hf (model.hubCacheSubdir set): a Hugging Face *hub cache*.
+      `hf download <id>` with HF_HUB_CACHE set writes
+      models--<org>--<model>/snapshots/<sha>/..., which is the only layout a
+      plain model id resolves against. The modelservice chart points the engine
+      at the same subdirectory of the same volume, so `vllm serve <id>` reads
+      these bytes instead of reaching for the Hub.
+
+    pvc: a flat directory of one model's files at model.path, because the engine
+      is given that path rather than an id.
+
+    Either way the directory is composed from THIS container's mount path: the
+    subdirectory is a fact about the volume, and every container that touches it
+    sees the volume somewhere else -- the job here at `downloadJob.mountPath`,
+    the serving pods where the modelservice chart mounts it, the hostPath
+    DaemonSet through the node filesystem. #}
           args:
+{% if model.hubCacheSubdir %}
+            - |
+              mkdir -p "${HF_HUB_CACHE}" && \
+              hf download "${HF_MODEL_ID}" --max-workers {{ downloadJob.maxWorkers }}
+{% else %}
             - |
               mkdir -p "${MOUNT_PATH}/${MODEL_PATH}" && \
-              hf download "${HF_MODEL_ID}" --local-dir "{{ downloadJob.mountPath }}/${MODEL_PATH}" --max-workers {{ downloadJob.maxWorkers }}
+              hf download "${HF_MODEL_ID}" --local-dir "${MOUNT_PATH}/${MODEL_PATH}" --max-workers {{ downloadJob.maxWorkers }}
+{% endif %}
           env:
             - name: MODEL_PATH
               value: {{ model.path }}
             - name: HF_MODEL_ID
               value: {{ model.huggingfaceId }}
+{% if model.hubCacheSubdir %}
+            - name: HF_HUB_CACHE
+              value: {{ downloadJob.mountPath }}/{{ model.hubCacheSubdir }}
+{% endif %}
 {% if huggingface.enabled %}
             - name: HF_TOKEN
               valueFrom:
@@ -58,9 +85,9 @@ spec:
             - name: model-cache
               mountPath: {{ downloadJob.mountPath }}
       restartPolicy: OnFailure
-{% if vllmCommon.pullSecret is defined and vllmCommon.pullSecret %}
+{% if engine.pullSecret is defined and engine.pullSecret %}
       imagePullSecrets:
-        - name: {{ vllmCommon.pullSecret }}
+        - name: {{ engine.pullSecret }}
 {% endif %}
       volumes:
         - name: model-cache

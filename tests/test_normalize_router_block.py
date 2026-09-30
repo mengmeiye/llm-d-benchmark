@@ -520,14 +520,20 @@ class TestModelServersDefaults:
         out = normalize(values)
         assert out["router"]["modelServers"]["matchLabels"] == {"app": "vllm-custom"}
 
-    def test_targetPorts_default_from_decode(self, normalize):
-        values = {"decode": {"vllm": {"servicePort": 8000}}}
+    def test_targetPorts_default_from_the_service_port(self, normalize):
+        """The router dials the Service, so it follows ``engine.servicePort``.
+
+        Not the port a role's command binds: with the routing sidecar in front
+        of decode those differ (8000 vs 8200), and the router has to reach the
+        sidecar.
+        """
+        values = {"engine": {"servicePort": 8000}}
         out = normalize(values)
         assert out["router"]["modelServers"]["targetPorts"] == [{"number": 8000}]
 
     def test_user_targetPorts_preserved(self, normalize):
         values = {
-            "decode": {"vllm": {"servicePort": 8000}},
+            "engine": {"servicePort": 8000},
             "router": {"modelServers": {"targetPorts": [{"number": 9999}]}},
         }
         out = normalize(values)

@@ -355,7 +355,7 @@ class EnsureInfraStep(Step):
         runtime = context.container_runtime or "docker"
         plan_config = self._load_plan_config(context) or {}
         nok8s = plan_config.get("nok8s", {})
-        accelerator = str(nok8s.get("vllm", {}).get("accelerator", "nvidia")).lower()
+        accelerator = str(nok8s.get("engine", {}).get("accelerator", "nvidia")).lower()
         hf_env = nok8s.get("hfTokenEnv", "HUGGING_FACE_HUB_TOKEN")
         # The accelerator, the ports and the host tools all have to be present on
         # the machine that will run the containers, so every probe below is
@@ -550,21 +550,25 @@ class EnsureInfraStep(Step):
                 tool = probe.split()[0]
                 where = f" on {host.destination}" if host.is_remote else ""
                 warnings.append(
-                    f"'{tool}' found no {accelerator} accelerator{where}; vLLM "
-                    f"needs the device + driver present, the matching vLLM image, "
+                    f"'{tool}' found no {accelerator} accelerator{where}; the "
+                    f"engine needs the device + driver present, a matching image, "
                     f"and the container toolkit configured for '{runtime}'."
                 )
         else:
             context.logger.log_info(
                 f"    accelerator='{accelerator}': skipping device probe "
-                f"(cpu/spyre/custom -- ensure nok8s.vllm.deviceArgs + image match)."
+                f"(cpu/spyre/custom -- ensure nok8s.engine.deviceArgs + image match)."
             )
 
-        # 2b. GPU capacity: replicas x tensorParallel must fit the host's GPUs.
+        # 2b. GPU capacity: replicas x devices-per-replica must fit the host's
+        #     GPUs. The per-replica count is `nok8s.engine.acceleratorCount` --
+        #     stated, because the runtime pins devices before the engine starts,
+        #     so this is engine-independent and never disagrees with the device
+        #     flags the deploy step writes.
         #     Only checkable for nvidia (nvidia-smi -L enumerates devices).
         needed = sum(
-            _as_count(cfg.get("vllm", {}).get("replicas", 1))
-            * _as_count(cfg.get("vllm", {}).get("tensorParallel", 1))
+            _as_count(cfg.get("engine", {}).get("replicas", 1))
+            * _as_count(cfg.get("engine", {}).get("acceleratorCount", 1))
             for cfg in stacks
         )
         if accelerator == "nvidia" and needed > 1 and not remote_unreachable:
@@ -577,8 +581,9 @@ class EnsureInfraStep(Step):
                 )
                 if count and needed > count:
                     warnings.append(
-                        f"nok8s.vllm needs {needed} GPUs (replicas x tensorParallel "
-                        f"over {len(stacks)} stack(s)) but only {count} detected -- "
+                        f"nok8s.engine needs {needed} GPUs (replicas x "
+                        f"accelerators-per-replica over {len(stacks)} stack(s)) but "
+                        f"only {count} detected -- "
                         f"workers will contend for devices or fail to start."
                     )
 
@@ -588,22 +593,22 @@ class EnsureInfraStep(Step):
         unpinned = [
             cfg
             for cfg in stacks
-            if _as_count(cfg.get("vllm", {}).get("replicas", 1)) == 1
-            and str(cfg.get("vllm", {}).get("gpus", "all")) == "all"
-            and not cfg.get("vllm", {}).get("deviceArgs")
+            if _as_count(cfg.get("engine", {}).get("replicas", 1)) == 1
+            and str(cfg.get("engine", {}).get("gpus", "all")) == "all"
+            and not cfg.get("engine", {}).get("deviceArgs")
         ]
         if accelerator != "cpu" and len(unpinned) > 1:
             warnings.append(
                 f"{len(unpinned)} nok8s stacks each take every accelerator on this "
-                f"host; give them distinct devices with nok8s.vllm.gpus (docker) or "
-                f"nok8s.vllm.deviceArgs, or they will fight over memory."
+                f"host; give them distinct devices with nok8s.engine.gpus (docker) "
+                f"or nok8s.engine.deviceArgs, or they will fight over memory."
             )
 
         # 3. Hugging Face token (warning).
         if not os.environ.get(hf_env):
             warnings.append(
                 f"${hf_env} is not set; gated Hugging Face models will fail to "
-                f"download in the vLLM container."
+                f"download in the engine container."
             )
 
         # 4. Required host ports free (warning). Pick the first probe tool that
@@ -668,10 +673,10 @@ class EnsureInfraStep(Step):
             message=f"nok8s infrastructure ready ({host.describe()})",
         )
 
-    # Config path -> whether the value is the base of `vllm.replicas`
+    # Config path -> whether the value is the base of `engine.replicas`
     # consecutive ports. Mirrors RenderPlans._NOK8S_HOST_PORTS.
     _NOK8S_PORT_FIELDS: tuple[tuple[str, str, int, bool], ...] = (
-        ("vllm", "hostPort", 8000, True),
+        ("engine", "hostPort", 8000, True),
         ("envoy", "listenPort", 8081, False),
         ("envoy", "adminPort", 19000, False),
         ("epp", "grpcPort", 9002, False),
@@ -691,10 +696,10 @@ class EnsureInfraStep(Step):
         ports: set[int] = set()
         bad: list[str] = []
         for cfg in stacks:
-            replicas = _as_port(cfg.get("vllm", {}).get("replicas", 1), 1)
+            replicas = _as_port(cfg.get("engine", {}).get("replicas", 1), 1)
             if replicas is None or replicas < 1:
                 if replicas is None:
-                    bad.append("nok8s.vllm.replicas")
+                    bad.append("nok8s.engine.replicas")
                 replicas = 1
             for section, field, default, is_base in self._NOK8S_PORT_FIELDS:
                 port = _as_port(cfg.get(section, {}).get(field, default), default)

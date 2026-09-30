@@ -28,8 +28,9 @@ hcaids_wrong_gid = []
 hcaids_excluded = os.getenv("NCCL_EXCLUDE_IB_HCA", "").split(",")
 ucx_tls = os.getenv("UCX_TLS", "").split(",")
 # A non-empty UCX_NET_DEVICES in the environment is an explicit request to pin
-# the KV-transfer data plane (vllmCommon.ucxNetDevices), so it wins over
-# whatever device discovery finds here.
+# the KV-transfer data plane -- a scenario sets it in the role's extraEnvVars,
+# because UCX reads it from the environment -- so it wins over whatever device
+# discovery finds here. Empty (the value the guides ship) means "discover".
 ucx_net_devices_preset = os.getenv("UCX_NET_DEVICES", "").strip()
 executables_path = "/usr/local/bin"
 
@@ -599,7 +600,8 @@ if not nixl_list and create_multiple_routing_tables:
         "WARNING: no usable HCA was found, so UCX_NET_DEVICES and NCCL_IB_HCA are left"
         " unset while this pod has interfaces sharing one subnet. Peers that do pin"
         " those devices will not be reachable (KV transfer hangs). Set"
-        " vllmCommon.ucxNetDevices to pin the data plane explicitly."
+        " UCX_NET_DEVICES in the role's extraEnvVars to pin the data plane"
+        " explicitly."
     )
     if hcaids_wrong_gid:
         print(
@@ -848,21 +850,38 @@ if lws_leader_address:
 
 print(f'DEBUG: Pod index is "{pod_index}"')
 
+# Per-replica variation. A `,,`-delimited env var means "one value per pod":
+# the pod picks the entry at its own index and re-exports the variable holding
+# just that entry, so the engine command can reference $THE_VAR and every
+# replica gets a different value from one deployment.
+#
+#   decode:
+#     extraEnvVars:
+#       - name: MY_MAX_LEN
+#         value: "8192,,16384,,32768"
+#     engine:
+#       command: vllm serve Qwen/Qwen3-32B --max-model-len $MY_MAX_LEN
+#
+# Any variable is eligible, whatever the engine calls it -- the `,,` delimiter
+# is the opt-in, and it is unlikely enough in a real value to be a safe marker.
+# LLMDBENCH_POD_LABELS is excluded because it carries its own per-pod list and
+# is split by the labeling code below, not here.
+_NOT_PER_REPLICA = ("LLMDBENCH_POD_LABELS", "LLMDBENCH_POD_LABELS_REQUIRED")
+
 for key in dict(os.environ).keys():
-    if "VLLM_" in key:
-        value = os.environ.get(key)
-        if value.count(",,"):
-            if pod_index is not None:
-                if len(value.split(",,")) > pod_index:
-                    newvalue = value.split(",,")[pod_index]
-                else:
-                    newvalue = value.split(",,")[0]
-            else:
-                newvalue = value.split(",,")[0]
-            print(
-                f'INFO: Variable "{key}" with value "{value}" will be re-exported with "{newvalue}" ({pod_index})'
-            )
-            env_file_contents.append(f"export {key}={newvalue}")
+    if key in _NOT_PER_REPLICA:
+        continue
+    value = os.environ.get(key) or ""
+    if value.count(",,"):
+        entries = value.split(",,")
+        if pod_index is not None and len(entries) > pod_index:
+            newvalue = entries[pod_index]
+        else:
+            newvalue = entries[0]
+        print(
+            f'INFO: Variable "{key}" with value "{value}" will be re-exported with "{newvalue}" ({pod_index})'
+        )
+        env_file_contents.append(f"export {key}={newvalue}")
 
 
 def _pod_labeling_failed(reason):
@@ -878,7 +897,7 @@ def _pod_labeling_failed(reason):
         print(f"ERROR: Pod self-labeling failed: {reason}", file=sys.stderr)
         print(
             "ERROR: contextLengthRanges is set, so context-length-aware routing "
-            "cannot work without this label. Refusing to start vLLM.",
+            "cannot work without this label. Refusing to start the engine.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1014,6 +1033,31 @@ if pod_labels.count("_eq_") and kubeconfig_path:
         raise
     except Exception as e:
         _pod_labeling_failed(e)
+
+# The CUDA driver library lives outside the image's linker path on some
+# distributions (the driver is injected by the device plugin, the toolkit is
+# baked in), so torch cannot dlopen it. Discovering it is a shell expression,
+# not a value -- it has to run in the *serving* container, where the injected
+# driver actually is, which is why it is emitted into the env file rather than
+# executed here in the initContainer.
+#
+# Self-guarding: on a node with no libcuda.so.1 (Intel XPU, Spyre AIU, CPU) the
+# `find` yields nothing and both exports are skipped. That is what replaced the
+# per-accelerator `accelerator.runtimePreamble` command fragment -- no
+# accelerator profile has to declare this, and no engine command has to name it.
+env_file_contents.append(
+    "_llmdbench_cuda_dirs=$(find / -name libcuda.so.1 -printf '%h\\n' 2>/dev/null"
+    " | sort -u | sed ':a; N; $!ba; s/\\n/:/g')"
+)
+env_file_contents.append('if [ -n "$_llmdbench_cuda_dirs" ]; then')
+env_file_contents.append(
+    '  export LD_LIBRARY_PATH="$_llmdbench_cuda_dirs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"'
+)
+env_file_contents.append(
+    '  export LIBRARY_PATH="${_llmdbench_cuda_dirs%%:*}${LIBRARY_PATH:+:$LIBRARY_PATH}"'
+)
+env_file_contents.append("fi")
+env_file_contents.append("unset _llmdbench_cuda_dirs")
 
 env_file_contents.append('echo "Defined NCCL environment variables"')
 env_file_contents.append(

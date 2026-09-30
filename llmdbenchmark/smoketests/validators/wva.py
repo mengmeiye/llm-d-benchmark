@@ -839,7 +839,7 @@ def _deployment_is_available(dep: dict) -> bool:
 
 
 class WvaValidator(WvaSmoketestMixin, BaseSmoketest):
-    """Minimal standalone validator for WVA-only scenarios (e.g. inference-scheduling-wva).
+    """Minimal standalone validator for WVA-only scenarios.
 
     Runs the base infrastructure smoketest plus the WVA-specific checks
     (controller, KEDA CRD, ScaledObject annotations + trigger query alignment).

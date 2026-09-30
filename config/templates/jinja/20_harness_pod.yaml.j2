@@ -126,8 +126,11 @@ spec:
     - name: LLMDBENCH_BASE64_CONTEXT_CONTENTS
       value: "{{ base64_context_contents }}"
 {% endif %}
+    {# The port the harness dials: what the Service/gateway exposes, not what
+       the engine binds inside the pod. The name is the harness's own
+       contract, so it keeps this spelling; the value is `engine.servicePort`. #}
     - name: LLMDBENCH_VLLM_COMMON_INFERENCE_PORT
-      value: "{{ vllmCommon.inferencePort }}"
+      value: "{{ engine.servicePort }}"
     - name: LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR_PREFIX
       value: "{{ harness.resultsDirPrefix | default('/requests') }}"
     - name: LLMDBENCH_HARNESS_STACK_NAME
@@ -135,10 +138,13 @@ spec:
 {% if monitoring is defined and monitoring.metricsScrapeEnabled is defined %}
     - name: LLMDBENCH_VLLM_COMMON_METRICS_SCRAPE_ENABLED
       value: "{{ monitoring.metricsScrapeEnabled | lower }}"
+    {# Where a decode pod serves /metrics: the port its engine command binds. #}
     - name: LLMDBENCH_VLLM_COMMON_METRICS_PORT
-      value: "{{ decode.vllm.port }}"
+      value: "{{ decode.engine.port | default(engine.servicePort, true) }}"
+    {# Same resolution order as the PodMonitors: explicit override, else the
+       engine the decode role actually launches, else /metrics. #}
     - name: LLMDBENCH_VLLM_MONITORING_METRICS_PATH
-      value: "{{ monitoring.metricsPath }}"
+      value: "{{ monitoring.metricsPath | default(decode.engine.metricsPath, true) | default('/metrics', true) }}"
     - name: LLMDBENCH_EPP_METRICS_SECRET
       value: "{{ router.monitoring.secretName | default('inference-gateway-sa-metrics-reader-secret') }}"
 {% if monitoring.timeSeriesMetrics is defined %}
@@ -161,8 +167,16 @@ spec:
       value: "{{ standalone.launcher.enabled | lower }}"
     - name: LLMDBENCH_FMA_ENABLED
       value: "{{ fma.enabled | lower }}"
+    {# vLLM's weight-loading format. This is not rendered into any engine
+       command -- it selects which branch of vllm-load-format-preprocess.sh installs
+       which loader library, and the benchmark report records it. A scenario
+       that wants a non-default loader sets the variable in
+       `standalone.extraEnvVars` (the home for a role's engine environment)
+       and writes `--load-format $LLMDBENCH_VLLM_COMMON_VLLM_LOAD_FORMAT`
+       in its command; we mirror it here so the harness sees the same value. #}
+{% set _load_format_env = (standalone.extraEnvVars | default([], true)) | selectattr('name', 'equalto', 'LLMDBENCH_VLLM_COMMON_VLLM_LOAD_FORMAT') | list %}
     - name: LLMDBENCH_VLLM_COMMON_VLLM_LOAD_FORMAT
-      value: "{{ standalone.vllm.loadFormat }}"
+      value: "{{ _load_format_env[0].value if _load_format_env else 'auto' }}"
 {% if standalone.enabled and standalone.launcher.enabled %}
     - name: LLMDBENCH_VLLM_STANDALONE_LAUNCHER_PORT
       value: "{{ standalone.launcher.port }}"
@@ -210,9 +224,9 @@ spec:
     configMap:
       name: llmdbench-harness-scripts
       defaultMode: 0755
-{% if vllmCommon.pullSecret is defined and vllmCommon.pullSecret %}
+{% if engine.pullSecret is defined and engine.pullSecret %}
   imagePullSecrets:
-  - name: {{ vllmCommon.pullSecret }}
+  - name: {{ engine.pullSecret }}
 {% endif %}
 {% if harness.serviceAccount is defined and harness.serviceAccount %}
   serviceAccountName: {{ harness.serviceAccount }}

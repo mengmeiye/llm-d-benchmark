@@ -1,6 +1,5 @@
 # WIDE EP/DP WITH LWS WELL LIT PATH
 # Based on https://github.com/llm-d/llm-d/tree/main/guides/wide-ep/README.md
-# Migrated from bash environment variables to YAML format
 #
 # Notes:
 # - Removed pod monitoring; can be added using decode.extraContainerConfig / prefill.extraContainerConfig
@@ -43,27 +42,28 @@ scenario:
       # schedulerName: custom-binpack-scheduler
       # -------------------------------------------------------------------------
       # Model Configuration
-      #
-      #
-      #
-      #
-      #
-      #
+      # The model is named in the launch commands below and nowhere else. To
+      # serve a different one, edit the commands and the shortName here; the
+      # PVC path, pod labels, HTTPRoute and harness target all follow.
+      # Models this guide has been run with: Qwen/Qwen3-30B-A3B, deepseek-ai/DeepSeek-R1-0528.
       # -------------------------------------------------------------------------
       model:
-        name: Qwen/Qwen3-30B-A3B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen3-30b-a3b
-        path: models/Qwen/Qwen3-30B-A3B
-        huggingfaceId: Qwen/Qwen3-30B-A3B
-  #      name: deepseek-ai/DeepSeek-R1-0528
-  #      shortName: DeepSeek-R1-0528
-  #      path: models/deepseek-ai/DeepSeek-R1-0528
-  #      huggingfaceId: deepseek-ai/DeepSeek-R1-0528
         size: 1Ti
+        # Unusually, these stay here. A capacity number belongs in the launch
+        # command whenever the command states it -- but neither command below
+        # passes --max-model-len or --block-size (this guide lets vLLM derive
+        # them from the model config), so these are the only record the capacity
+        # planner has. gpuMemoryUtilization IS in both commands; it is repeated
+        # here for the planner because 0.75 is this guide's own number, not the
+        # accelerator profile's.
         maxModelLen: 4000
         blockSize: 64
         gpuMemoryUtilization: 0.75
-        cacheBase: /model-cache
 
       # -------------------------------------------------------------------------
       # Storage Configuration
@@ -76,9 +76,19 @@ scenario:
           # storageClassName: shared-vast
           # storageClassName: ocs-storagecluster-cephfs
 
-    vllmCommon:
-#      ucxTls: "rc,sm,cuda_ipc,cuda_copy,tcp"
-#      ucxNetDevices: "eth0"   # pin KV transfer when secondary NICs are attached
+    engine:
+      # Sourced before the engine command, in the same shell: the `preprocess`
+      # initContainer below writes this file with the network facts only the
+      # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+      # library path. Engine commands never mention it.
+      preprocessScript: ". /shared-config/llmdbench_env.sh"
+      # The UCX settings for the NIXL data plane, if this stack ever needs
+      # them, are container environment variables and belong in the role's
+      # extraEnvVars -- UCX reads them from the environment, not the command:
+      #   - name: UCX_TLS
+      #     value: "rc,sm,cuda_ipc,cuda_copy,tcp"
+      #   - name: UCX_NET_DEVICES
+      #     value: "eth0"   # pin KV transfer when secondary NICs are attached
       networkResource: "auto"   # auto-detect from cluster nodes
       networkNr: "1"            # number of network devices
 
@@ -102,21 +112,21 @@ scenario:
 # for the NIXL KV-transfer data plane, and it chooses independently of
 # VLLM_NIXL_SIDE_CHANNEL_HOST (which is pinned to the pod IP). If a rail cannot
 # carry that traffic the handshake fails (NIXL_ERR_REMOTE_DISCONNECT /
-# NIXL_ERR_NOT_FOUND) and requests hang instead of erroring, so pin
-# vllmCommon.ucxNetDevices when enabling this -- "eth0" keeps KV transfer on the
-# pod network.
+# NIXL_ERR_NOT_FOUND) and requests hang instead of erroring, so set
+# UCX_NET_DEVICES in the role's extraEnvVars when enabling this -- "eth0" keeps
+# KV transfer on the pod network.
 # Alternatively, --set 'annotations.prefill.pod."k8s.v1.cni.cncf.io/networks"'=multi-nic-compute,'annotations.decode.pod."k8s.v1.cni.cncf.io/networks"'=multi-nic-compute
-      annotations:
-        prefill:
-          pod:
+    annotations:
+      prefill:
+        pod:
 #            k8s.v1.cni.cncf.io/networks: multi-nic-inference
-        decode:
-          pod:
+      decode:
+        pod:
 #            k8s.v1.cni.cncf.io/networks: multi-nic-inference
 
-      timeouts:
-        controlWait: 900000
-        harnessWait: 900000
+    timeouts:
+      controlWait: 900000
+      harnessWait: 900000
 
     # =========================================================================
     # KUSTOMIZE DEPLOY METHOD   (scope: the ENTIRE stack)
@@ -127,7 +137,7 @@ scenario:
     # defined ENTIRELY by the guide's own manifests:
     #
     #   * EVERYTHING ELSE in this scenario is IGNORED -- model, modelservice,
-    #     standalone, decode/prefill, vllmCommon, storage, harness model, etc.
+    #     standalone, decode/prefill, engine, storage, harness model, etc.
     #   * `-m/--models` and all other CLI/scenario tuning are ignored.
     #   * DoE `experiment` SETUP sweeps do NOT alter a kustomize deploy
     #     (only run/workload treatments still apply).
@@ -218,36 +228,36 @@ scenario:
           replicas: 1
           flags:
             v: 2
-        pluginsConfigFile: "wide-ep-config.yaml"
-        pluginsCustomConfig:
-          wide-ep-config.yaml: |
-            apiVersion: llm-d.ai/v1alpha1
-            kind: EndpointPickerConfig
-            plugins:
-            - type: disagg-headers-handler
-            - type: always-disagg-pd-decider
-            - type: disagg-profile-handler
-              parameters:
-                deciderPluginName: always-disagg-pd-decider
-            - type: prefill-filter
-            - type: decode-filter
-            - type: prefix-cache-scorer
-            - type: queue-scorer
-            - type: active-request-scorer
-            schedulingProfiles:
-            - name: prefill
+          pluginsConfigFile: "wide-ep-config.yaml"
+          pluginsCustomConfig:
+            wide-ep-config.yaml: |
+              apiVersion: llm-d.ai/v1alpha1
+              kind: EndpointPickerConfig
               plugins:
-              - pluginRef: prefill-filter
-              - pluginRef: prefix-cache-scorer
-                weight: 3
-              - pluginRef: queue-scorer
-                weight: 2
-              - pluginRef: active-request-scorer
-                weight: 2
-            - name: decode
-              plugins:
-              - pluginRef: decode-filter
-              - pluginRef: active-request-scorer
+              - type: disagg-headers-handler
+              - type: always-disagg-pd-decider
+              - type: disagg-profile-handler
+                parameters:
+                  deciderPluginName: always-disagg-pd-decider
+              - type: prefill-filter
+              - type: decode-filter
+              - type: prefix-cache-scorer
+              - type: queue-scorer
+              - type: active-request-scorer
+              schedulingProfiles:
+              - name: prefill
+                plugins:
+                - pluginRef: prefill-filter
+                - pluginRef: prefix-cache-scorer
+                  weight: 3
+                - pluginRef: queue-scorer
+                  weight: 2
+                - pluginRef: active-request-scorer
+                  weight: 2
+              - name: decode
+                plugins:
+                - pluginRef: decode-filter
+                - pluginRef: active-request-scorer
           resources:
             requests:
               cpu: "4"
@@ -329,31 +339,152 @@ scenario:
         backendRequestTimeout: "0s"
 
     # -------------------------------------------------------------------------
+    # Shared role configuration
+    # Prefill and decode are the same pod on this cluster: the same eight
+    # devices, the same probes, the same environment, the same capabilities.
+    # Stated once here, those cannot drift apart. Each role below carries only
+    # what it does differently -- its launch command, and for decode the RDMA
+    # device. A key a role names for itself wins over the value here.
+    # -------------------------------------------------------------------------
+    roleDefaults:
+      initContainers:
+        - name: preprocess
+          imageKey: benchmark
+          imagePullPolicy: Always
+          command: ["set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
+          volumeMounts:
+            - name: shared-config
+              mountPath: /shared-config
+
+      parallelism:
+        tensor: 1
+        data: 1
+        dataLocal: 8
+        workers: 2
+
+      # Resource configuration
+      resources:
+        limits:
+          ephemeral-storage: 1Ti
+          memory: 512Gi
+          cpu: "32"
+        requests:
+          ephemeral-storage: 1Ti
+          memory: 512Gi
+          cpu: "32"
+
+      # Startup probe overrides
+      probes:
+        startup:
+          failureThreshold: 2700
+          initialDelaySeconds: 240
+          periodSeconds: 30
+          timeoutSeconds: 5
+          path: /v1/models
+        liveness:
+          failureThreshold: 3
+          periodSeconds: 5
+        readiness:
+          failureThreshold: 3
+          periodSeconds: 5
+          path: /v1/models
+
+      # -----------------------------------------------------------------------
+      # Extra Environment Variables
+      # -----------------------------------------------------------------------
+      extraEnvVars:
+        # NixlConnector publishes this address to its peer as where the KV blocks
+        # can be read from, and takes it from the environment rather than the
+        # launch line. vLLM defaults it to `localhost`, which no other pod can
+        # reach -- the same declaration the llm-d guides make.
+        - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: VLLM_SKIP_P2P_CHECK
+          value: "1"
+        - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+          value: "1"
+        - name: VLLM_USE_DEEP_GEMM
+          value: "1"
+        - name: NVIDIA_GDRCOPY
+          value: "enabled"
+        - name: NCCL_EXCLUDE_IB_HCA
+          value: ""
+        - name: NVSHMEM_DEBUG
+          value: "INFO"
+        - name: HF_HUB_DISABLE_XET
+          value: "1"
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: NCCL_DEBUG_SUBSYS
+          value: "INIT,NET"
+        - name: NCCL_DEBUG_FILE
+          value: "/tmp/nccl.%h.%p.log"
+
+      # -----------------------------------------------------------------------
+      # Extra Container Configuration
+      # -----------------------------------------------------------------------
+      extraContainerConfig:
+        securityContext:
+          capabilities:
+            add:
+              - "IPC_LOCK"
+              - "SYS_RAWIO"
+              - "NET_ADMIN"
+              - "NET_RAW"
+          runAsGroup: 0
+          runAsUser: 0
+        imagePullPolicy: Always
+
+      # -----------------------------------------------------------------------
+      # Additional Volume Mounts
+      # -----------------------------------------------------------------------
+      additionalVolumeMounts: []
+
+      # -----------------------------------------------------------------------
+      # Additional Volumes
+      # -----------------------------------------------------------------------
+      additionalVolumes: []
+
+    # -------------------------------------------------------------------------
     # Prefill Configuration
     # -------------------------------------------------------------------------
     prefill:
       enabled: true
       replicas: 1
 #      replicas: 8
-      vllm:
-        customCommand: |
-          export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
-          export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-          . /shared-config/llmdbench_env.sh
-          vllm serve $MODEL_SERVE_REF \
+      # The launch command, verbatim -- the same line you would run by hand.
+      # It reaches the container unchanged, so every flag here is read by vLLM
+      # and none of them by llm-d-benchmark, which reads only what decides
+      # Kubernetes objects: `--port` and the two capacity numbers. The eight
+      # devices one replica holds are stated above as
+      # `roleDefaults.parallelism.dataLocal`, not read from
+      # `--data-parallel-size-local`: the kubelet grants them before the engine
+      # process exists.
+      #
+      # Prefill binds 8000, the Service port: no routing sidecar is injected on
+      # prefill pods, so nothing would bridge a higher port.
+      #
+      # $LWS_GROUP_SIZE and $LWS_LEADER_ADDRESS come from LeaderWorkerSet at pod
+      # runtime, which is why the total DP size stays a shell expression -- the
+      # leader address is not knowable at render time. The local width is
+      # written out, because it has to agree with `roleDefaults.parallelism`.
+      engine:
+        command: |
+          vllm serve Qwen/Qwen3-30B-A3B \
           --host 0.0.0.0 \
-          --served-model-name $MODEL_NAME \
-          --port $VLLM_INFERENCE_PORT \
+          --port 8000 \
           --trust-remote-code \
-          --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+          --gpu-memory-utilization 0.75 \
           --disable-access-log-for-endpoints=/health,/metrics \
           --data-parallel-hybrid-lb \
           --enable-expert-parallel \
-          --tensor-parallel-size $TP_SIZE \
-          --max-num-seq $VLLM_MAX_NUM_SEQ \
-          --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-          --data-parallel-size $((LWS_GROUP_SIZE * DP_SIZE_LOCAL)) \
-          --data-parallel-size-local $DP_SIZE_LOCAL \
+          --tensor-parallel-size 1 \
+          --max-num-seqs 256 \
+          --max-num-batched-tokens 256 \
+          --data-parallel-size $((LWS_GROUP_SIZE * 8)) \
+          --data-parallel-size-local 8 \
           --data-parallel-address ${LWS_LEADER_ADDRESS} \
           --data-parallel-rpc-port 5555 \
           --data-parallel-start-rank $START_RANK \
@@ -366,123 +497,30 @@ scenario:
           --all2all-backend deepep_high_throughput \
           --disable-uvicorn-access-log
 
-      initContainers:
-        - name: preprocess
-          imageKey: benchmark
-          imagePullPolicy: Always
-          command: ["set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
-          volumeMounts:
-            - name: shared-config
-              mountPath: /shared-config
-
-      parallelism:
-        tensor: 1
-        data: 1
-        dataLocal: 8
-        workers: 2
-
-      # Resource configuration
-      resources:
-        limits:
-          ephemeral-storage: 1Ti
-          memory: 512Gi
-          cpu: "32"
-        requests:
-          ephemeral-storage: 1Ti
-          memory: 512Gi
-          cpu: "32"
-
-      # Startup probe overrides
-      probes:
-        startup:
-          failureThreshold: 2700
-          initialDelaySeconds: 240
-          periodSeconds: 30
-          timeoutSeconds: 5
-          path: /v1/models
-        liveness:
-          failureThreshold: 3
-          periodSeconds: 5
-        readiness:
-          failureThreshold: 3
-          periodSeconds: 5
-          path: /v1/models
-
-      # -----------------------------------------------------------------------
-      # Extra Environment Variables
-      # -----------------------------------------------------------------------
-      extraEnvVars:
-        - name: VLLM_SKIP_P2P_CHECK
-          value: "1"
-        - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
-          value: "1"
-        - name: VLLM_USE_DEEP_GEMM
-          value: "1"
-        - name: NVIDIA_GDRCOPY
-          value: "enabled"
-        - name: NCCL_EXCLUDE_IB_HCA
-          value: ""
-        - name: NVSHMEM_DEBUG
-          value: "INFO"
-        - name: HF_HUB_DISABLE_XET
-          value: "1"
-        - name: NCCL_DEBUG
-          value: "INFO"
-        - name: NCCL_DEBUG_SUBSYS
-          value: "INIT,NET"
-        - name: NCCL_DEBUG_FILE
-          value: "/tmp/nccl.%h.%p.log"
-
-      # -----------------------------------------------------------------------
-      # Extra Container Configuration
-      # -----------------------------------------------------------------------
-      extraContainerConfig:
-        securityContext:
-          capabilities:
-            add:
-              - "IPC_LOCK"
-              - "SYS_RAWIO"
-              - "NET_ADMIN"
-              - "NET_RAW"
-          runAsGroup: 0
-          runAsUser: 0
-        imagePullPolicy: Always
-
-      # -----------------------------------------------------------------------
-      # Additional Volume Mounts
-      # -----------------------------------------------------------------------
-      additionalVolumeMounts: []
-
-      # -----------------------------------------------------------------------
-      # Additional Volumes
-      # -----------------------------------------------------------------------
-      additionalVolumes: []
-
     # -------------------------------------------------------------------------
     # Decode Configuration
     # -------------------------------------------------------------------------
     decode:
       replicas: 1
-      vllm:
-        customCommand: |
-          export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
-          export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-          . /shared-config/llmdbench_env.sh
-          vllm serve $MODEL_SERVE_REF \
-          -host 0.0.0.0 \
-          --served-model-name $MODEL_NAME \
-          --port $VLLM_METRICS_PORT \
-          --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+      # Same contract as prefill above. Decode binds 8200, not 8000: the
+      # routing sidecar the chart injects on decode pods owns
+      # `engine.servicePort` (8000) and forwards here.
+      engine:
+        command: |
+          vllm serve Qwen/Qwen3-30B-A3B \
+          --host 0.0.0.0 \
+          --port 8200 \
+          --gpu-memory-utilization 0.75 \
           --trust-remote-code \
           --api-server-count 1 \
           --disable-access-log-for-endpoints=/health,/metrics \
           --data-parallel-hybrid-lb \
           --enable-expert-parallel \
-          --tensor-parallel-size $TP_SIZE \
-          --max-num-seq $VLLM_MAX_NUM_SEQ \
-          --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-          --data-parallel-size $((LWS_GROUP_SIZE * DP_SIZE_LOCAL)) \
-          --data-parallel-size-local $DP_SIZE_LOCAL \
+          --tensor-parallel-size 1 \
+          --max-num-seqs 256 \
+          --max-num-batched-tokens 256 \
+          --data-parallel-size $((LWS_GROUP_SIZE * 8)) \
+          --data-parallel-size-local 8 \
           --data-parallel-address ${LWS_LEADER_ADDRESS} \
           --data-parallel-rpc-port 5555 \
           --data-parallel-start-rank $START_RANK \
@@ -494,107 +532,15 @@ scenario:
           --all2all-backend deepep_low_latency \
           --moe-backend deep_gemm \
           --kv-cache-memory-bytes=${KV_CACHE_MEMORY_BYTES:-} \
-          --disable-uvicorn-access-log \
-
-      initContainers:
-        - name: preprocess
-          imageKey: benchmark
-          imagePullPolicy: Always
-          command: ["set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
-          volumeMounts:
-            - name: shared-config
-              mountPath: /shared-config
-
-      parallelism:
-        tensor: 1
-        data: 1
-        dataLocal: 8
-        workers: 2
-
-      # Resource configuration
-      resources:
-        limits:
-          ephemeral-storage: 1Ti
-          memory: 512Gi
-          cpu: "32"
-        requests:
-          ephemeral-storage: 1Ti
-          memory: 512Gi
-          cpu: "32"
+          --disable-uvicorn-access-log
 
       # -----------------------------------------------------------------------
       # ROCE/GDR Configuration (uncomment to enable)
-      # To enable roce/gdr for prefill pods, add networkResource and networkNr below.
+      # Decode only: prefill on this cluster does not transfer over RDMA. Move
+      # these two keys up to `roleDefaults` to give both roles the device.
       # -----------------------------------------------------------------------
       networkResource: "rdma/roce_gdr"
-      networkNr: 1
-
-      # Startup probe overrides
-      probes:
-        startup:
-          failureThreshold: 2700
-          initialDelaySeconds: 240
-          periodSeconds: 30
-          timeoutSeconds: 5
-          path: /v1/models
-        liveness:
-          failureThreshold: 3
-          periodSeconds: 5
-        readiness:
-          failureThreshold: 3
-          periodSeconds: 5
-          path: /v1/models
-
-      # -----------------------------------------------------------------------
-      # Extra Environment Variables
-      # Same as prefill (both use LLMDBENCH_VLLM_COMMON_ENVVARS_TO_YAML)
-      # -----------------------------------------------------------------------
-      extraEnvVars:
-        - name: VLLM_SKIP_P2P_CHECK
-          value: "1"
-        - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
-          value: "1"
-        - name: VLLM_USE_DEEP_GEMM
-          value: "1"
-        - name: NVIDIA_GDRCOPY
-          value: "enabled"
-        - name: NCCL_EXCLUDE_IB_HCA
-          value: ""
-        - name: NVSHMEM_DEBUG
-          value: "INFO"
-        - name: HF_HUB_DISABLE_XET
-          value: "1"
-        - name: NCCL_DEBUG
-          value: "INFO"
-        - name: NCCL_DEBUG_SUBSYS
-          value: "INIT,NET"
-        - name: NCCL_DEBUG_FILE
-          value: "/tmp/nccl.%h.%p.log"
-
-      # -----------------------------------------------------------------------
-      # Extra Container Configuration
-      # -----------------------------------------------------------------------
-      extraContainerConfig:
-        securityContext:
-          capabilities:
-            add:
-              - "IPC_LOCK"
-              - "SYS_RAWIO"
-              - "NET_ADMIN"
-              - "NET_RAW"
-          runAsGroup: 0
-          runAsUser: 0
-        imagePullPolicy: Always
-
-      # -----------------------------------------------------------------------
-      # Additional Volume Mounts
-      # -----------------------------------------------------------------------
-      additionalVolumeMounts: []
-
-      # -----------------------------------------------------------------------
-      # Additional Volumes
-      # -----------------------------------------------------------------------
-      additionalVolumes: []
+      networkNr: "1"
 
     # =========================================================================
     # WORKLOAD / HARNESS -- Benchmark execution configuration

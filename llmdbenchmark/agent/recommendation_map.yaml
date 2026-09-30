@@ -4,8 +4,8 @@
 # that Recommendation ID determinism is documented rather than incidental.
 #
 # The PRD names an `inference-scheduling` guide. It does not exist: the spec
-# was renamed upstream to optimized-baseline. See README.md:104 ("optimized
-# baseline guide (formerly inference-scheduling)") and util/test-scenarios.sh:91.
+# was renamed upstream to optimized-baseline. See README.md ("optimized
+# baseline guide (formerly inference-scheduling)").
 recommendation_map_version: "0.1.0"
 
 rules:

@@ -66,12 +66,12 @@ class TestDottedToNested:
             {
                 "model.maxModelLen": 16000,
                 "model.blockSize": 64,
-                "vllmCommon.flags.numCpuBlocks": 500,
+                "storage.modelPvc.size": "300Gi",
             }
         )
         assert result == {
             "model": {"maxModelLen": 16000, "blockSize": 64},
-            "vllmCommon": {"flags": {"numCpuBlocks": 500}},
+            "storage": {"modelPvc": {"size": "300Gi"}},
         }
 
     def test_preserves_value_types(self):
@@ -125,8 +125,8 @@ class TestParseExperimentWithSetup:
               type: full_factorial
               setup:
                 factors:
-                  - name: numCpuBlocks
-                    key: vllmCommon.flags.numCpuBlocks
+                  - name: maxNumSeq
+                    key: model.maxNumSeq
                     levels: [500, 1000]
               run:
                 factors:
@@ -139,10 +139,10 @@ class TestParseExperimentWithSetup:
                 model.maxModelLen: 16000
                 model.blockSize: 64
               treatments:
-                - name: cpu-blocks-500
-                  vllmCommon.flags.numCpuBlocks: 500
-                - name: cpu-blocks-1000
-                  vllmCommon.flags.numCpuBlocks: 1000
+                - name: max-seqs-500
+                  model.maxNumSeq: 500
+                - name: max-seqs-1000
+                  model.maxNumSeq: 1000
 
             treatments:
               - name: grp40
@@ -172,7 +172,7 @@ class TestParseExperimentWithSetup:
     def test_setup_treatment_names(self, experiment_yaml: Path):
         plan = parse_experiment(experiment_yaml)
         names = [t.name for t in plan.setup_treatments]
-        assert names == ["cpu-blocks-500", "cpu-blocks-1000"]
+        assert names == ["max-seqs-500", "max-seqs-1000"]
 
     def test_setup_constants_merged_into_overrides(self, experiment_yaml: Path):
         plan = parse_experiment(experiment_yaml)
@@ -182,14 +182,8 @@ class TestParseExperimentWithSetup:
 
     def test_treatment_specific_overrides(self, experiment_yaml: Path):
         plan = parse_experiment(experiment_yaml)
-        assert (
-            plan.setup_treatments[0].overrides["vllmCommon"]["flags"]["numCpuBlocks"]
-            == 500
-        )
-        assert (
-            plan.setup_treatments[1].overrides["vllmCommon"]["flags"]["numCpuBlocks"]
-            == 1000
-        )
+        assert plan.setup_treatments[0].overrides["model"]["maxNumSeq"] == 500
+        assert plan.setup_treatments[1].overrides["model"]["maxNumSeq"] == 1000
 
     def test_run_treatment_count(self, experiment_yaml: Path):
         plan = parse_experiment(experiment_yaml)
@@ -223,7 +217,7 @@ class TestSetupConstantsOverrideOrder:
               treatments:
                 - name: custom-model-len
                   model.maxModelLen: 32000
-                  vllmCommon.flags.numCpuBlocks: 500
+                  model.maxNumSeq: 500
         """
         )
         p = tmp_path / "override-test.yaml"
@@ -235,7 +229,7 @@ class TestSetupConstantsOverrideOrder:
         t = plan.setup_treatments[0]
         assert t.overrides["model"]["maxModelLen"] == 32000
         assert t.overrides["model"]["blockSize"] == 64
-        assert t.overrides["vllmCommon"]["flags"]["numCpuBlocks"] == 500
+        assert t.overrides["model"]["maxNumSeq"] == 500
 
 
 # ===========================================================================
@@ -400,8 +394,8 @@ class TestParseExperimentEdgeCases:
               name: no-name-treatment
             setup:
               treatments:
-                - vllmCommon.flags.numCpuBlocks: 500
-                - vllmCommon.flags.numCpuBlocks: 1000
+                - model.maxNumSeq: 500
+                - model.maxNumSeq: 1000
         """
         )
         p = tmp_path / "no-name.yaml"
@@ -520,10 +514,10 @@ class TestTieredPrefixCacheExperiment:
     def test_setup_treatment_names(self, plan: ExperimentPlan):
         names = [t.name for t in plan.setup_treatments]
         assert names == [
-            "cpu-blocks-500",
-            "cpu-blocks-1000",
-            "cpu-blocks-2000",
-            "cpu-blocks-5000",
+            "cpu-bytes-25g",
+            "cpu-bytes-50g",
+            "cpu-bytes-100g",
+            "cpu-bytes-200g",
         ]
 
     def test_setup_constants_applied(self, plan: ExperimentPlan):
@@ -532,11 +526,19 @@ class TestTieredPrefixCacheExperiment:
             assert t.overrides["model"]["blockSize"] == 64
 
     def test_setup_treatment_overrides(self, plan: ExperimentPlan):
-        # No template reads the old key, so a wrong one here passes silently.
-        expected_blocks = [500, 1000, 2000, 5000]
-        for t, expected in zip(plan.setup_treatments, expected_blocks):
-            extra = t.overrides["vllmCommon"]["kvTransfer"]["extraConfig"]
-            assert extra["num_cpu_blocks"] == expected
+        # The sweep moves a container environment variable, not an engine
+        # parameter: the scenario's command reads $(CPU_BYTES_TO_USE). Assert
+        # the variable the command actually names, or a renamed factor passes
+        # here while the rendered command keeps the old tier size.
+        expected_bytes = [
+            "26843545600",
+            "53687091200",
+            "107374182400",
+            "214748364800",
+        ]
+        for t, expected in zip(plan.setup_treatments, expected_bytes):
+            env = t.overrides["decode"]["extraEnvVars"]
+            assert env == [{"name": "CPU_BYTES_TO_USE", "value": expected}]
 
     def test_run_treatment_count(self, plan: ExperimentPlan):
         assert plan.run_treatments_count == 6
@@ -676,7 +678,7 @@ class TestTreatmentResult:
 
     def test_to_dict_success(self):
         r = TreatmentResult(
-            setup_treatment="cpu-blocks-500",
+            setup_treatment="cpu-bytes-25g",
             status="success",
             run_treatments_completed=6,
             run_treatments_total=6,
@@ -684,7 +686,7 @@ class TestTreatmentResult:
             duration_seconds=120.456,
         )
         d = r.to_dict()
-        assert d["setup_treatment"] == "cpu-blocks-500"
+        assert d["setup_treatment"] == "cpu-bytes-25g"
         assert d["status"] == "success"
         assert d["run_treatments"] == "6/6"
         assert d["duration_seconds"] == 120.5
@@ -693,7 +695,7 @@ class TestTreatmentResult:
 
     def test_to_dict_failure(self):
         r = TreatmentResult(
-            setup_treatment="cpu-blocks-500",
+            setup_treatment="cpu-bytes-25g",
             status="failed_standup",
             run_treatments_completed=0,
             run_treatments_total=6,
@@ -740,15 +742,15 @@ class TestExperimentSummary:
         assert s.total_matrix == 3  # 3 × max(0, 1) = 3
 
     def test_record_success(self, summary: ExperimentSummary):
-        summary.record_success("cpu-blocks-500", 6, 6, "/tmp/ws", 120.0)
+        summary.record_success("cpu-bytes-25g", 6, 6, "/tmp/ws", 120.0)
         assert len(summary.results) == 1
         assert summary.results[0].status == "success"
-        assert summary.results[0].setup_treatment == "cpu-blocks-500"
+        assert summary.results[0].setup_treatment == "cpu-bytes-25g"
         assert summary.results[0].run_treatments_completed == 6
 
     def test_record_failure(self, summary: ExperimentSummary):
         summary.record_failure(
-            "cpu-blocks-1000",
+            "cpu-bytes-50g",
             "standup",
             "Pod failed",
             run_completed=0,

@@ -11,6 +11,12 @@ from llmdbenchmark.executor.step import Phase, Step, StepResult
 from llmdbenchmark.utilities.endpoint import resolve_direct_service_namespace
 
 
+#: How much of a failed container's log to echo into the standup log. Enough to
+#: carry a Python traceback or an engine's startup error; the whole log is saved
+#: to the workspace either way.
+_CRASH_LOG_TAIL_LINES = 40
+
+
 class DeployModelserviceStep(Step):
     """Deploy the model via the llm-d modelservice Helm chart."""
 
@@ -47,8 +53,9 @@ class DeployModelserviceStep(Step):
         plan_config = self._load_stack_config(stack_path)
         release = self._require_config(plan_config, "release")
         model_id_label = plan_config.get("model_id_label", "")
+        # What the Service exposes, not what an engine binds in its container.
         inference_port = self._require_config(  # noqa: F841
-            plan_config, "vllmCommon", "inferencePort"
+            plan_config, "engine", "servicePort"
         )
         timeout = (
             context.modelservice_deploy_timeout
@@ -149,6 +156,22 @@ class DeployModelserviceStep(Step):
                     plan_config,
                     namespace,
                 )
+
+        # The router/EPP pod carries a release-specific label rather than a
+        # `llm-d.ai/role`, and which of the two spellings the chart applied
+        # depends on `router.inferencePool.create` (see the probe further
+        # down). Both go to the log collector -- the one the chart did not
+        # apply selects no pods -- and they are built here, not inside the
+        # wait below, so the EPP pod's log is still collected when the deploy
+        # fails before that wait is ever reached.
+        epp_selectors = (
+            []
+            if direct_service_mode
+            else [
+                f"llm-d-router-gateway={model_id_label}-router-epp",
+                f"llm-d-router-standalone={model_id_label}-router-epp",
+            ]
+        )
 
         if not errors:
             decode_cfg = plan_config.get("decode", {})  # noqa: F841
@@ -282,8 +305,17 @@ class DeployModelserviceStep(Step):
                     ):
                         errors.append(f"Inference pool not ready: {pool_wait.stderr}")
 
-        if not errors and not context.dry_run:
-            self._collect_logs(cmd, context, namespace)
+        if not context.dry_run:
+            # Collected whether or not the deploy succeeded. On the failure path
+            # it is the only evidence there is: a container's own output says
+            # why it exited, and it is gone the moment the pod is replaced.
+            self._collect_logs(
+                cmd,
+                context,
+                namespace,
+                failed=bool(errors),
+                epp_selectors=epp_selectors,
+            )
 
         if context.non_admin:
             context.logger.log_info("ℹ️  Non-admin: skipping PodMonitor creation")
@@ -535,11 +567,11 @@ class DeployModelserviceStep(Step):
         context: ExecutionContext,
     ) -> str | None:
         """Validate that the configured priorityClassName exists on the cluster."""
-        vllm_common_pc = plan_config.get("vllmCommon", {}).get("priorityClassName", "")
+        common_pc = plan_config.get("engine", {}).get("priorityClassName", "")
 
         classes_to_check = set()
         for section in ["decode", "prefill"]:
-            pc = plan_config.get(section, {}).get("priorityClassName") or vllm_common_pc
+            pc = plan_config.get(section, {}).get("priorityClassName") or common_pc
             if pc and pc.lower() != "none":
                 classes_to_check.add(pc)
 
@@ -593,12 +625,10 @@ class DeployModelserviceStep(Step):
 
         sections_to_check = [
             plan_config.get("standalone", {}),
-            plan_config.get("vllmCommon", {}),
+            plan_config.get("engine", {}),
             plan_config.get("decode", {}),
             plan_config.get("prefill", {}),
         ]
-        for role in ["Decode", "Prefill"]:
-            sections_to_check.append(plan_config.get(f"vllmModelservice{role}", {}))
 
         for section in sections_to_check:
             # Check top-level securityContext
@@ -646,34 +676,103 @@ class DeployModelserviceStep(Step):
             )
 
     def _collect_logs(
-        self, cmd: CommandExecutor, context: ExecutionContext, namespace: str
+        self,
+        cmd: CommandExecutor,
+        context: ExecutionContext,
+        namespace: str,
+        failed: bool = False,
+        epp_selectors: list[str] | None = None,
     ):
-        """Collect decode and prefill pod logs after deployment."""
+        """Save the stack's pod logs, and echo a tail when they failed.
+
+        Every pod this step waits on is read: the decode and prefill
+        modelservers, and -- for whichever of *epp_selectors* matches -- the
+        router/EPP pod. That pod is the one this step can declare not-ready
+        with no modelserver at fault, and it is where the chart puts its
+        sidecars (Envoy, and on some guides a latency-predictor pair), so
+        leaving it out means a failure whose only explanation is in its log is
+        reported with no log at all.
+
+        Every container is read, not just the pod's default one -- a sidecar
+        that exits takes the pod down as surely as the engine does, and
+        `kubectl logs` without `--all-containers` silently returns only the
+        first container's output. Both the live container's log and the one
+        before it are read: a pod in CrashLoopBackOff has just been restarted,
+        so its current container has usually produced nothing yet and the
+        output explaining the exit belongs to the previous one -- reading only
+        the live log is how a crash ends up reported as a bare
+        "CrashLoopBackOff" with no reason attached.
+
+        When *failed*, the tail is echoed into the standup log as well as saved,
+        so the reason is in front of whoever is reading the failure rather than
+        in a file under the workspace.
+        """
         logs_dir = context.setup_logs_dir()
-        for role in ["decode", "prefill"]:
+        selectors = [f"llm-d.ai/role={role}" for role in ("decode", "prefill")]
+        selectors.extend(epp_selectors or [])
+        for selector in selectors:
             result = cmd.kube(
                 "get",
                 "pods",
                 "-l",
-                f"llm-d.ai/role={role}",
+                selector,
                 "--namespace",
                 namespace,
                 "-o",
                 "jsonpath={.items[*].metadata.name}",
+                # check=False: one of the two EPP selectors is always the
+                # spelling the chart did not apply, and a deploy that failed
+                # early leaves no pods behind any of them -- neither is a
+                # reason to fail the collection.
+                check=False,
             )
             if result.success and result.stdout.strip():
                 pod_names = result.stdout.strip().split()
                 for pod_name in pod_names:
-                    log_result = cmd.kube(
-                        "logs",
-                        pod_name,
-                        "--namespace",
-                        namespace,
-                        "--tail=-1",
-                    )
-                    if log_result.success:
-                        log_file = logs_dir / f"{pod_name}.log"
-                        log_file.write_text(log_result.stdout, encoding="utf-8")
+                    for previous in (False, True):
+                        args = [
+                            "logs",
+                            pod_name,
+                            "--namespace",
+                            namespace,
+                            "--tail=-1",
+                            # Names the container on every line, which is the
+                            # only way to tell whose output this is once more
+                            # than one container is in the file.
+                            "--all-containers=true",
+                            "--prefix=true",
+                        ]
+                        if previous:
+                            args.append("--previous")
+                        # check=False: there is no previous container until a
+                        # restart, and a pod that never started has no log at
+                        # all -- neither is a reason to fail the step.
+                        log_result = cmd.kube(*args, check=False)
+                        text = log_result.stdout if log_result.success else ""
+                        if not text.strip():
+                            continue
+                        suffix = ".previous.log" if previous else ".log"
+                        (logs_dir / f"{pod_name}{suffix}").write_text(
+                            text, encoding="utf-8"
+                        )
+                        if failed:
+                            self._echo_log_tail(context, pod_name, text, previous)
+
+    @staticmethod
+    def _echo_log_tail(
+        context: ExecutionContext,
+        pod_name: str,
+        text: str,
+        previous: bool,
+    ) -> None:
+        """Print the last few lines of *text* under the pod's name."""
+        tail = text.strip().splitlines()[-_CRASH_LOG_TAIL_LINES:]
+        where = "previous container" if previous else "container"
+        context.logger.log_info(
+            f"\U0001f4cb {pod_name} ({where}), last {len(tail)} line(s):"
+        )
+        for line in tail:
+            context.logger.log_info(f"   | {line}")
 
     def _apply_wva_stack_resources(
         self,
@@ -877,8 +976,10 @@ class DeployModelserviceStep(Step):
             params["model_huggingface_id"] = plan_config.get("model", {}).get(
                 "huggingfaceId", ""
             )
+            # The Service port, which is what a client outside the pod dials.
+            # Not the engine's own port -- that comes out of the role's command.
             params["inference_port"] = str(
-                self._require_config(plan_config, "vllmCommon", "inferencePort")
+                self._require_config(plan_config, "engine", "servicePort")
             )
             params["release"] = self._require_config(plan_config, "release")
             params["decode_replicas"] = str(
@@ -924,19 +1025,20 @@ class DeployModelserviceStep(Step):
                     "llmDInfra", ""
                 )
 
-            # Container images used in this deployment
-            images = plan_config.get("images", {})
-            vllm_img = images.get("vllm", {})
-            if vllm_img:
-                repo = vllm_img.get("repository", "")
-                tag = vllm_img.get("tag", "")
-                params["image_vllm"] = f"{repo}:{tag}" if repo else ""
-
-            decode_img = plan_config.get("decode", {}).get("image", {})
-            if decode_img and decode_img.get("repository"):
-                params["image_decode"] = (
-                    f"{decode_img['repository']}:{decode_img.get('tag', 'latest')}"
-                )
+            # Engine images actually used in this deployment. Recorded per role
+            # from `<role>.engine.image`, which resolve_engines filled in from
+            # `images.<engine>` for whichever engine the role's command launches
+            # -- so a decode running SGLang records the SGLang image, and there
+            # is no vLLM-shaped key to mislead a reader of this ConfigMap.
+            for role in ("decode", "prefill", "standalone"):
+                role_engine = plan_config.get(role, {}).get("engine") or {}
+                role_img = role_engine.get("image") or {}
+                repo = role_img.get("repository", "")
+                if not repo:
+                    continue
+                tag = role_img.get("tag", "latest")
+                params[f"image_{role}"] = f"{repo}:{tag}"
+                params[f"engine_{role}"] = role_engine.get("name", "")
 
         literal_args = []
         for key, value in params.items():

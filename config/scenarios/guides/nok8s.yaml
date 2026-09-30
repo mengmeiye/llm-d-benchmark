@@ -1,8 +1,9 @@
 # No-Kubernetes (nok8s) scenario.
 #
-# Runs the llm-d routing stack (vLLM + EPP + Envoy) as plain docker/podman
-# containers on the local host -- no cluster. The benchmark harness also runs
-# as a local container against the Envoy front door (http://localhost:8081).
+# Runs the llm-d routing stack (inference engine + EPP + Envoy) as plain
+# docker/podman containers on the local host -- no cluster. The benchmark
+# harness also runs as a local container against the Envoy front door
+# (http://localhost:8081).
 #
 # To run the same stack on a bare-metal node instead, set nok8s.connection to
 # its address (see below), or leave this file alone and pass the address per
@@ -12,7 +13,7 @@
 #
 # Single-GPU friendly (e.g. one H100/H200). Defaults to a small ungated model
 # so a smoke run needs no Hugging Face token. Set the token in your shell so
-# the vLLM container can pull gated models:
+# the engine container can pull gated models:
 #     export HUGGING_FACE_HUB_TOKEN=hf_...
 #
 # Usage:
@@ -23,13 +24,15 @@
 scenario:
   - name: "nok8s-single"
 
-    # Model served by vLLM (also the name benchmark requests must use).
+    # Model served by the engine (also the name benchmark requests must use).
     # Set name and huggingfaceId together so the run phase (which reads
     # huggingfaceId) and the container/endpoints templates (which read name)
     # agree -- otherwise huggingfaceId falls back to the defaults model.
     model:
-      name: Qwen/Qwen2.5-0.5B-Instruct
-      huggingfaceId: Qwen/Qwen2.5-0.5B-Instruct
+      # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+      # The model id is a fact the launch command states; a short name is a
+      # choice, so it stays here -- derived, it is a
+      # `{first8}-{sha8}-{last8}` hash.
       shortName: qwen2-5-0-5b-instruct
 
     # Deployment method: no Kubernetes. Disable the others explicitly
@@ -69,13 +72,39 @@ scenario:
       # sshIdentity: /path/to/key   # default: the agent / ~/.ssh keys
       hfTokenEnv: HUGGING_FACE_HUB_TOKEN
       workspaceHostDir: "~/.llmdbench/nok8s"
-      vllm:
-        image: docker.io/vllm/vllm-openai
-        tag: v0.30.0
+      engine:
+        # The launch command, exactly as you would type it on the node. It is
+        # written to a file and run inside the container unchanged -- no flag
+        # here is known to llm-d-benchmark, so anything the engine accepts
+        # works. Only `--port` is read back out, to publish the container port
+        # and probe it. Devices per worker are stated as
+        # `nok8s.engine.acceleratorCount` -- the runtime pins them before the
+        # engine starts, so that count cannot come from the command.
+        #
+        # Qwen/Qwen2.5-0.5B-Instruct is substituted at render time, so `-m/--models` and
+        # `--set model.name=...` keep working without editing the command.
+        command: |
+          vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+            --host 0.0.0.0 \
+            --port 8000 \
+            --tensor-parallel-size 1
+        #
+        # The same stack under SGLang -- swap the command, nothing else. The
+        # image follows the engine automatically (images.sglang):
+        #   command: |
+        #     python3 -m sglang.launch_server \
+        #       --model-path Qwen/Qwen2.5-0.5B-Instruct \
+        #       --host 0.0.0.0 \
+        #       --port 30000 \
+        #       --tp-size 1
+        #
+        # Pin the image explicitly only to override the per-engine default:
+        #   image:
+        #     repository: docker.io/vllm/vllm-openai
+        #     tag: v0.19.1
         hostPort: 8000
-        tensorParallel: 1
         # Accelerator: nvidia | amd | intel | gaudi | cpu | spyre.
-        # For non-NVIDIA, also change `image` to the matching vLLM backend and
+        # For non-NVIDIA, also point `image` at the matching engine backend and
         # (for spyre/custom) set `deviceArgs`. Examples:
         #   amd:    image: rocm/vllm         (device flags auto: /dev/kfd,/dev/dri)
         #   intel:  image: intel vLLM XPU    (device flags auto: /dev/dri)
@@ -87,7 +116,6 @@ scenario:
         shmSize: "20g"
         hfCacheDir: "~/.cache/huggingface"
         replicas: 1
-        extraArgs: []
       epp:
         image: ghcr.io/llm-d/llm-d-router-endpoint-picker
         tag: v0.11.0

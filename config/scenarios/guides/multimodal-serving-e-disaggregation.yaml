@@ -1,5 +1,4 @@
 # MULTIMODAL SERVING (E-DISAGGREGATION) WELL LIT PATH for LLM-D Deployment
-# Migrated from bash environment variables to YAML format
 # Based on https://github.com/llm-d/llm-d/tree/main/guides/multimodal-serving/e-disaggregation
 #
 # Routes multimodal (text + image) traffic with the token-based stack, matching
@@ -26,20 +25,27 @@ scenario:
   - name: "multimodal-serving-e-disaggregation"
     common:
       model:
-        name: Qwen/Qwen3-VL-32B-Instruct
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen3-vl-32b-instruct
-        path: models/Qwen/Qwen3-VL-32B-Instruct
-        huggingfaceId: Qwen/Qwen3-VL-32B-Instruct
         size: 1Ti
-        maxModelLen: 16000
-        blockSize: 64
-        gpuMemoryUtilization: 0.95
+        # maxModelLen / blockSize / gpuMemoryUtilization are deliberately NOT
+        # set here: they are pure engine parameters, so they are stated in
+        # decode's launch command below and read back out for the capacity
+        # planner.
 
       storage:
         modelPvc:
           size: 1Ti
 
-      vllmCommon:
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the network facts only the
+        # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+        # library path. Engine commands never mention it.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
         volumes:
           - name: shared-config
             type: emptyDir
@@ -68,7 +74,7 @@ scenario:
     # defined ENTIRELY by the guide's own manifests:
     #
     #   * EVERYTHING ELSE in this scenario is IGNORED -- model, modelservice,
-    #     standalone, decode/prefill, vllmCommon, storage, harness model, etc.
+    #     standalone, decode/prefill, engine, storage, harness model, etc.
     #   * `-m/--models` and all other CLI/scenario tuning are ignored.
     #   * DoE `experiment` SETUP sweeps do NOT alter a kustomize deploy
     #     (only run/workload treatments still apply).
@@ -298,23 +304,42 @@ scenario:
 
       decode:
         replicas: 8
-        vllm:
-          # Prefix caching is left ON (the prefix-cache-affinity-filter relies on
-          # it). --mm-processor-cache-gb sizes the multimodal (image) preprocessor
-          # cache; --tensor-parallel-size follows $TP_SIZE (parallelism.tensor: 2).
-          customCommand: |
-            export LD_LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | sed ':a; N; $!ba; s/\n/:/g'):${LD_LIBRARY_PATH}
-            export LIBRARY_PATH=$(find / -name libcuda.so.1 -printf '%h\n' 2>/dev/null | head -1):${LIBRARY_PATH}
-            vllm serve $MODEL_SERVE_REF \
+        # The launch command, verbatim -- the same line you would run by hand.
+        # It reaches the container unchanged, so every flag here is read by vLLM
+        # and none of them by llm-d-benchmark, which reads only what decides
+        # Kubernetes objects: `--port` (container port, probes, the routing
+        # sidecar's upstream) and the capacity numbers the pre-deploy check
+        # needs. The two GPUs per decode pod (16 across 8 replicas) are stated
+        # as `parallelism.tensor` below, not read from `--tensor-parallel-size`.
+        #
+        # Decode binds 8200: the routing sidecar the chart injects on decode pods
+        # owns `engine.servicePort` (8000) and forwards here.
+        #
+        # Prefix caching is left ON (the prefix-cache-affinity-filter relies on
+        # it), which is simply the absence of --no-enable-prefix-caching here.
+        # --mm-processor-cache-gb sizes the multimodal (image) preprocessor cache.
+        # Devices per replica -- a Kubernetes fact, not a reading of the
+        # command. The kubelet grants accelerators before the engine process
+        # exists, so the count is stated here in Kubernetes' vocabulary and the
+        # chart turns it into the pod's device request. It has to agree with the
+        # width the command gives the engine (`--tensor-parallel-size 2` below),
+        # or the engine starves at startup. To request a count the parallelism
+        # widths do not describe, set `resources.limits.<accelerator resource>`.
+        parallelism:
+          tensor: 2
+
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3-VL-32B-Instruct \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_METRICS_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
+            --port 8200 \
+            --max-model-len 16000 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 2 \
+            --block-size 64 \
+            --gpu-memory-utilization 0.95 \
+            --dtype bfloat16 \
             --mm-processor-cache-gb 20 \
             --no-enable-log-requests \
             --disable-uvicorn-access-log \
@@ -329,14 +354,6 @@ scenario:
               - name: shared-config
                 mountPath: /shared-config
 
-        # TP=2 -- two GPUs per decode pod (16 GPUs across 8 replicas). The
-        # per-pod accelerator count is derived from parallelism.tensor.
-        parallelism:
-          tensor: 2
-          data: 1
-          dataLocal: 1
-          workers: 1
-
         # Resource configuration (2 GPUs per replica, per the guide's GPU overlay).
         resources:
           limits:
@@ -346,13 +363,12 @@ scenario:
             memory: 128Gi
             cpu: "8"
 
-        # No customCommand -- the vLLM serve command is auto-generated
-        # from model.*, vllmCommon.flags.*, and decode.vllm.additionalFlags.
         # -----------------------------------------------------------------------
         # Extra Environment Variables
-        # No custom env vars for this scenario -- uses default ENVVARS_TO_YAML
-        # mechanism. Auto-populated vars (UCX_TLS, VLLM_NIXL_*, etc.) are set
-        # by the preprocess script at pod runtime.
+        # No environment variables for this scenario. Nothing is auto-populated:
+        # whatever the engine -- or a library beneath it (UCX_*, NCCL_*,
+        # VLLM_NIXL_*, ...) -- needs must be listed here, the same way the
+        # engine command lists its own flags.
         # -----------------------------------------------------------------------
         extraEnvVars: []
 

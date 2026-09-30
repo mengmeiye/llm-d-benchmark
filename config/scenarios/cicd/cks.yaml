@@ -1,5 +1,4 @@
 # CKS (Cloud Kubernetes Service) CI/CD Scenario
-# Based on scenarios/cicd/cks_fb.sh
 #
 # CI/CD scenario for CKS clusters with H200 GPUs.
 # Uses facebook/opt-125m for fast validation.
@@ -34,7 +33,7 @@ scenario:
         modelPvc:
           storageClassName: shared-vast
 
-      vllmCommon:
+      engine:
         priorityClassName: nightly-gpu-critical
 
     standalone:

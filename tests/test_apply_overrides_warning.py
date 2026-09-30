@@ -189,7 +189,7 @@ class TestClassifyOverrideMiss:
             "router.epp.pluginsConfigFile",
             "router.tokenizer.enabled",
             "router.monitoring.prometheus.enabled",
-            "vllmCommon.kvTransfer.enabled",
+            "engine.servicePort",
             "model.maxModelLen",
             "schedulerName",
             "scheduler.config",

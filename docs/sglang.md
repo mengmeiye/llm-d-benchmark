@@ -143,10 +143,11 @@ kustomize:
 
 > [!TIP]
 > SGLang's memory knob is `--mem-fraction-static` (the upstream overlay documents
-> it as the equivalent of vLLM's `--gpu-memory-utilization`). Add or change
-> SGLang server flags with a strategic-merge `patch` on the model-server
-> container rather than the scenario's `vllm`/`vllmCommon` keys, which do not
-> apply under kustomize.
+> it as the equivalent of vLLM's `--gpu-memory-utilization`). Under kustomize,
+> add or change SGLang server flags with a strategic-merge `patch` on the
+> model-server container: the guide's own manifests carry the launch command, so
+> the scenario's `<role>.engine.command` is not what is rendered here. (In the
+> helm path it is -- see [`config/README.md`](../config/README.md#engine-command).)
 
 ## Running on specific clusters (GKE / OpenShift / CoreWeave / Kind)
 

@@ -1,9 +1,20 @@
 # GPU Example Scenario for LLM-D Deployment
-# Migrated from bash environment variables to YAML format
-# Based on scenarios/examples/gpu.sh
 #
-# This scenario deploys a model on GPU-accelerated nodes.
-# Uses the standard vLLM image with GPU memory utilization.
+# This scenario deploys a model on GPU-accelerated nodes with vLLM. Switching
+# engines is a matter of rewriting one string, `decode.engine.command` -- the
+# image, health path and metrics path all follow the launcher named in it.
+# examples/engines.yaml is a smaller stack that carries all three engines at once,
+# the SGLang and TensorRT-LLM commands commented out beneath the vLLM one; read it
+# to see the whole difference one engine makes.
+#
+# This particular file is the exception to "only the command changes", because
+# the routing it demonstrates is vLLM-specific: the EPP's `token-producer`
+# plugin counts prompt tokens by calling vLLM's /render endpoints, served by the
+# `vllm-render` sidecar that `router.tokenizer.enabled: true` adds. Neither
+# SGLang nor TRT-LLM exposes that endpoint. To serve this stack with another
+# engine, drop `router.tokenizer` and the `router.epp` block below (and
+# `decode.contextLengthRanges`, which only that plugin reads) -- then the command
+# really is the only difference left.
 #
 # IMPORTANT NOTE:
 # All parameters not defined here will use the default values from defaults.yaml.
@@ -24,7 +35,6 @@ scenario:
     common:
       # -------------------------------------------------------------------------
       # Affinity / Node Selection
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_AFFINITY (left for auto-detect)
       # By default, affinity is disabled and pods schedule on any available node.
       # Options:
       #   1. Leave commented out -- no node selection constraint
@@ -39,7 +49,8 @@ scenario:
       #     # cloud.google.com/gke-accelerator: nvidia-h100-80gb  # GKE
 
       # Enable multinode (LeaderWorkerSet) for sequential pod naming.
-      # Required when using contextLengthRanges or vllmVariants.
+      # Required when using contextLengthRanges or per-replica env vars
+      # (`,,`-delimited values in extraEnvVars) -- both need a pod's index.
       # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
       multinode:
         enabled: false
@@ -48,14 +59,14 @@ scenario:
       # Model Configuration
       # -------------------------------------------------------------------------
       model:
-        name: facebook/opt-125m
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: facebook-opt-125m
-        path: models/facebook/opt-125m
-        huggingfaceId: facebook/opt-125m
 
       # -------------------------------------------------------------------------
       # PVC Configuration
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS (left for auto-detect)
       # -------------------------------------------------------------------------
       # Uncomment to override storage class:
       # storage:
@@ -68,41 +79,23 @@ scenario:
       #     size: 1Ti
 
       # -------------------------------------------------------------------------
-      # vLLM Common Configuration
-      # Shared settings for both decode and prefill pods.
-      # When no customCommand is set on decode/prefill, the vLLM serve command
-      # is auto-generated from these fields:
-      #   - model.maxModelLen, model.blockSize maps to --max-model-len, --block-size
-      #   - model.gpuMemoryUtilization maps to --gpu-memory-utilization
-      #   - decode/prefill.parallelism.tensor maps to --tensor-parallel-size
-      #   - vllmCommon.flags.* maps to --enforce-eager, --no-enable-log-requests, etc.
-      #   - vllmCommon.kvTransfer.* maps to --kv-transfer-config (if enabled)
-      #   - vllmCommon.kvEvents.* maps to --kv-events-config (if enabled)
-      #   - decode/prefill.vllm.additionalFlags maps to appended as extra CLI args
-      # When decode.vllm.customCommand or prefill.vllm.customCommand IS set, it replaces the auto-generated
-      # command entirely. Only --kv-transfer-config and --kv-events-config are
-      # still appended from vllmCommon if enabled. All other vllmCommon.flags
-      # are ignored -- the custom command must include its own flags.
+      # Engine Configuration -- shared by every role and deployment method
       # -------------------------------------------------------------------------
-      vllmCommon:
-        # Shell used in the vLLM container `command:` field. Defaults to /bin/bash.
+      # Everything here is infrastructure the POD needs, not a parameter the
+      # engine process takes: which shell wraps the command, what runs before
+      # it, what gets mounted. Engine parameters are stated once, in the launch
+      # command each role carries verbatim (see `decode.engine.command` below).
+      # That is why there is no list of flags to keep in step with a new
+      # vLLM/SGLang release -- llm-d-benchmark never assembles the command line.
+      # -------------------------------------------------------------------------
+      engine:
+        # Shell used to exec a role's engine command. Defaults to /bin/bash.
         # shell: /bin/sh
 
-        # Corresponds to: LLMDBENCH_VLLM_COMMON_TENSOR_PARALLELISM (default 1)
-        # tensorParallelism: 2
-
-        # Preprocess script -- required for context-length-aware routing.
-        # Splits ,,-delimited env vars by pod index and self-labels pods via K8s API.
+        # Runs before the engine, in the same shell. Required for
+        # context-length-aware routing: it splits ,,-delimited env vars by pod
+        # index and self-labels pods through the Kubernetes API.
         preprocessScript: "python3 /setup/preprocess/set_llmdbench_environment.py && source $HOME/llmdbench_env.sh"
-
-        # These flags control the auto-generated vllm serve command.
-        # Flags not listed here inherit from defaults.yaml (e.g. allowLongMaxModelLen, serverDevMode).
-        # To use a fully custom command instead, set decode.vllm.customCommand.
-        flags:
-          enforceEager: false          # old gpu.sh did not use --enforce-eager
-          disableLogRequests: true     # modelservice only -- upstream vllm-openai (v0.9+) dropped --no-enable-log-requests
-          disableUvicornAccessLog: true  # --disable-uvicorn-access-log
-          noPrefixCaching: true        # --no-enable-prefix-caching
 
         # Volumes required for preprocess script and kubeconfig (pod self-labeling).
         volumes:
@@ -125,12 +118,12 @@ scenario:
 
     # =========================================================================
     # STANDALONE -- Only applies when standalone.enabled: true
-    # Note: The standalone path uses upstream docker.io/vllm/vllm-openai
-    # (default from defaults.yaml). Upstream vLLM v0.9+ dropped the
-    # --no-enable-log-requests flag, so disableLogRequests (above) is
-    # only applied to the modelservice path which uses llm-d-cuda.
-    # If you need to suppress request logging in standalone, add the
-    # appropriate flag for your vLLM version to standalone.vllm.additionalFlags.
+    # Note: standalone runs its own launch command (`standalone.engine.command`,
+    # defaulted in defaults.yaml) and binds engine.servicePort directly -- no
+    # routing sidecar exists on this path. Because each role states its own
+    # command, a flag one image accepts and another does not (upstream vLLM v0.9+
+    # dropped --no-enable-log-requests, for instance) stays confined to the role
+    # whose image accepts it.
     # =========================================================================
     standalone:
       enabled: false
@@ -181,8 +174,8 @@ scenario:
       # =========================================================================
       # INFERENCE EXTENSION (EPP) -- Context-length-aware routing
       # Uncomment this section along with multinode, contextLengthRanges,
-      # preprocessScript, volumes/volumeMounts, and optionally vllmVariants
-      # above to enable context-length-aware routing.
+      # preprocessScript, volumes/volumeMounts, and optionally the per-replica
+      # extraEnvVars below to enable context-length-aware routing.
       # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
       #
       # `router.tokenizer.enabled: true` adds the chart's `vllm-render` sidecar
@@ -206,7 +199,7 @@ scenario:
               plugins:
                 - type: token-producer
                   parameters:
-                    modelName: "${model.name}"
+                    modelName: "facebook/opt-125m"
                     vllm:
                       url: http://localhost:8000
                 - type: decode-filter
@@ -233,16 +226,14 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Decode Configuration
-      # No customCommand -- the vLLM serve command is auto-generated
-      # from model.*, vllmCommon.flags.*, and decode.vllm.additionalFlags.
       # -------------------------------------------------------------------------
       decode:
         replicas: 2
 
         # Context-length-aware routing: per-pod labels (one per replica).
         # Requires multinode enabled (for LWS sequential pod naming) and
-        # kubeconfig secret mounted (see vllmCommon.volumes above).
-        # Also requires the preprocess script (vllmCommon.preprocessScript) for
+        # kubeconfig secret mounted (see engine.volumes above).
+        # Also requires the preprocess script (engine.preprocessScript) for
         # pod self-labeling and ,,-delimited env var splitting.
         # See config/README.md "Context-Length-Aware Routing" section for full setup guide.
 
@@ -250,27 +241,56 @@ scenario:
           - "0-1000"
           - "1000-2048"
 
-        # Per-pod vllm parameter overrides (one per replica).
-        # Values are converted to ,,-delimited env vars; the preprocess script
-        # selects the right value based on pod index from LWS.
-        vllmVariants:
-          - maxModelLen: 2048
-            maxNumSeq: 64
-          - maxModelLen: 2048
-            maxNumSeq: 16
+        # Per-replica values. A `,,`-delimited value means "one entry per pod":
+        # the preprocess script picks the entry at this pod's index and
+        # re-exports the variable holding just that value, so the single command
+        # below stands up two differently-sized replicas. The variable name is
+        # this scenario's own -- nothing in llm-d-benchmark knows it, it matches
+        # only because the command references it.
+        extraEnvVars:
+          - name: MAX_NUM_SEQS
+            value: "64,,16"
+
+        # -----------------------------------------------------------------------
+        # The launch command, verbatim -- the same line you would run by hand,
+        # or the one already in your llm-d guide. It is rendered into the
+        # container unchanged, so every flag here is read by vLLM and none of
+        # them by llm-d-benchmark. Only a few facts are read back out of it:
+        # `--port` (container port, probes, the routing sidecar's upstream) and
+        # `--max-model-len` (the pre-deploy capacity check and the harness
+        # profile). How many accelerators a pod holds is a Kubernetes fact, so it
+        # is stated as `parallelism.tensor`, not read from here.
+        #
+        # 8200, not 8000: the routing sidecar the chart injects on decode pods
+        # owns `engine.servicePort` (8000) and forwards here. In direct mode
+        # (`gateway.className: none`) there is no sidecar -- bind 8000 then.
+        #
+        # `engine.preprocessScript` above runs first, in this same shell, so
+        # $MAX_NUM_SEQS is already narrowed to this pod's entry. The model is the
+        # plain Hugging Face id: the weights are staged onto the model PVC as a
+        # Hugging Face hub cache and the pod's HF_HUB_CACHE points at it, so the
+        # id resolves locally rather than over the network.
+        # -----------------------------------------------------------------------
+        engine:
+          command: |
+            vllm serve facebook/opt-125m \
+            --port 8200 \
+            --max-model-len 2048 \
+            --tensor-parallel-size 1 \
+            --max-num-seqs $MAX_NUM_SEQS \
+            --disable-uvicorn-access-log \
+            --no-enable-prefix-caching
 
     # =========================================================================
     # WORKLOAD / HARNESS -- Benchmark execution configuration
     # =========================================================================
     # -------------------------------------------------------------------------
     # Workload/Harness Configuration
-    # Corresponds to: LLMDBENCH_HARNESS_NAME=inference-perf
     # -------------------------------------------------------------------------
     harness:
       name: inference-perf
       experimentProfile: sanity_random.yaml
 
     # -------------------------------------------------------------------------
-    # Corresponds to: LLMDBENCH_CONTROL_WORK_DIR=~/data/gpu
     # Used as workspace when --workspace is not specified on the CLI.
     workDir: "~/data/gpu"

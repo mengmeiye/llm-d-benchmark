@@ -70,10 +70,11 @@ class ModelNamespaceStep(Step):
                     errors=errors,
                 )
 
-        # PVC and download are per-stack: only needed for "pvc" protocol or
-        # standalone mode - S3/OCI/hf protocols fetch at runtime and skip
-        # PVC creation entirely, deferring to the modelservice chart (hf
-        # downloads happen in the decode Pod's init container).
+        # PVC and download are per-stack: only needed for the PVC-backed
+        # protocols ("pvc", "pvc+hf") or standalone mode - S3/OCI/hf protocols
+        # fetch at runtime and skip PVC creation entirely, deferring to the
+        # modelservice chart (hf downloads happen in the decode Pod's init
+        # container).
         # In multi-model scenarios different stacks can pick different
         # uriProtocols; the scenario's first stack no longer dictates the
         # choice for everyone.
@@ -102,6 +103,21 @@ class ModelNamespaceStep(Step):
                 self._apply_hostpath_pv(cmd, context, errors, stack_path)
             self._create_model_pvc(cmd, context, errors, stack_path)
             self._create_extra_pvc(cmd, context, errors, stack_path)
+
+        # Storage that is too small, that failed to apply or that never bound is
+        # fatal for everything below it: the download Job mounts these volumes
+        # and so does every engine pod. It is also the expensive thing to be
+        # wrong about -- the download can take tens of minutes -- and without
+        # this the step ran it in full first and only then reported a size it
+        # already knew at the start. Stop at the storage.
+        if errors:
+            return StepResult(
+                step_number=self.number,
+                step_name=self.name,
+                success=False,
+                message="Model storage is not usable -- skipped the model download",
+                errors=errors,
+            )
 
         self._add_context_secret(cmd, context, errors, plan_config)
 
@@ -273,7 +289,7 @@ class ModelNamespaceStep(Step):
             context.logger.log_warning(
                 f"Shared model PVC size ({pvc_capacity_str}) may be "
                 f"under-sized for this scenario: sum of model.size across "
-                f"{len(pvc_stacks)} pvc-protocol stack(s) is ~{total_gib:.0f}GiB "
+                f"{len(pvc_stacks)} PVC-backed stack(s) is ~{total_gib:.0f}GiB "
                 f"(>= 90% of capacity). Stacks: {breakdown}. Downloads that "
                 f"exceed capacity will fail mid-standup with an opaque PVC error."
             )
@@ -292,7 +308,14 @@ class ModelNamespaceStep(Step):
             "mountModelVolume", True
         )
 
-        return uri_protocol == "pvc" or (standalone_enabled and standalone_mounts)
+        # Both PVC-backed protocols stage weights ahead of the engine: `pvc`
+        # writes a raw weights directory, `pvc+hf` a Hugging Face hub cache. They
+        # differ only in the layout the download job writes and the argument the
+        # engine is then given, not in whether a PVC and a download have to
+        # happen first.
+        return uri_protocol.startswith("pvc") or (
+            standalone_enabled and standalone_mounts
+        )
 
     @staticmethod
     def _is_hostpath_enabled(plan_config: dict | None) -> bool:

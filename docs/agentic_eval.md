@@ -156,8 +156,8 @@ llmdbenchmark --spec <gpu-scenario> teardown -p <ns> -t modelservice --base-dir 
 A GPU-served scenario (vs run-only) must, beyond the run-only fields: cap
 `model.maxModelLen` to fit the KV cache; select GPU nodes (`affinity.nodeSelector`
 + `decode.acceleratorType`) and **remove any `accelerator.count: 0`** (zero forces
-CPU serving); use a real vLLM image; set `decode.vllm.modelCommand: custom` so the
-serve command actually emits `--max-model-len` / `--tensor-parallel-size` /
+CPU serving); use a real vLLM image; give `decode.engine.command` a serve line
+that states `--max-model-len` / `--tensor-parallel-size` /
 `--gpu-memory-utilization`; provide a model PVC (+ HF token if gated); and scale
 `decode.replicas` with `-j`. No `-U`/`-g` — the endpoint is auto-discovered.
 See the `-gpu` example scenarios. On OpenShift the images run as **root**, so a

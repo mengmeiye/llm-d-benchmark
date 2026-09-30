@@ -1,362 +1,234 @@
-# Complex Configuration Patterns
+# Conversion Patterns
 
-This document contains patterns for handling complex configurations when converting llm-d guides.
+The default conversion is one role, one command (see SKILL.md). This file covers
+the guides that are not that. Everything here is still the same rule: the
+command is copied, and only the Kubernetes facts around it are written as keys.
 
-## Table of Contents
+## Which engine -- usually nothing to write
 
-- [Extra Args and Commands](#extra-args-and-commands)
-- [Extra Volumes and Mounts](#extra-volumes-and-mounts)
-- [Environment Variables](#environment-variables)
-- [GAIE Custom Plugin Configuration](#gaie-custom-plugin-configuration)
-- [Accelerator Patterns](#accelerator-patterns)
-  - [XPU (Intel GPU)](#xpu-intel-gpu)
-  - [P/D (Prefill/Decode) Disaggregation](#pd-prefilldecode-disaggregation)
+The launcher in the command text selects the engine, and the engine selects the
+image, the health path and the metrics path:
 
-## Extra Args and Commands
+| Command starts with | Engine | Image key |
+|---|---|---|
+| `vllm serve` | vllm | `images.vllm` |
+| `python3 -m sglang.launch_server` | sglang | `images.sglang` |
+| `trtllm-serve serve` | trtllm | `images.trtllm` |
+| `llm-d-inference-sim` | sim | `images.llmdInferenceSim` |
 
-**IMPORTANT**: Always use the standard llm-d-benchmark pattern:
+So `engine.name` is normally absent from a scenario. Write it in two cases:
 
-```bash
-export LLMDBENCH_VLLM_COMMON_PREPROCESS="python3 /setup/preprocess/set_llmdbench_environment.py; source \$HOME/llmdbench_env.sh"
+- **The image launches the server itself**, so there is no command to detect.
+  Then `engine.name` is the only way to pick the image and paths.
+- **An engine with no spec.** `engine.name: generic` runs the command verbatim
+  and derives nothing from it, so the scenario must then state
+  `<role>.engine.port` by hand. (`<role>.parallelism` is stated in every case --
+  it is never read from a command.)
 
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_MODEL_COMMAND=custom
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_PREPROCESS=$LLMDBENCH_VLLM_COMMON_PREPROCESS
+If you do write `engine.name` and it disagrees with the command's launcher, the
+resolver trusts the command and warns. That warning means one of the two is
+wrong -- do not silence it by deleting the command's launcher.
 
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_ARGS=$(mktemp)
-cat << EOF > $LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_ARGS
-REPLACE_ENV_LLMDBENCH_VLLM_MODELSERVICE_DECODE_PREPROCESS; \
-vllm serve /model-cache/models/REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL \
---host 0.0.0.0 \
---served-model-name REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL \
---port REPLACE_ENV_LLMDBENCH_VLLM_COMMON_METRICS_PORT \
---max-model-len REPLACE_ENV_LLMDBENCH_VLLM_COMMON_MAX_MODEL_LEN \
---block-size REPLACE_ENV_LLMDBENCH_VLLM_COMMON_BLOCK_SIZE \
---gpu-memory-utilization REPLACE_ENV_LLMDBENCH_VLLM_COMMON_ACCELERATOR_MEM_UTIL \
---tensor-parallel-size REPLACE_ENV_LLMDBENCH_VLLM_MODELSERVICE_DECODE_TENSOR_PARALLELISM
-EOF
+Each engine's flag spellings are in `llmdbenchmark/engine/spec.py`: SGLang's
+`--tp-size`, `--context-length`, `--page-size`, `--mem-fraction-static` and
+TRT-LLM's `--tp_size`, `--max_seq_len`, `--tokens_per_block` are read as the
+same facts as vLLM's. You do not need to know this to convert a guide -- copy
+the guide's spelling -- but it is why you never translate flags between engines.
+
+## An image that launches itself
+
+`llm-d-inference-sim` v0.9+ is distroless: no shell to exec a command in. State
+an empty command and pass `args:` instead. An empty string, not a null -- a YAML
+key with no value leaves the default in place.
+
+```yaml
+      engine:
+        command: ""
+        args:
+          - "--model"
+          - "/model-cache/${model.path}"
+          - "--port"
+          - "8000"
+          - "--served-model-name"
+          - "facebook/opt-125m"
 ```
 
-**Note**: Not all flags appear in every scenario. Only include flags the guide
-specifies. But when a flag IS included, always use the REPLACE_ENV placeholder
-for its value, never a literal.
+See `config/scenarios/examples/sim.yaml`.
 
-The preprocess command and vllm serve are REQUIRED and must come first, regardless of what the guide specifies.
+## Something must run before the engine
 
-## Extra Volumes and Mounts
+Do not prepend it to the command. Two homes, by lifetime:
 
-**IMPORTANT**: Always include the preprocesses volume and mount:
+- `engine.preprocessScript` -- runs in the *same* container and shell, just
+  ahead of the command. This is where an env-file `source`, a `ulimit`, a
+  `LD_LIBRARY_PATH` export or a cache-dir `mkdir` goes. The default already
+  sources the shared config: `. /shared-config/llmdbench_env.sh`.
+- `<role>.initContainers` -- a separate container that must finish first
+  (writing the shared config, warming a cache, staging weights). Copy the
+  guide's init containers into this list as they are written.
 
-```bash
-export LLMDBENCH_VLLM_COMMON_EXTRA_VOLUMES=$(mktemp)
-cat << EOF > ${LLMDBENCH_VLLM_COMMON_EXTRA_VOLUMES}
-- name: preprocesses
-  configMap:
-    defaultMode: 0755
-    name: llm-d-benchmark-preprocesses
-- name: dshm
-  emptyDir:
-    medium: Memory
-    sizeLimit: REPLACE_ENV_LLMDBENCH_VLLM_COMMON_SHM_MEM
-<...additional volumes from guide...>
-EOF
+A command that legitimately needs several statements -- writing a config file
+the engine then reads -- can hold them, separated by `;`, because the whole
+thing runs in one shell. The TensorRT-LLM alternative in
+`config/scenarios/examples/engines.yaml` does exactly that to produce
+`--extra_llm_api_options`.
 
-export LLMDBENCH_VLLM_COMMON_EXTRA_VOLUME_MOUNTS=$(mktemp)
-cat << EOF > ${LLMDBENCH_VLLM_COMMON_EXTRA_VOLUME_MOUNTS}
-- name: dshm
-  mountPath: /dev/shm
-- name: preprocesses
-  mountPath: /setup/preprocess
-<...additional volume mounts from guide...>
-EOF
+## P/D disaggregation -- two roles, two commands
+
+```yaml
+    modelservice:
+      routing:
+        connector: nixlv2
+      prefill:
+        enabled: true          # off by default
+        replicas: 1
+        engine:
+          command: |
+            vllm serve ... --port 8000 ...
+      decode:
+        replicas: 2
+        engine:
+          command: |
+            vllm serve ... --port 8200 ...
 ```
 
-The preprocesses configMap volume should be listed FIRST. The preprocesses mount can be anywhere in the list.
+Points that are easy to get wrong:
 
-## Environment Variables
+- **Ports differ by role, not by preference.** Decode sits behind the routing
+  sidecar, which owns the Service's 8000, so decode binds 8200. Prefill never
+  gets a sidecar, so it binds 8000 -- which is also where decode's transfer
+  reaches it. With `routing.proxy.enabled: false` decode binds 8000 too.
+- **The KV connector flag goes in both commands**, copied from the guide, e.g.
+  `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`.
+  Quote it exactly as the guide does; it is opaque to llm-d-benchmark.
+- **The two roles may have different parallelism**, so each one states its own
+  `parallelism` block to match the width in its own command.
 
-**CRITICAL RULE**: ALL environment variables defined in the guide's `env:` section MUST be captured in the scenario file. Never silently drop env vars - they are often essential for the guide to function correctly (e.g., accelerator-specific settings, logging paths, feature flags).
+`config/scenarios/guides/pd-disaggregation.yaml` is the worked example.
 
-For container environment variables:
+## Multi-node (LeaderWorkerSet)
 
-```bash
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_ENVVARS_TO_YAML=$(mktemp)
-cat << EOF > $LLMDBENCH_VLLM_MODELSERVICE_DECODE_ENVVARS_TO_YAML
-- name: VLLM_LOGGING_LEVEL
-  value: INFO
-- name: UCX_TLS
-  value: "sm,cuda_ipc,cuda_copy,tcp"
-EOF
+A model that does not fit one node is deployed as an LWS group -- one leader
+plus workers, scheduled and scaled together:
+
+```yaml
+    modelservice:
+      multinode:
+        enabled: true
+      decode:
+        parallelism:
+          tensor: 1
+          data: 1
+          dataLocal: 8      # accelerators per node
+          workers: 2        # nodes per replica
 ```
 
-### Mapping
+`workers` is the LWS group size; `dataLocal` (or `tensor`) is the per-node
+width. Their product is the group's accelerator count. `workers` is the one width
+with no counterpart in the command at all: how many *nodes* to spread a replica
+over is a Kubernetes decision, not an engine flag.
 
-| Guide Section | LLMDBENCH Variable |
-|--------------|-------------------|
-| `decode.containers[].env` | `LLMDBENCH_VLLM_MODELSERVICE_DECODE_ENVVARS_TO_YAML` |
-| `prefill.containers[].env` | `LLMDBENCH_VLLM_MODELSERVICE_PREFILL_ENVVARS_TO_YAML` |
+If the guide ships a hand-written `LeaderWorkerSet` manifest, do not try to
+express it as keys. Either take the kustomize path (SKILL.md Step 1) or record
+in the scenario header that the raw LWS resource was not carried over.
 
-### Verification
+`config/scenarios/guides/wide-ep.yaml` is the worked example.
 
-After generating the scenario file, verify:
-1. Count the env vars in the source guide's `env:` sections
-2. Count the env vars in the generated `ENVVARS_TO_YAML` blocks
-3. The counts must match (excluding any benchmark-framework-added vars which should be documented)
+## Endpoint-picker plugin configuration
 
-## GAIE Custom Plugin Configuration
+The guide's `inferenceExtension.pluginsCustomConfig` is a whole YAML document
+(an `EndpointPickerConfig`: plugins, then a schedulingProfiles section). Copy it
+in full, keyed by the same filename the guide uses:
 
-**CRITICAL RULE**: When the guide contains `inferenceExtension.pluginsCustomConfig`, you MUST always define `LLMDBENCH_VLLM_MODELSERVICE_GAIE_CUSTOM_PLUGINS` in the scenario file, regardless of whether a preset file exists.
-
-### Workflow
-
-1. **Extract Custom Config**: If `inferenceExtension.pluginsCustomConfig` exists in the guide's GAIE values.yaml, extract the full YAML content
-2. **Always Include in Scenario**: Generate the `LLMDBENCH_VLLM_MODELSERVICE_GAIE_CUSTOM_PLUGINS` variable with the extracted content
-3. **Set Plugin Config File**: Also set `LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE` to the filename specified in `inferenceExtension.pluginsConfigFile`
-4. **Check for Preset Conflicts**: After generating the scenario, check if a preset file exists at `setup/presets/gaie/<filename>` with similar content
-5. **Issue Warning (Optional)**: If a preset exists but the experiment doesn't use it, add a comment warning in the scenario file
-
-### Template
-
-```bash
-# GAIE configuration
-export LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE="<filename-from-guide>.yaml"
-
-# Custom plugin configuration from guide
-# NOTE: A preset file may exist at setup/presets/gaie/<filename>.yaml
-#       but this guide defines custom inline config which takes precedence
-export LLMDBENCH_VLLM_MODELSERVICE_GAIE_CUSTOM_PLUGINS=$(mktemp)
-cat << EOF > $LLMDBENCH_VLLM_MODELSERVICE_GAIE_CUSTOM_PLUGINS
-<filename>.yaml: |
-  <full-yaml-content-from-pluginsCustomConfig>
-EOF
+```yaml
+    modelservice:
+      router:
+        epp:
+          pluginsConfigFile: "my-guide-config.yaml"
+          pluginsCustomConfig:
+            my-guide-config.yaml: |
+              apiVersion: llm-d.ai/v1alpha1
+              kind: EndpointPickerConfig
+              plugins:
+                - type: prefix-cache-scorer
+                  parameters:
+                    blockSize: ${model.blockSize}
+              ...
 ```
 
-### Example
+Do not summarise it, do not reorder the plugins, and do not drop a plugin you
+do not recognise -- the file is the scheduler's whole behaviour and a missing
+entry changes results silently. `pluginsConfigFile` must name a key that exists
+in `pluginsCustomConfig`.
 
-```bash
-# GAIE configuration
-export LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE="precise-prefix-cache-config.yaml"
+Where the config states a KV page size, it and the engine's command must agree
+on the same number. That is what `${model.blockSize}` is for: put it in both
+places rather than the literal. It is the one substitution worth the noise.
 
-export LLMDBENCH_VLLM_MODELSERVICE_GAIE_CUSTOM_PLUGINS=$(mktemp)
-cat << EOF > $LLMDBENCH_VLLM_MODELSERVICE_GAIE_CUSTOM_PLUGINS
-precise-prefix-cache-config.yaml: |
-  apiVersion: inference.networking.x-k8s.io/v1alpha1
-  kind: EndpointPickerConfig
-  plugins:
-    - type: single-profile-handler
-    - type: precise-prefix-cache-scorer
-      parameters:
-        tokenProcessorConfig:
-          blockSize: 64
-        indexerConfig:
-          tokenizersPoolConfig:
-            modelName: "Qwen/Qwen3-32B"
-            hf:
-              tokenizersCacheDir: "/tmp/tokenizers"
-        kvEventsConfig:
-          topicFilter: "kv@"
-          concurrency: 4
-          discoverPods: false
-          zmqEndpoint: "tcp://*:5557"
-    - type: kv-cache-utilization-scorer
-    - type: queue-scorer
-    - type: max-score-picker
-  schedulingProfiles:
-    - name: default
-      plugins:
-        - pluginRef: precise-prefix-cache-scorer
-          weight: 3.0
-        - pluginRef: kv-cache-utilization-scorer
-          weight: 2.0
-        - pluginRef: queue-scorer
-          weight: 2.0
-        - pluginRef: max-score-picker
-EOF
+Watch the nesting: `pluginsConfigFile`, `pluginsCustomConfig` and
+`resources` belong under `router.epp`. Placed one level up, under `router`,
+they render into the chart values where nothing reads them -- the EPP silently
+runs the default plugin config. The rendered `12_router-values.yaml` is where
+you catch this: look for your filename under `router.epp.pluginsConfigFile`,
+not under `router.`.
+
+Other EPP keys come from `gaie-*/values.yaml`: `replicas`, `flags`, `env`,
+`resources`. `router.tracing`, `router.modelServers`, `router.proxy` and
+`router.inferencePool` do sit at the `router` level.
+
+## An accelerator that needs a different command
+
+XPU takes no `--block-size` and wants `--enforce-eager`; Spyre and CPU differ
+again. Do not parameterise one command to cover them. Write a separate scenario
+file with the flags stated plainly -- `config/scenarios/examples/intel-xpu.yaml`,
+`examples/spyre.yaml`, `examples/cpu.yaml`.
+
+What an accelerator *profile* contributes is values, never command text: the
+image, resource sizing, storage and router sizing, in
+`config/templates/values/overlays/<name>.yaml`, auto-detected from the cluster.
+So a per-accelerator scenario only needs its command and whatever the overlay
+does not already set. It must not name a model that the overlay's hardware
+cannot hold, and it must never contain command fragments for other backends.
+
+## Kustomize guides
+
+A guide with a `kustomization.yaml` can be applied as-is:
+
+```yaml
+    kustomize:
+      enabled: true
+      guideName: "<guide-dir-name>"
+      acceleratorBackend: "gpu/vllm"     # or gpu/sglang
+      guideVariableOverrides: {}          # fills the README's ${VAR}s
+      patches: []
 ```
 
-### Why This Matters
+This is usually the better answer: the guide's own manifests deploy, so nothing
+can be lost in translation, and the only conversion left is the `harness:`
+block. Offer it before converting by hand.
 
-1. **Guide Authority**: The guide's custom config is authoritative - it represents the exact configuration needed for that specific guide
-2. **Preset Independence**: Preset files may not match exactly, or may not exist at all
-3. **Experiment Variations**: If the experiment varies plugin configs, that's a separate concern - the base scenario should always include what the guide defines
-4. **Self-Contained Scenarios**: Scenarios should be self-contained and not rely on external preset files unless explicitly intended
+## Extra env, volumes, and container fields
 
-### Do NOT
+| In the guide | Scenario key |
+|---|---|
+| container `env:` | `<role>.extraEnvVars` -- every entry, name and value, including ones whose purpose is unclear |
+| pod-level volumes (`dshm`, `shared-config`) | `engine.volumes` / `engine.volumeMounts` |
+| role-specific volumes | `<role>.additionalVolumes` / `<role>.additionalVolumeMounts` |
+| `/dev/shm` size | the `dshm` entry in `engine.volumes`: `emptyDir.sizeLimit`. (Scenarios also carry an `engine.shmMemory` key; nothing reads it, so the `sizeLimit` is the one that matters.) |
+| RDMA/IB devices | `engine.networkResource`, `engine.networkNr` |
+| `securityContext`, extra `ports`, `imagePullPolicy`, anything else | `<role>.extraContainerConfig` |
+| a whole extra Kubernetes object | `extraObjects` |
 
-- Skip custom plugin config just because a preset file exists
-- Assume preset files will have the same content as the guide's custom config
-- Omit custom config to avoid "duplication" - the scenario file should be complete
+`extraEnvVars` is where conversions lose the most: a guide's env block is easy
+to skim past and its absence usually shows up as a runtime failure, not a
+render error. Diff the guide's env list against the scenario's before reporting
+done.
 
-## LeaderWorkerSet / Multinode Patterns
+## Standalone (no llm-d)
 
-When converting guides that use LeaderWorkerSet (LWS) for multi-node or multi-pod deployment:
-
-### Detection
-
-A guide uses LeaderWorkerSet if:
-- The kustomize manifests contain `kind: LeaderWorkerSet` resources
-- The manifest has fields like `leaderWorkerTemplate`, `workerTemplate`, `size`, or `LWS_*` environment variables
-- The vLLM command uses flags like `--data-parallel-address`, `--data-parallel-start-rank`, `--data-parallel-rpc-port`
-
-### Support
-
-**LeaderWorkerSet IS supported** by the llm-d-benchmark framework via the modelservice Helm chart. Set:
-
-```bash
-export LLMDBENCH_VLLM_MODELSERVICE_MULTINODE=true
-```
-
-This maps to `multinode: true` in the modelservice Helm chart, which enables LeaderWorkerSet-based deployment.
-
-### Configuration Mapping
-
-| LWS Manifest Field | LLMDBENCH Variable | Notes |
-|-------------------|-------------------|-------|
-| `spec.replicas` | `LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS` | Number of LWS groups |
-| `spec.leaderWorkerTemplate.size` | `LLMDBENCH_VLLM_COMMON_NUM_WORKERS_PARALLELISM` | Pods per LWS group |
-| `DP_SIZE_LOCAL` env var | `LLMDBENCH_VLLM_MODELSERVICE_DECODE_DATA_LOCAL_PARALLELISM` | Data parallel per pod |
-| `TP_SIZE` env var | `LLMDBENCH_VLLM_MODELSERVICE_DECODE_TENSOR_PARALLELISM` | Tensor parallel size |
-
-### Template
-
-```bash
-# =============================================================================
-# LeaderWorkerSet / Multinode Configuration
-# SOURCE: <path-to-lws-manifest>
-# Lines <line-numbers>:
-#   spec.replicas: <value>
-#   spec.leaderWorkerTemplate.size: <value>
-# =============================================================================
-export LLMDBENCH_VLLM_MODELSERVICE_MULTINODE=true
-
-# Number of LWS groups (each group has size workers)
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=<replicas>
-
-# Number of pods per LWS group
-export LLMDBENCH_VLLM_COMMON_NUM_WORKERS_PARALLELISM=<lws-size>
-
-# Data parallelism per pod
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_DATA_LOCAL_PARALLELISM=<dp_size_local>
-```
-
-### LWS-Specific vLLM Arguments
-
-When multinode is enabled, the modelservice Helm chart automatically handles LWS-specific vLLM arguments. You typically do NOT need to include these in `EXTRA_ARGS`:
-- `--data-parallel-address` (set automatically from LWS leader)
-- `--data-parallel-start-rank` (set automatically per pod)
-- `--data-parallel-rpc-port` (set automatically)
-
-However, DO include these parallelism flags in `EXTRA_ARGS`:
-- `--tensor-parallel-size`
-- `--data-parallel-size-local` (maps to `DP_SIZE_LOCAL`)
-- `--data-parallel-size` (total DP = `LWS_GROUP_SIZE * DP_SIZE_LOCAL`)
-
-### Complete Example
-
-```bash
-# Enable LeaderWorkerSet deployment
-export LLMDBENCH_VLLM_MODELSERVICE_MULTINODE=true
-
-# LWS group configuration
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=1      # 1 LWS group
-export LLMDBENCH_VLLM_COMMON_NUM_WORKERS_PARALLELISM=2    # 2 pods per group
-
-# Per-pod parallelism
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_TENSOR_PARALLELISM=1
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_DATA_LOCAL_PARALLELISM=8  # 8 GPUs per pod
-
-# Total: 1 group × 2 pods × 8 GPUs = 16 GPUs for decode
-```
-
-### DO NOT
-
-- Add comments saying LWS is "not supported" by llm-d-benchmark
-- Skip multinode configuration when converting LWS-based guides
-- Manually set LWS-specific args that are auto-configured by the Helm chart
-
-## Accelerator Patterns
-
-### XPU (Intel GPU)
-
-When converting guides for Intel XPU accelerators:
-
-**Accelerator Resources:**
-- `intel-i915`: Data Center GPU Max 1550
-- `intel-xe`: Battlemage series
-
-**Required Environment Variables:**
-```bash
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_ENVVARS_TO_YAML=$(mktemp)
-cat << EOF > $LLMDBENCH_VLLM_MODELSERVICE_DECODE_ENVVARS_TO_YAML
-- name: VLLM_USE_V1
-  value: "1"
-- name: TORCH_LLM_ALLREDUCE
-  value: "1"
-- name: VLLM_WORKER_MULTIPROC_METHOD
-  value: "spawn"
-- name: UCX_TLS
-  value: "tcp"
-EOF
-```
-
-**Notes:**
-- XPU guides typically use smaller models (e.g., Qwen3-0.6B) due to memory constraints
-- Set `LLMDBENCH_VLLM_COMMON_ACCELERATOR_NAME` to the appropriate Intel GPU type
-
-### P/D (Prefill/Decode) Disaggregation
-
-When converting guides that use prefill/decode disaggregation:
-
-**Stage Roles:**
-- **Decode stage**: Uses `kv_consumer` role
-- **Prefill stage**: Uses `kv_producer` role
-
-**KV Transfer Configuration:**
-Both stages need identical KV transfer config pointing to NixlConnector:
-```bash
---kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer",...}'  # decode
---kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer",...}'  # prefill
-```
-
-**GAIE Routing:**
-- P/D guides typically use `pd-config.yaml` for GAIE plugin configuration
-- This config routes requests between prefill and decode stages
-- Set `LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE="pd-config.yaml"`
-
-**Replica Configuration:**
-```bash
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=<decode-count>
-export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_REPLICAS=<prefill-count>
-```
-
-**Complete P/D Example:**
-
-```bash
-# Decode stage
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=2
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_ARGS=$(mktemp)
-cat << EOF > $LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_ARGS
-REPLACE_ENV_LLMDBENCH_VLLM_MODELSERVICE_DECODE_PREPROCESS; \
-vllm serve /model-cache/models/REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL \
---host 0.0.0.0 \
---served-model-name REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL \
---port REPLACE_ENV_LLMDBENCH_VLLM_COMMON_METRICS_PORT \
---tensor-parallel-size REPLACE_ENV_LLMDBENCH_VLLM_MODELSERVICE_DECODE_TENSOR_PARALLELISM \
---kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_parallel_size":1,"kv_buffer_size":1e9}'
-EOF
-
-# Prefill stage
-export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_REPLICAS=1
-export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_EXTRA_ARGS=$(mktemp)
-cat << EOF > $LLMDBENCH_VLLM_MODELSERVICE_PREFILL_EXTRA_ARGS
-REPLACE_ENV_LLMDBENCH_VLLM_MODELSERVICE_PREFILL_PREPROCESS; \
-vllm serve /model-cache/models/REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL \
---host 0.0.0.0 \
---served-model-name REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL \
---port REPLACE_ENV_LLMDBENCH_VLLM_COMMON_METRICS_PORT \
---tensor-parallel-size REPLACE_ENV_LLMDBENCH_VLLM_MODELSERVICE_PREFILL_TENSOR_PARALLELISM \
---kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_parallel_size":1,"kv_buffer_size":1e9}'
-EOF
-
-# GAIE for P/D routing
-export LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE="pd-config.yaml"
-```
+A guide that deploys a bare engine Deployment with no gateway or endpoint picker
+converts to `standalone:` with `modelservice.enabled: false`. Same command
+rule; standalone always binds 8000. `config/scenarios/examples/sim.yaml` shows
+the block's shape and `config/scenarios/examples/launcher.yaml` is a live one.
+`config/scenarios/guides/nok8s.yaml` (`nok8s.enabled: true`) is the same idea
+with no cluster at all.

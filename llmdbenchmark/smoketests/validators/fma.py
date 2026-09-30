@@ -150,7 +150,7 @@ class FmaValidator(BaseSmoketest):
         plan_config = _load_config(stack_path)
 
         model_name = _nested_get(plan_config, "model", "name") or ""
-        port = str(_nested_get(plan_config, "vllmCommon", "inferencePort") or "8000")
+        port = str(_nested_get(plan_config, "engine", "servicePort") or "8000")
 
         if self._launcher_created_on_demand(context, cmd, plan_config):
             return _fma_skip_report("fma_health_skipped_no_launcher")
@@ -272,7 +272,7 @@ class FmaValidator(BaseSmoketest):
         plan_config = _load_config(stack_path)
 
         model_name = _nested_get(plan_config, "model", "name") or ""
-        port = str(_nested_get(plan_config, "vllmCommon", "inferencePort") or "8000")
+        port = str(_nested_get(plan_config, "engine", "servicePort") or "8000")
 
         if self._launcher_created_on_demand(context, cmd, plan_config):
             return _fma_skip_report("fma_inference_skipped_no_launcher")

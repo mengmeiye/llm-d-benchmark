@@ -147,7 +147,12 @@ class StandaloneDeployStep(Step):
                     f"Standalone deployment pods not ready: {wait_result.stderr}"
                 )
 
-        if deploy_name and not errors and not context.dry_run:
+        # Collect the engine's log whether or not the wait succeeded. A pod that
+        # never reached Ready is the case where the log is the only evidence of
+        # why -- and `oc logs` still returns it, because the wait only gives up
+        # once the container is running (see `has_started` in
+        # llmdbenchmark/utilities/podstate/state.py).
+        if deploy_name and not context.dry_run:
             self._collect_logs(cmd, context, namespace, deploy_name)
 
         if service_yaml:
@@ -203,7 +208,7 @@ class StandaloneDeployStep(Step):
         namespace: str,
         deploy_name: str,
     ):
-        """Collect vLLM pod logs after deployment is ready."""
+        """Write each standalone pod's engine log into the setup log directory."""
         logs_dir = context.setup_logs_dir()
         result = cmd.kube(
             "get",
@@ -243,13 +248,14 @@ class StandaloneDeployStep(Step):
             svc_name = svc_config.get("metadata", {}).get("name", "")
             namespace = context.require_namespace()
 
-            inference_port = self._require_config(
-                plan_config, "vllmCommon", "inferencePort"
-            )
+            # The port the route sends to: what the Service exposes, not the
+            # port the engine binds inside the pod (that one comes out of the
+            # role's command and lives in `standalone.engine.port`).
+            inference_port = self._require_config(plan_config, "engine", "servicePort")
 
             if svc_name:
                 # Use a shorter route name to stay within the 63-char DNS label limit.
-                # The full service name (vllm-standalone-{hash}) can be too long
+                # The full service name (standalone-{hash}) can be too long
                 # when combined with namespace and cluster domain.
                 model_id = plan_config.get("model_id_label", "")
                 route_name = f"sa-{model_id}-route" if model_id else f"{svc_name}-route"
@@ -284,7 +290,7 @@ class StandaloneDeployStep(Step):
         """Validate that the configured priorityClassName exists on the cluster."""
         priority_class = plan_config.get("standalone", {}).get(
             "priorityClassName"
-        ) or plan_config.get("vllmCommon", {}).get("priorityClassName", "")
+        ) or plan_config.get("engine", {}).get("priorityClassName", "")
         if not priority_class or priority_class.lower() == "none":
             return None
 
@@ -349,7 +355,7 @@ class StandaloneDeployStep(Step):
                 "huggingfaceId", ""
             )
             params["inference_port"] = str(
-                self._require_config(plan_config, "vllmCommon", "inferencePort")
+                self._require_config(plan_config, "engine", "servicePort")
             )
             params["release"] = self._require_config(plan_config, "release")
             params["standalone_replicas"] = str(

@@ -5,6 +5,12 @@ validation (step 2).  When a stack name is not found in the registry,
 ``get_validator()`` falls back to ``BaseSmoketest`` which still runs
 generic health checks and inference tests (steps 0 and 1) -- it just
 skips scenario-specific config validation.
+
+The keys are **stack names** -- the ``scenario[].name`` a scenario file
+declares, not its filename. A key that matches no stack is a validator that
+never runs, and the fallback makes that silent: the smoketest passes, having
+checked nothing scenario-specific. ``tests/test_validator_registry.py`` is what
+makes it loud, so keep ``_SYNTHETIC_STACK_NAMES`` below honest.
 """
 
 # Guides (well-lit paths)
@@ -43,11 +49,11 @@ VALIDATORS: dict[str, type] = {
     "fast-model-actuation": FmaValidator,
     "fast-model-actuation-base": FmaValidator,
     "fast-model-actuation-keda": FmaValidator,
-    # The workload-autoscaling guide names its stack inference-scheduling-wva.
-    # It reuses the optimized-baseline validator; the WvaSmoketestMixin
-    # auto-activates its extra checks when the stack's config has
-    # wva.enabled: true.
-    "inference-scheduling-wva": OptimizedBaselineValidator,
+    # workload-autoscaling deploys the same stack as optimized-baseline, so
+    # it reuses that validator; the WvaSmoketestMixin auto-activates its
+    # extra checks when the stack's config has wva.enabled: true.
+    "workload-autoscaling": OptimizedBaselineValidator,
+    "epp-keda-saturation": OptimizedBaselineValidator,
     "tiered-prefix-cache": TieredPrefixCacheValidator,
     "wide-ep": WideEpValidator,
     "wva": WvaValidator,
@@ -56,3 +62,18 @@ VALIDATORS: dict[str, type] = {
     "gpu-example": GpuValidator,
     "spyre-example": SpyreValidator,
 }
+
+# Registry keys that deliberately match no scenario's stack name.
+#
+# Anything not listed here and not claimed by a scenario is the silent-fallback
+# bug: a validator wired to a name nothing deploys.
+_SYNTHETIC_STACK_NAMES: frozenset[str] = frozenset(
+    {
+        # get_validator(is_fma=True) rewrites the stack name to this, so the
+        # benchmark FMA path and the kustomize guide path share one validator.
+        "fast-model-actuation",
+        # No scenario ships this yet. Left registered on purpose so the
+        # validator does not rot while the scenario is decided.
+        "wva",
+    }
+)

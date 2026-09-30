@@ -836,8 +836,10 @@ class FMADeployStep(Step):
             params["model_huggingface_id"] = plan_config.get("model", {}).get(
                 "huggingfaceId", ""
             )
+            # The Service port, which is what a client outside the pod dials.
+            # Not the engine's own port -- that comes out of the role's command.
             params["inference_port"] = str(
-                self._require_config(plan_config, "vllmCommon", "inferencePort")
+                self._require_config(plan_config, "engine", "servicePort")
             )
             params["release"] = self._require_config(plan_config, "release")
             params["standalone_replicas"] = str(

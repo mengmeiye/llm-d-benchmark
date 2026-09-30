@@ -82,11 +82,15 @@ def _plan_config() -> dict[str, Any]:
             "stackName": "model",
         },
         "experiment": {"workspaceDir": "/workspace", "resultsDir": "/requests"},
-        "vllmCommon": {"inferencePort": 8000},
+        # The Service/gateway port the harness dials -- infrastructure, not an
+        # engine parameter, so it lives under `engine` and not in a command.
+        "engine": {"servicePort": 8000},
         "standalone": {
             "enabled": False,
             "launcher": {"enabled": False},
-            "vllm": {"loadFormat": "auto"},
+            # There is no config key for `--load-format`: the loader is selected
+            # by this env var and named in the role's own command.
+            "extraEnvVars": [],
         },
         "fma": {"enabled": False},
         "storage": {"workloadPvc": {"name": "workload-pvc"}},
@@ -202,7 +206,7 @@ def test_reset_caches_called_once_per_treatment(
 
     assert result.success
     # One reset per treatment, targeting the serving namespace, the model
-    # label, and vllmCommon.inferencePort from the fixture.
+    # label, and engine.servicePort from the fixture.
     assert len(calls) == 2
     assert all(ns == "bench" for ns, _label, _port in calls)
     assert all(port == 8000 for _ns, _label, port in calls)

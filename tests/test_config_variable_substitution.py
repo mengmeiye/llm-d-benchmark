@@ -35,34 +35,48 @@ class TestSubstituteConfigVariables:
         values = {
             "model": {"name": "my-model", "path": "models/my-model"},
             "decode": {
-                "vllm": {
-                    "customCommand": "serve /cache/${model.path} --served-model-name ${model.name}"
+                "engine": {
+                    "command": "vllm serve /cache/${model.path} --served-model-name ${model.name}"
                 }
             },
         }
         result = renderer._substitute_config_variables(values)
         assert (
-            result["decode"]["vllm"]["customCommand"]
-            == "serve /cache/models/my-model --served-model-name my-model"
+            result["decode"]["engine"]["command"]
+            == "vllm serve /cache/models/my-model --served-model-name my-model"
         )
 
     def test_shell_vars_left_alone(self, renderer):
+        """Shell variables in an engine command must reach the container intact.
+
+        The command is passed through verbatim, so the only thing this pass may
+        touch is a dotted ``${a.b}`` reference. ``$MODEL_SERVE_REF`` (exported
+        into every serving pod) and ``$LWS_WORKER_INDEX`` (set by LeaderWorkerSet)
+        resolve at pod start, not at render time.
+        """
         values = {
             "model": {"name": "test-model"},
-            "field": "${model.name} --port $VLLM_PORT --len $VLLM_MAX_MODEL_LEN",
+            "field": (
+                "vllm serve $MODEL_SERVE_REF --served-model-name ${model.name} "
+                "--data-parallel-rank $LWS_WORKER_INDEX"
+            ),
         }
         result = renderer._substitute_config_variables(values)
-        assert (
-            result["field"] == "test-model --port $VLLM_PORT --len $VLLM_MAX_MODEL_LEN"
+        assert result["field"] == (
+            "vllm serve $MODEL_SERVE_REF --served-model-name test-model "
+            "--data-parallel-rank $LWS_WORKER_INDEX"
         )
 
     def test_shell_braced_vars_left_alone(self, renderer):
-        """${SINGLE_WORD} without dots should NOT be substituted."""
+        """${SINGLE_WORD} without dots should NOT be substituted.
+
+        Includes the ``:-default`` form, which wide-ep commands rely on.
+        """
         values = {
-            "field": "port is ${VLLM_PORT}",
+            "field": "rank is ${LWS_WORKER_INDEX:-0} of ${LWS_GROUP_SIZE}",
         }
         result = renderer._substitute_config_variables(values)
-        assert result["field"] == "port is ${VLLM_PORT}"
+        assert result["field"] == "rank is ${LWS_WORKER_INDEX:-0} of ${LWS_GROUP_SIZE}"
 
     def test_unresolvable_ref_left_as_is(self, renderer):
         values = {"field": "value is ${nonexistent.key}"}

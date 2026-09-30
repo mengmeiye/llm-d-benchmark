@@ -4,9 +4,16 @@
 #
 # Evaluates how the number of prefix groups and system prompt length
 # affect performance when using tiered prefix caching (CPU offloading
-# via OffloadingConnector).  The setup phase varies the number of CPU
-# blocks allocated for the KV cache tier; the run phase sweeps
-# workload characteristics to measure cache hit rates and latency.
+# via OffloadingConnector).  The setup phase varies the size of the CPU
+# KV-cache tier; the run phase sweeps workload characteristics to
+# measure cache hit rates and latency.
+#
+# The connector itself is declared in the scenario's engine command
+# (config/scenarios/guides/tiered-prefix-cache.yaml), which writes
+# `--kv-transfer-config '{...,"cpu_bytes_to_use":$(CPU_BYTES_TO_USE)}'`.
+# The command is never rewritten by a sweep: it reads the tier size from
+# a container environment variable, so a setup treatment only has to
+# change that variable.
 #
 # Usage (full DoE — automatic standup/run/teardown per setup treatment):
 #   llmdbenchmark --spec tiered-prefix-cache experiment \
@@ -44,10 +51,12 @@ design:
 
   setup:
     factors:
-      - name: numCpuBlocks
-        key: vllmCommon.kvTransfer.extraConfig.num_cpu_blocks
-        levels: [500, 1000, 2000, 5000]
-        description: CPU blocks allocated for KV cache tier
+      - name: cpuBytesToUse
+        key: decode.extraEnvVars
+        levels: [25Gi, 50Gi, 100Gi, 200Gi]
+        description: >
+          Host memory offered to the OffloadingConnector's CPU KV tier,
+          carried into the command as $(CPU_BYTES_TO_USE)
     constants:
       - key: model.maxModelLen
         value: 16000
@@ -101,28 +110,31 @@ design:
 
 setup:
   constants:
+    # Both mirror what the scenario's command already states
+    # (--max-model-len, --block-size); the resolver keeps them in step.
     model.maxModelLen: 16000
     model.blockSize: 64
-    # KV-transfer must be enabled for the OffloadingConnector's num_cpu_blocks
-    # to mean anything -- _macros.j2:64-65 only emits the
-    # --kv-transfer-config JSON when kvTransfer.enabled is true.
-    vllmCommon.kvTransfer.enabled: true
-    vllmCommon.kvTransfer.connector: OffloadingConnector
-    vllmCommon.kvTransfer.role: kv_both
   treatments:
-    # The override key MUST be ``vllmCommon.kvTransfer.extraConfig.num_cpu_blocks``
-    # (renders to ``kv_connector_extra_config.num_cpu_blocks`` in the
-    # --kv-transfer-config JSON via _macros.j2:64-65). A previous version of
-    # this file used ``vllmCommon.flags.numCpuBlocks`` which silently no-op'd
-    # because no template reads that path.
-    - name: cpu-blocks-500
-      vllmCommon.kvTransfer.extraConfig.num_cpu_blocks: 500
-    - name: cpu-blocks-1000
-      vllmCommon.kvTransfer.extraConfig.num_cpu_blocks: 1000
-    - name: cpu-blocks-2000
-      vllmCommon.kvTransfer.extraConfig.num_cpu_blocks: 2000
-    - name: cpu-blocks-5000
-      vllmCommon.kvTransfer.extraConfig.num_cpu_blocks: 5000
+    # Each treatment replaces decode.extraEnvVars wholesale -- a dotted override
+    # addresses dicts, not list elements, so there is no way to poke at a single
+    # entry. The scenario has exactly this one variable; if it gains another,
+    # restate it in every treatment below or the override will drop it.
+    - name: cpu-bytes-25g
+      decode.extraEnvVars:
+        - name: CPU_BYTES_TO_USE
+          value: "26843545600"
+    - name: cpu-bytes-50g
+      decode.extraEnvVars:
+        - name: CPU_BYTES_TO_USE
+          value: "53687091200"
+    - name: cpu-bytes-100g
+      decode.extraEnvVars:
+        - name: CPU_BYTES_TO_USE
+          value: "107374182400"
+    - name: cpu-bytes-200g
+      decode.extraEnvVars:
+        - name: CPU_BYTES_TO_USE
+          value: "214748364800"
 
 # --- Treatments (consumed by step_04 render_profiles) ----------------
 #

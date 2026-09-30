@@ -24,14 +24,16 @@ scenario:
       # MODEL CONFIGURATION
       # =========================================================================
       model:
-        name: Qwen/Qwen3-32B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen3-32b
-        path: models/Qwen/Qwen3-32B
-        huggingfaceId: Qwen/Qwen3-32B
         size: 1Ti
-        maxModelLen: 16000
-        blockSize: 64
-        gpuMemoryUtilization: 0.95
+        # maxModelLen / blockSize / gpuMemoryUtilization are deliberately NOT
+        # set here: they are pure engine parameters, so they are stated in
+        # decode's launch command below and read back out for the capacity
+        # planner.
 
       # =========================================================================
       # STORAGE
@@ -53,21 +55,14 @@ scenario:
           daemonSetTimeout: 3600
 
       # =========================================================================
-      # VLLM COMMON CONFIGURATION
+      # ENGINE CONFIGURATION
       # =========================================================================
-      vllmCommon:
-        kvTransfer:
-          enabled: true
-          connector: NixlConnector
-          role: kv_both
-
-        flags:
-          enforceEager: true
-          disableLogRequests: true
-          disableUvicornAccessLog: true
-          allowLongMaxModelLen: "1"
-          serverDevMode: "1"
-
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the network facts only the
+        # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+        # library path. Engine commands never mention it.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
         volumes:
           - name: shared-config
             type: emptyDir
@@ -142,6 +137,38 @@ scenario:
       decode:
         replicas: 2
 
+        # The launch command, verbatim -- the same line you would run by hand.
+        # It reaches the container unchanged, so every flag here is read by vLLM
+        # and none of them by llm-d-benchmark, which reads only what decides
+        # Kubernetes objects: `--port` (container port, probes, the routing
+        # sidecar's upstream) and the capacity numbers the pre-deploy check
+        # needs.
+        #
+        # Decode binds 8200: the routing sidecar the chart injects on decode pods
+        # owns `engine.servicePort` (8000) and forwards here.
+        #
+        # `--kv-transfer-config` is written out here rather than assembled from a
+        # connector/role pair, so the JSON vLLM parses is the JSON in this file.
+        # A device without GPU-to-GPU transport has to stage through host
+        # memory -- add `, "kv_buffer_device":"cpu"` inside the JSON there
+        # (config/scenarios/examples/intel-xpu.yaml does).
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3-32B \
+            --host 0.0.0.0 \
+            --port 8200 \
+            --max-model-len 16000 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 1 \
+            --block-size 64 \
+            --gpu-memory-utilization 0.95 \
+            --dtype bfloat16 \
+            --enforce-eager \
+            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"}' \
+            --no-enable-log-requests \
+            --disable-uvicorn-access-log
+
         initContainers:
           - name: preprocess
             imageKey: benchmark
@@ -151,11 +178,6 @@ scenario:
               - name: shared-config
                 mountPath: /shared-config
 
-        parallelism:
-          tensor: 1
-          data: 1
-          dataLocal: 1
-          workers: 1
 
         resources:
           limits:
@@ -165,7 +187,21 @@ scenario:
             memory: 64Gi
             cpu: "16"
 
-        extraEnvVars: []
+        # vLLM reads these two from the environment rather than the command
+        # line, so they stay env vars. Their names are vLLM's own.
+        extraEnvVars:
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: "1"
+          - name: VLLM_SERVER_DEV_MODE
+            value: "1"
+          # NixlConnector publishes this address to its peer as where the KV blocks
+          # can be read from, and takes it from the environment rather than the
+          # launch line. vLLM defaults it to `localhost`, which no other pod can
+          # reach -- the same declaration the llm-d guides make.
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
 
         extraContainerConfig:
           ports:

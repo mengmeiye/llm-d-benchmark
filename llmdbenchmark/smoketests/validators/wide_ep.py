@@ -115,7 +115,7 @@ class WideEpValidator(BaseSmoketest):
             # Scenario-specific: RDMA network resource
             limits = resources.get("limits", {})
             has_rdma = any("rdma" in k or "roce" in k for k in limits)
-            network_resource = _nested_get(config, "vllmCommon", "networkResource")
+            network_resource = _nested_get(config, "engine", "networkResource")
             if network_resource and network_resource != "auto":
                 report.add(
                     CheckResult(

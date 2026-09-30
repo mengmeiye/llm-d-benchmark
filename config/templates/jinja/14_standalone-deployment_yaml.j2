@@ -7,7 +7,7 @@
    Useful for simple single-model deployments or testing.
 
    Volume handling:
-     Uses vllmCommon.volumes/volumeMounts as the dynamic base (shared with
+     Uses engine.volumes/volumeMounts as the dynamic base (shared with
      modelservice), plus a conditional model-cache PVC and any additional
      volumes defined in standalone.additionalVolumes/additionalVolumeMounts.
      This matches the original bash behavior where ALL volumes are injected
@@ -19,12 +19,35 @@
      feature.
    ============================================================================ #}
 
+{# Devices one replica is given. This is a Kubernetes fact, not an engine one:
+   the kubelet grants devices before the engine process exists, so it is said in
+   Kubernetes' own vocabulary and never inferred from a command line.
+
+     standalone.resources.limits.<accelerator resource>   written as Kubernetes
+       v (if unset)
+     standalone.accelerator.count                         shorthand, per role
+       v (if unset)
+     accelerator.count                                    shorthand, plan-wide
+       v (if unset)
+     standalone.parallelism.tensor x dataLocal            what the chart was given
+
+   A CPU scenario says `accelerator.count: 0`, which is also the switch that
+   drops the accelerator nodeAffinity below.
+
+   Mirrored by ``effective_accelerator_count`` in
+   llmdbenchmark/parser/cluster_resource_resolver.py. #}
+{% set standalone_accel_resource = (standalone.accelerator.resource if standalone.accelerator is defined and standalone.accelerator.resource is defined else accelerator.resource | default('')) %}
+{% set standalone_stated_devices = standalone.resources.limits[standalone_accel_resource] if (standalone_accel_resource and standalone.resources.limits is defined and standalone.resources.limits[standalone_accel_resource] is defined) else none %}
+{% set standalone_chart_gpus = (standalone.parallelism.tensor | int) * (standalone.parallelism.dataLocal | default(1, true) | int) %}
+{% set standalone_shorthand_gpus = (standalone.accelerator.count | int) if (standalone.accelerator is defined and standalone.accelerator.count is defined) else ((accelerator.count | int) if (accelerator is defined and accelerator.count is defined) else standalone_chart_gpus) %}
+{% set standalone_accel_count = (standalone_stated_devices | int) if standalone_stated_devices is not none else standalone_shorthand_gpus %}
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-standalone-{{ model_id_label }}
+  name: standalone-{{ model_id_label }}
   labels:
-    app: vllm-standalone-{{ model_id_label }}
+    app: standalone-{{ model_id_label }}
 {% if standalone.labels is defined %}
 {% for key, value in standalone.labels.items() %}
     {{ key }}: "{{ value }}"
@@ -41,11 +64,11 @@ spec:
   replicas: {{ standalone.replicas }}
   selector:
     matchLabels:
-      app: vllm-standalone-{{ model_id_label }}
+      app: standalone-{{ model_id_label }}
   template:
     metadata:
       labels:
-        app: vllm-standalone-{{ model_id_label }}
+        app: standalone-{{ model_id_label }}
         llm-d.ai/inferenceServing: "{{ labels.inferenceServing }}"
         llm-d.ai/model: {{ model_id_label }}
         llm-d.ai/role: {{ standalone.role }}
@@ -63,13 +86,13 @@ spec:
 
     spec:
       schedulerName: {{ standalone.schedulerName }}
-{% set pc = standalone.priorityClassName | default(vllmCommon.priorityClassName) %}
+{% set pc = standalone.priorityClassName | default(engine.priorityClassName) %}
 {% if pc and pc | lower != 'none' %}
       priorityClassName: {{ pc }}
 {% endif %}
-{% if vllmCommon.pullSecret is defined and vllmCommon.pullSecret %}
+{% if engine.pullSecret is defined and engine.pullSecret %}
       imagePullSecrets:
-      - name: {{ vllmCommon.pullSecret }}
+      - name: {{ engine.pullSecret }}
 {% endif %}
 {% if standalone.nodeSelector is defined and standalone.nodeSelector %}
       nodeSelector:
@@ -77,7 +100,7 @@ spec:
         {{ key }}: "{{ value }}"
 {% endfor %}
 {% endif %}
-{% if (standalone.parallelism.tensor | int) > 0
+{% if standalone_accel_count > 0
   and standalone.acceleratorType is defined
   and standalone.acceleratorType.labelKey is defined
   and standalone.acceleratorType.labelKey
@@ -153,7 +176,7 @@ spec:
 {% else %}
         env:
         - name: HOME
-          value: "{{ vllmCommon.containerHome }}"
+          value: "{{ engine.containerHome }}"
         # Workaround for https://github.com/vllm-project/vllm/issues/44548
         # (vLLM v0.20.0+ with torch 2.11). torch._inductor's cache_dir() calls
         # getpass.getuser() -> pwd.getpwuid(uid), which raises KeyError on
@@ -162,37 +185,17 @@ spec:
         - name: USER
           value: "llm-d"
         - name: HF_HOME
-          value: "{{ vllmCommon.hfHome }}"
-        - name: VLLM_CACHE_ROOT
-          value: "{{ vllmCommon.containerHome }}/vllm"
-        - name: VLLM_INFERENCE_PORT
-          value: "{{ standalone.vllm.servicePort | default(vllmCommon.inferencePort | default('8000')) }}"
-        - name: VLLM_METRICS_PORT
-          value: "{{ standalone.vllm.port | default(vllmCommon.vllmPort | default('8200')) }}"
-        - name: VLLM_BLOCK_SIZE
-          value: "{{ model.blockSize | default(vllmCommon.blockSize | default('16')) }}"
-        - name: VLLM_MAX_MODEL_LEN
-          value: "{{ model.maxModelLen | default(vllmCommon.maxModelLen | default('4096')) }}"
-        - name: VLLM_LOAD_FORMAT
-          value: "{{ vllmCommon.loadFormat | default('auto') }}"
-        - name: VLLM_ACCELERATOR_MEM_UTIL
-          value: "{{ model.gpuMemoryUtilization | default(vllmCommon.gpuMemoryUtilization | default('0.95')) }}"
-        - name: VLLM_MAX_NUM_SEQ
-          value: "{{ model.maxNumSeq | default(vllmCommon.maxNumSeq | default('256')) }}"
-        - name: VLLM_TENSOR_PARALLELISM
-          value: "{{ (standalone.parallelism.tensor if standalone.parallelism is defined and standalone.parallelism.tensor is defined else '1') }}"
-        - name: VLLM_MAX_NUM_BATCHED_TOKENS
-          value: "{{ model.maxNumBatchedTokens | default(vllmCommon.maxNumBatchedTokens | default('')) }}"
-        - name: VLLM_NIXL_SIDE_CHANNEL_PORT
-          value: "{{ vllmCommon.nixlSideChannelPort | default('5557') }}"
-        - name: UCX_TLS
-          value: "{{ vllmCommon.ucxTls | default('sm,cuda_ipc,cuda_copy,tcp') }}"
-        - name: UCX_SOCKADDR_TLS_PRIORITY
-          value: "{{ vllmCommon.ucxSockaddrTlsPriority | default('tcp') }}"
-{% if vllmCommon.ucxNetDevices is defined and vllmCommon.ucxNetDevices %}
-        - name: UCX_NET_DEVICES
-          value: "{{ vllmCommon.ucxNetDevices }}"
-{% endif %}
+          value: "{{ engine.hfHome }}"
+        # The ports the engine binds and the Service exposes. Emitted so an
+        # engine command can write `--port $ENGINE_PORT` rather than repeat the
+        # number, and so a preprocess script can find both. No engine
+        # parameters are emitted -- the command states them itself. Engine-
+        # specific environment (NIXL side channel, UCX, SGLang disaggregation,
+        # ...) belongs in standalone.extraEnvVars.
+        - name: ENGINE_PORT
+          value: "{{ standalone.engine.port | default(engine.servicePort) }}"
+        - name: SERVICE_PORT
+          value: "{{ engine.servicePort }}"
         - name: DP_SIZE
           value: "{{ (standalone.parallelism.data if standalone.parallelism is defined and standalone.parallelism.data is defined else '1') }}"
         - name: TP_SIZE
@@ -237,45 +240,34 @@ spec:
 {% endfor %}
 {% endif %}
       containers:
-{# ===== MAIN VLLM CONTAINER ===== #}
-      - name: vllm-standalone-{{ model_id_label }}
-        image: {{ standalone.image.repository }}:{{ standalone.image.tag }}
-        imagePullPolicy: {{ standalone.image.pullPolicy }}
-{% set standalone_model_command = standalone.vllm.modelCommand | default('custom') %}
+{# ===== THE SERVING CONTAINER =====
+   Named from `standalone.engine.containerName`, which resolves to llm-d's
+   engine-neutral `modelserver`. A pod running SGLang should not carry a
+   container called vllm-*, and `kubectl logs -c modelserver` then reads the
+   same whichever engine the command launches. #}
+      - name: {{ standalone.engine.containerName | default('modelserver', true) }}
+        image: {{ standalone.engine.image.repository }}:{{ standalone.engine.image.tag }}
+        imagePullPolicy: {{ standalone.engine.image.pullPolicy }}
+{% set standalone_model_command = standalone.engine.modelCommand | default('custom') %}
 {% if standalone_model_command == 'custom' %}
         command:
-        - {{ vllmCommon.shell }}
+        - {{ engine.shell }}
         - "-c"
         args:
         - |
-{{ build_standalone_vllm_command() | indent(10, first=True) }}
-{% elif standalone.vllm.args is defined and standalone.vllm.args %}
+{{ render_engine_command('standalone') | indent(10, first=True) }}
+{% elif standalone.engine.args is defined and standalone.engine.args %}
 {# imageDefault: no `command:` -- the image entrypoint runs. Required for
    distroless server images that ship no shell to exec `<shell> -c`. #}
         args:
-{{ standalone.vllm.args | toyaml | indent(8, true) }}
+{{ standalone.engine.args | toyaml | indent(8, true) }}
 {% endif %}
         env:
-        - name: LLMDBENCH_VLLM_STANDALONE_MODEL
-          value: "{{ model.name }}"
-        - name: LLMDBENCH_VLLM_COMMON_VLLM_LOAD_FORMAT
-          value: "{{ standalone.vllm.loadFormat }}"
-        - name: LLMDBENCH_VLLM_COMMON_MODEL_LOADER_EXTRA_CONFIG
-          value: "{{ standalone.vllm.modelLoaderExtraConfig }}"
-        - name: LLMDBENCH_VLLM_COMMON_AFFINITY
-{% if (standalone.parallelism.tensor | int) > 0
-  and standalone.acceleratorType is defined
-  and standalone.acceleratorType.labelKey is defined
-  and standalone.acceleratorType.labelKey
-  and standalone.acceleratorType.labelValue is defined
-  and standalone.acceleratorType.labelValue %}
-          value: "nvidia.com/gpu:{{ standalone.acceleratorType.labelKey }}:{{ standalone.acceleratorType.labelValue }}"
-{% elif affinity is defined and affinity.enabled and affinity.nodeSelector is defined and affinity.nodeSelector %}
-{% set ns_items = affinity.nodeSelector.items() | list %}
-          value: "{{ ns_items[0][0] }}:{{ ns_items[0][1] }}"
-{% else %}
-          value: ""
-{% endif %}
+{# No LLMDBENCH_VLLM_* here. The model is already MODEL_NAME/MODEL_PATH below,
+   and the accelerator used to be published as a "nvidia.com/gpu:<key>:<value>"
+   string for one consumer -- the optional vLLM loader preprocess -- which only
+   wanted the GPU's name and now reads it from nvidia-smi, which reports it
+   anyway. Nothing engine-specific is emitted: the command states it. #}
 {% if huggingface.enabled and huggingface.secretName is defined and huggingface.secretName %}
         - name: HUGGING_FACE_HUB_TOKEN
           valueFrom:
@@ -284,7 +276,7 @@ spec:
               key: {{ huggingface.tokenKey }}
 {% endif %}
         - name: HOME
-          value: "{{ vllmCommon.containerHome }}"
+          value: "{{ engine.containerHome }}"
         # Workaround for https://github.com/vllm-project/vllm/issues/44548:
         # vLLM v0.20.0+ (torch 2.11) calls getpass.getuser() at import time,
         # which raises KeyError under OpenShift's restricted-v2 SCC (random
@@ -294,55 +286,30 @@ spec:
         - name: USER
           value: "llm-d"
         - name: HF_HOME
-          value: "{{ vllmCommon.hfHome }}"
+          value: "{{ engine.hfHome }}"
         - name: MODEL_NAME
           value: "{{ model.name }}"
         - name: MODEL_PATH
           value: "{{ model.path }}"
-        - name: MODEL_SERVE_REF
-          value: "{{ model_serve_ref('standalone') }}"
-        - name: VLLM_WORKER_MULTIPROC_METHOD
-          value: "{{ standalone.vllm.workerMultiprocMethod }}"
-        - name: VLLM_LOGGING_LEVEL
-          value: "{{ standalone.vllm.loggingLevel }}"
-        - name: VLLM_CACHE_ROOT
-          value: "{{ standalone.vllm.cacheRoot | default(vllmCommon.containerHome ~ '/vllm') }}"
-        - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
-          value: "{{ vllmCommon.flags.allowLongMaxModelLen }}"
-        - name: VLLM_SERVER_DEV_MODE
-          value: "{{ vllmCommon.flags.serverDevMode }}"
-        - name: VLLM_LOAD_FORMAT
-          value: "{{ standalone.vllm.loadFormat }}"
-        - name: VLLM_INFERENCE_PORT
-          value: "{{ standalone.vllm.servicePort | default(vllmCommon.inferencePort) }}"
-        - name: VLLM_METRICS_PORT
-          value: "{{ standalone.vllm.port | default(vllmCommon.vllmPort) }}"
-        - name: VLLM_BLOCK_SIZE
-          value: "{{ model.blockSize | default(vllmCommon.blockSize | default('16')) }}"
-        - name: VLLM_MAX_MODEL_LEN
-          value: "{{ model.maxModelLen | default(vllmCommon.maxModelLen | default('4096')) }}"
-        - name: VLLM_ACCELERATOR_MEM_UTIL
-          value: "{{ model.gpuMemoryUtilization | default(vllmCommon.gpuMemoryUtilization | default('0.95')) }}"
-        - name: VLLM_MAX_NUM_SEQ
-          value: "{{ model.maxNumSeq | default(vllmCommon.maxNumSeq | default('256')) }}"
-        - name: VLLM_TENSOR_PARALLELISM
-          value: "{{ standalone.parallelism.tensor | default('1') }}"
-        - name: VLLM_MAX_NUM_BATCHED_TOKENS
-          value: "{{ model.maxNumBatchedTokens | default(vllmCommon.maxNumBatchedTokens | default('')) }}"
-        - name: VLLM_NIXL_SIDE_CHANNEL_HOST
-          valueFrom:
-            fieldRef:
-              fieldPath: status.podIP
-        - name: VLLM_NIXL_SIDE_CHANNEL_PORT
-          value: "{{ vllmCommon.nixlSideChannelPort | default('5557') }}"
-        - name: UCX_TLS
-          value: "{{ vllmCommon.ucxTls | default('sm,cuda_ipc,cuda_copy,tcp') }}"
-        - name: UCX_SOCKADDR_TLS_PRIORITY
-          value: "{{ vllmCommon.ucxSockaddrTlsPriority | default('tcp') }}"
-{% if vllmCommon.ucxNetDevices is defined and vllmCommon.ucxNetDevices %}
-        - name: UCX_NET_DEVICES
-          value: "{{ vllmCommon.ucxNetDevices }}"
+{% if standalone.mountModelVolume and model.hubCacheSubdir %}
+        {# The staged Hugging Face hub cache on the mounted model volume. With
+           this set, the plain model id in the command resolves against the bytes
+           the download job already wrote instead of being re-pulled from the Hub
+           at pod start. The modelservice chart does the same thing for its own
+           pods; standalone has no chart, so it is set here. #}
+        - name: HF_HUB_CACHE
+          value: "{{ standalone.modelMountPath }}/{{ model.hubCacheSubdir }}"
 {% endif %}
+        # The ports the engine binds and the Service exposes. Emitted so an
+        # engine command can write `--port $ENGINE_PORT` rather than repeat the
+        # number, and so a preprocess script can find both. No engine
+        # parameters are emitted -- the command states them itself. Engine-
+        # specific environment (NIXL side channel, UCX, SGLang disaggregation,
+        # ...) belongs in standalone.extraEnvVars.
+        - name: ENGINE_PORT
+          value: "{{ standalone.engine.port | default(engine.servicePort) }}"
+        - name: SERVICE_PORT
+          value: "{{ engine.servicePort }}"
         - name: POD_IP
           valueFrom:
             fieldRef:
@@ -379,52 +346,47 @@ spec:
 {% endfor %}
 {% endif %}
         ports:
-        - containerPort: {{ standalone.vllm.port }}
+        - containerPort: {{ standalone.engine.port }}
           name: metrics
         startupProbe:
           httpGet:
-            path: {{ standalone.probes.startup.path | default('/health') }}
-            port: {{ standalone.vllm.port }}
+            path: {{ standalone.probes.startup.path | default(standalone.engine.healthPath | default('/health', true), true) }}
+            port: {{ standalone.engine.port }}
           failureThreshold: {{ standalone.probes.startup.failureThreshold }}
           initialDelaySeconds: {{ standalone.probes.startup.initialDelaySeconds }}
           periodSeconds: {{ standalone.probes.startup.periodSeconds }}
           timeoutSeconds: {{ standalone.probes.startup.timeoutSeconds }}
         livenessProbe:
           tcpSocket:
-            port: {{ standalone.vllm.port }}
+            port: {{ standalone.engine.port }}
           failureThreshold: {{ standalone.probes.liveness.failureThreshold }}
           periodSeconds: {{ standalone.probes.liveness.periodSeconds }}
+{% if standalone.probes.liveness.timeoutSeconds %}
+          timeoutSeconds: {{ standalone.probes.liveness.timeoutSeconds }}
+{% endif %}
         readinessProbe:
           httpGet:
-            path: {{ standalone.probes.readiness.path | default('/health') }}
-            port: {{ standalone.vllm.port }}
+            path: {{ standalone.probes.readiness.path | default(standalone.engine.healthPath | default('/health', true), true) }}
+            port: {{ standalone.engine.port }}
           failureThreshold: {{ standalone.probes.readiness.failureThreshold }}
           periodSeconds: {{ standalone.probes.readiness.periodSeconds }}
+{% if standalone.probes.readiness.timeoutSeconds %}
+          timeoutSeconds: {{ standalone.probes.readiness.timeoutSeconds }}
+{% endif %}
         resources:
           limits:
             memory: {{ standalone.resources.limits.memory }}
             cpu: "{{ standalone.resources.limits.cpu }}"
-{% set standalone_accel_resource = (standalone.accelerator.resource if standalone.accelerator is defined and standalone.accelerator.resource is defined else accelerator.resource | default('')) %}
-{# Use standalone.accelerator.count if set, then top-level accelerator.count,
-   then fall back to parallelism.tensor. CPU scenarios set accelerator.count: 0
-   to suppress GPU requests even when TP > 0. #}
-{% if standalone.accelerator is defined and standalone.accelerator.count is defined -%}
-{% set standalone_accel_count = standalone.accelerator.count | int -%}
-{% elif accelerator is defined and accelerator.count is defined -%}
-{% set standalone_accel_count = accelerator.count | int -%}
-{% else -%}
-{% set standalone_accel_count = standalone.parallelism.tensor | int -%}
-{% endif -%}
 {% if standalone_accel_resource and standalone_accel_count > 0 %}
             {{ standalone_accel_resource }}: "{{ standalone_accel_count }}"
 {% endif %}
-{% set eph_storage = standalone.ephemeralStorage | default(vllmCommon.ephemeralStorage) %}
-{% set eph_resource = vllmCommon.ephemeralStorageResource %}
+{% set eph_storage = standalone.ephemeralStorage | default(engine.ephemeralStorage) %}
+{% set eph_resource = engine.ephemeralStorageResource %}
 {% if eph_storage and eph_resource %}
             {{ eph_resource }}: "{{ eph_storage }}"
 {% endif %}
-{% set net_resource = standalone.networkResource | default(vllmCommon.networkResource) %}
-{% set net_nr = standalone.networkNr | default(vllmCommon.networkNr) %}
+{% set net_resource = standalone.networkResource | default(engine.networkResource) %}
+{% set net_nr = standalone.networkNr | default(engine.networkNr) %}
 {% if net_resource and net_nr %}
             {{ net_resource }}: "{{ net_nr }}"
 {% endif %}
@@ -441,8 +403,8 @@ spec:
             {{ net_resource }}: "{{ net_nr }}"
 {% endif %}
         volumeMounts:
-{# Dynamic volume mounts from vllmCommon (shared base — preprocesses, dshm, etc.) #}
-{% for mount in vllmCommon.volumeMounts %}
+{# Dynamic volume mounts from engine (shared base — preprocesses, dshm, etc.) #}
+{% for mount in engine.volumeMounts %}
         - name: {{ mount.name }}
           mountPath: {{ mount.mountPath }}
 {% if mount.subPath is defined %}
@@ -478,11 +440,11 @@ spec:
 {# Mirrors bash LLMDBENCH_VLLM_STANDALONE_LAUNCHER feature.                   #}
 {# Shares same volumes, env vars, and resources as the main container.         #}
 {% if standalone.launcher is defined and standalone.launcher.enabled %}
-      - name: vllm-launcher-{{ model_id_label }}
-        image: {{ standalone.launcher.image.repository | default(standalone.image.repository) }}:{{ standalone.launcher.image.tag | default(standalone.image.tag) }}
+      - name: launcher-{{ model_id_label }}
+        image: {{ standalone.launcher.image.repository | default(standalone.engine.image.repository) }}:{{ standalone.launcher.image.tag | default(standalone.engine.image.tag) }}
         imagePullPolicy: {{ standalone.launcher.imagePullPolicy }}
         command:
-        - {{ vllmCommon.shell }}
+        - {{ engine.shell }}
         - "-c"
         args:
         - |
@@ -495,26 +457,11 @@ spec:
           uvicorn launcher:app --host 0.0.0.0 --log-level info --port {{ standalone.launcher.port }}
 {% endif %}
         env:
-        - name: LLMDBENCH_VLLM_STANDALONE_MODEL
-          value: "{{ model.name }}"
-        - name: LLMDBENCH_VLLM_COMMON_VLLM_LOAD_FORMAT
-          value: "{{ standalone.vllm.loadFormat }}"
-        - name: LLMDBENCH_VLLM_COMMON_MODEL_LOADER_EXTRA_CONFIG
-          value: "{{ standalone.vllm.modelLoaderExtraConfig }}"
-        - name: LLMDBENCH_VLLM_COMMON_AFFINITY
-{% if (standalone.parallelism.tensor | int) > 0
-  and standalone.acceleratorType is defined
-  and standalone.acceleratorType.labelKey is defined
-  and standalone.acceleratorType.labelKey
-  and standalone.acceleratorType.labelValue is defined
-  and standalone.acceleratorType.labelValue %}
-          value: "nvidia.com/gpu:{{ standalone.acceleratorType.labelKey }}:{{ standalone.acceleratorType.labelValue }}"
-{% elif affinity is defined and affinity.enabled and affinity.nodeSelector is defined and affinity.nodeSelector %}
-{% set ns_items = affinity.nodeSelector.items() | list %}
-          value: "{{ ns_items[0][0] }}:{{ ns_items[0][1] }}"
-{% else %}
-          value: ""
-{% endif %}
+{# No LLMDBENCH_VLLM_* here. The model is already MODEL_NAME/MODEL_PATH below,
+   and the accelerator used to be published as a "nvidia.com/gpu:<key>:<value>"
+   string for one consumer -- the optional vLLM loader preprocess -- which only
+   wanted the GPU's name and now reads it from nvidia-smi, which reports it
+   anyway. Nothing engine-specific is emitted: the command states it. #}
 {% if huggingface.enabled and huggingface.secretName is defined and huggingface.secretName %}
         - name: HUGGING_FACE_HUB_TOKEN
           valueFrom:
@@ -523,51 +470,28 @@ spec:
               key: {{ huggingface.tokenKey }}
 {% endif %}
         - name: HOME
-          value: "{{ vllmCommon.containerHome }}"
+          value: "{{ engine.containerHome }}"
         - name: HF_HOME
-          value: "{{ vllmCommon.hfHome }}"
-        - name: VLLM_WORKER_MULTIPROC_METHOD
-          value: "{{ standalone.vllm.workerMultiprocMethod }}"
-        - name: VLLM_LOGGING_LEVEL
-          value: "{{ standalone.vllm.loggingLevel }}"
-        - name: VLLM_CACHE_ROOT
-          value: "{{ standalone.vllm.cacheRoot | default(vllmCommon.containerHome ~ '/vllm') }}"
-        - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
-          value: "{{ vllmCommon.flags.allowLongMaxModelLen }}"
-        - name: VLLM_SERVER_DEV_MODE
-          value: "{{ vllmCommon.flags.serverDevMode }}"
-        - name: VLLM_LOAD_FORMAT
-          value: "{{ standalone.vllm.loadFormat }}"
-        - name: VLLM_INFERENCE_PORT
-          value: "{{ standalone.vllm.servicePort | default(vllmCommon.inferencePort) }}"
-        - name: VLLM_METRICS_PORT
-          value: "{{ standalone.vllm.port | default(vllmCommon.vllmPort) }}"
-        - name: VLLM_BLOCK_SIZE
-          value: "{{ model.blockSize | default(vllmCommon.blockSize | default('16')) }}"
-        - name: VLLM_MAX_MODEL_LEN
-          value: "{{ model.maxModelLen | default(vllmCommon.maxModelLen | default('4096')) }}"
-        - name: VLLM_ACCELERATOR_MEM_UTIL
-          value: "{{ model.gpuMemoryUtilization | default(vllmCommon.gpuMemoryUtilization | default('0.95')) }}"
-        - name: VLLM_MAX_NUM_SEQ
-          value: "{{ model.maxNumSeq | default(vllmCommon.maxNumSeq | default('256')) }}"
-        - name: VLLM_TENSOR_PARALLELISM
-          value: "{{ standalone.parallelism.tensor | default('1') }}"
-        - name: VLLM_MAX_NUM_BATCHED_TOKENS
-          value: "{{ model.maxNumBatchedTokens | default(vllmCommon.maxNumBatchedTokens | default('')) }}"
-        - name: VLLM_NIXL_SIDE_CHANNEL_HOST
-          valueFrom:
-            fieldRef:
-              fieldPath: status.podIP
-        - name: VLLM_NIXL_SIDE_CHANNEL_PORT
-          value: "{{ vllmCommon.nixlSideChannelPort | default('5557') }}"
-        - name: UCX_TLS
-          value: "{{ vllmCommon.ucxTls | default('sm,cuda_ipc,cuda_copy,tcp') }}"
-        - name: UCX_SOCKADDR_TLS_PRIORITY
-          value: "{{ vllmCommon.ucxSockaddrTlsPriority | default('tcp') }}"
-{% if vllmCommon.ucxNetDevices is defined and vllmCommon.ucxNetDevices %}
-        - name: UCX_NET_DEVICES
-          value: "{{ vllmCommon.ucxNetDevices }}"
+          value: "{{ engine.hfHome }}"
+{% if standalone.mountModelVolume and model.hubCacheSubdir %}
+        {# The staged Hugging Face hub cache on the mounted model volume. With
+           this set, the plain model id in the command resolves against the bytes
+           the download job already wrote instead of being re-pulled from the Hub
+           at pod start. The modelservice chart does the same thing for its own
+           pods; standalone has no chart, so it is set here. #}
+        - name: HF_HUB_CACHE
+          value: "{{ standalone.modelMountPath }}/{{ model.hubCacheSubdir }}"
 {% endif %}
+        # The ports the engine binds and the Service exposes. Emitted so an
+        # engine command can write `--port $ENGINE_PORT` rather than repeat the
+        # number, and so a preprocess script can find both. No engine
+        # parameters are emitted -- the command states them itself. Engine-
+        # specific environment (NIXL side channel, UCX, SGLang disaggregation,
+        # ...) belongs in standalone.extraEnvVars.
+        - name: ENGINE_PORT
+          value: "{{ standalone.engine.port | default(engine.servicePort) }}"
+        - name: SERVICE_PORT
+          value: "{{ engine.servicePort }}"
         - name: POD_IP
           valueFrom:
             fieldRef:
@@ -605,11 +529,11 @@ spec:
 {% endif %}
         ports:
         - containerPort: {{ standalone.launcher.port }}
-{# Launcher probes: startup/readiness use main vllm port, liveness uses launcher port #}
+{# Launcher probes: startup/readiness use the engine port, liveness the launcher port #}
         startupProbe:
           httpGet:
-            path: {{ standalone.probes.startup.path | default('/health') }}
-            port: {{ standalone.vllm.port }}
+            path: {{ standalone.probes.startup.path | default(standalone.engine.healthPath | default('/health', true), true) }}
+            port: {{ standalone.engine.port }}
           failureThreshold: {{ standalone.probes.startup.failureThreshold }}
           initialDelaySeconds: {{ standalone.probes.startup.initialDelaySeconds }}
           periodSeconds: 30
@@ -619,18 +543,24 @@ spec:
             port: {{ standalone.launcher.port }}
           failureThreshold: 3
           periodSeconds: 10
+{% if standalone.probes.liveness.timeoutSeconds %}
+          timeoutSeconds: {{ standalone.probes.liveness.timeoutSeconds }}
+{% endif %}
         readinessProbe:
           httpGet:
-            path: {{ standalone.probes.readiness.path | default('/health') }}
-            port: {{ standalone.vllm.port }}
+            path: {{ standalone.probes.readiness.path | default(standalone.engine.healthPath | default('/health', true), true) }}
+            port: {{ standalone.engine.port }}
           failureThreshold: 3
           periodSeconds: 5
+{% if standalone.probes.readiness.timeoutSeconds %}
+          timeoutSeconds: {{ standalone.probes.readiness.timeoutSeconds }}
+{% endif %}
         resources:
           limits:
             memory: {{ standalone.resources.limits.memory }}
             cpu: "{{ standalone.resources.limits.cpu }}"
-{% if standalone_accel_resource and (standalone.parallelism.tensor | int) > 0 %}
-            {{ standalone_accel_resource }}: "{{ standalone.parallelism.tensor }}"
+{% if standalone_accel_resource and standalone_accel_count > 0 %}
+            {{ standalone_accel_resource }}: "{{ standalone_accel_count }}"
 {% endif %}
 {% if eph_storage and eph_resource %}
             {{ eph_resource }}: "{{ eph_storage }}"
@@ -641,8 +571,8 @@ spec:
           requests:
             memory: {{ standalone.resources.requests.memory }}
             cpu: "{{ standalone.resources.requests.cpu }}"
-{% if standalone_accel_resource and (standalone.parallelism.tensor | int) > 0 %}
-            {{ standalone_accel_resource }}: "{{ standalone.parallelism.tensor }}"
+{% if standalone_accel_resource and standalone_accel_count > 0 %}
+            {{ standalone_accel_resource }}: "{{ standalone_accel_count }}"
 {% endif %}
 {% if eph_storage and eph_resource %}
             {{ eph_resource }}: "{{ eph_storage }}"
@@ -652,7 +582,7 @@ spec:
 {% endif %}
 {# Launcher shares same volume mounts as main container #}
         volumeMounts:
-{% for mount in vllmCommon.volumeMounts %}
+{% for mount in engine.volumeMounts %}
         - name: {{ mount.name }}
           mountPath: {{ mount.mountPath }}
 {% if mount.subPath is defined %}
@@ -682,8 +612,8 @@ spec:
 {% endif %}
 {# ===== VOLUMES (pod-level, shared by all containers) ===== #}
       volumes:
-{# Dynamic volumes from vllmCommon (shared base — dshm, preprocesses, etc.) #}
-{% for volume in vllmCommon.volumes %}
+{# Dynamic volumes from engine (shared base — dshm, preprocesses, etc.) #}
+{% for volume in engine.volumes %}
       - name: {{ volume.name }}
 {% if volume.type == 'configMap' %}
         configMap:

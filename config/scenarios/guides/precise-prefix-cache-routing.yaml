@@ -1,6 +1,5 @@
 # ============================================================================
 # PRECISE PREFIX CACHE AWARE ROUTING WELL LIT PATH
-# Converted from bash environment variables to YAML format
 # Based on https://github.com/llm-d/llm-d/tree/main/guides/precise-prefix-cache-routing/README.md
 #
 # Notes:
@@ -36,14 +35,17 @@ scenario:
       # Model Configuration
       # -------------------------------------------------------------------------
       model:
-        name: Qwen/Qwen3-32B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen3-32b
-        path: models/Qwen/Qwen3-32B
-        huggingfaceId: Qwen/Qwen3-32B
         size: 1Ti
-        maxModelLen: 16000
-        blockSize: 64
-        gpuMemoryUtilization: 0.95
+        # maxModelLen, gpuMemoryUtilization and blockSize are NOT set here:
+        # they are engine parameters, stated once in decode's command below and
+        # read back off it -- `--block-size` included, which is how the EPP
+        # token processor below gets the same number without a second
+        # declaration.
 
       # -------------------------------------------------------------------------
       # Storage Configuration
@@ -56,10 +58,21 @@ scenario:
           # storageClassName: shared-vast
           # storageClassName: ocs-storagecluster-cephfs
 
-      vllmCommon:
-#        ucxTls: "rc,sm,cuda_ipc,cuda_copy,tcp"
-#        ucxTls: "cuda,rc,sm"
-#        ucxNetDevices: "eth0"   # pin KV transfer when secondary NICs are attached
+      # Pod infrastructure, not engine parameters: RDMA device limits, volumes,
+      # the Service port. Engine parameters live in decode.engine.command.
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the network facts only the
+        # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+        # library path. Engine commands never mention it.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
+        # The UCX settings for the NIXL data plane, if this stack ever needs
+        # them, are container environment variables and belong in the role's
+        # extraEnvVars -- UCX reads them from the environment, not the command:
+        #   - name: UCX_TLS
+        #     value: "rc,sm,cuda_ipc,cuda_copy,tcp"
+        #   - name: UCX_NET_DEVICES
+        #     value: "eth0"   # pin KV transfer when secondary NICs are attached
         networkResource: "auto"   # auto-detect from cluster nodes
         networkNr: "1"            # number of network devices
 
@@ -83,9 +96,9 @@ scenario:
 # for the NIXL KV-transfer data plane, and it chooses independently of
 # VLLM_NIXL_SIDE_CHANNEL_HOST (which is pinned to the pod IP). If a rail cannot
 # carry that traffic the handshake fails (NIXL_ERR_REMOTE_DISCONNECT /
-# NIXL_ERR_NOT_FOUND) and requests hang instead of erroring, so pin
-# vllmCommon.ucxNetDevices when enabling this -- "eth0" keeps KV transfer on the
-# pod network.
+# NIXL_ERR_NOT_FOUND) and requests hang instead of erroring, so set
+# UCX_NET_DEVICES in the role's extraEnvVars when enabling this -- "eth0" keeps
+# KV transfer on the pod network.
 # Alternatively, --set 'annotations.prefill.pod."k8s.v1.cni.cncf.io/networks"'=multi-nic-compute,'annotations.decode.pod."k8s.v1.cni.cncf.io/networks"'=multi-nic-compute
       annotations:
         prefill:
@@ -104,7 +117,7 @@ scenario:
     # defined ENTIRELY by the guide's own manifests:
     #
     #   * EVERYTHING ELSE in this scenario is IGNORED -- model, modelservice,
-    #     standalone, decode/prefill, vllmCommon, storage, harness model, etc.
+    #     standalone, decode/prefill, engine, storage, harness model, etc.
     #   * `-m/--models` and all other CLI/scenario tuning are ignored.
     #   * DoE `experiment` SETUP sweeps do NOT alter a kustomize deploy
     #     (only run/workload treatments still apply).
@@ -204,7 +217,7 @@ scenario:
               plugins:
                 - type: token-producer
                   parameters:
-                    modelName: ${model.name}
+                    modelName: Qwen/Qwen3-32B
                     vllm:
                       # Standalone render Service (../render/), not a loopback sidecar.
                       # `precise-prefix-cache-routing-` namePrefix + Service name `render`.
@@ -213,7 +226,14 @@ scenario:
                 - type: precise-prefix-cache-producer # `precise-prefix-cache-scorer` is deprecated
                   parameters:
                     tokenProcessorConfig:
-                      blockSize: 64
+                      # Must equal the engine's page size, because this
+                      # reconstructs block hashes on the engine's boundaries.
+                      # `${model.blockSize}` is read straight off decode's
+                      # `--block-size` below, so there is one number and it is
+                      # the engine's own. (`blockSizeTokens`, not `blockSize`:
+                      # upstream deprecated the old key, and a key the token
+                      # processor does not read falls back to 16 silently.)
+                      blockSizeTokens: ${model.blockSize}
                     speculativeIndexing: true
                     indexerConfig:
                       kvBlockIndexConfig:
@@ -326,24 +346,46 @@ scenario:
       # -------------------------------------------------------------------------
       decode:
         replicas: 2
-        vllm:
-          customCommand: |
-            ${accelerator.runtimePreamble}
-            . /shared-config/llmdbench_env.sh
-            vllm serve $MODEL_SERVE_REF \
+        # Devices per replica -- a Kubernetes fact, not a reading of the
+        # command. The kubelet grants accelerators before the engine process
+        # exists, so the count is stated here in Kubernetes' vocabulary and the
+        # chart turns it into the pod's device request. It has to agree with the
+        # width the command gives the engine (`--tensor-parallel-size 2` below),
+        # or the engine starves at startup. To request a count the parallelism
+        # widths do not describe, set `resources.limits.<accelerator resource>`.
+        parallelism:
+          tensor: 2
+
+        engine:
+          # The launch command, verbatim -- paste in a line that already works
+          # and it runs unchanged. The only flag llm-d-benchmark reads is
+          # `--port`, which the container port, the probes and the Service's
+          # target all have to name before the process exists.
+          #
+          # This guide sets `routing.proxy.enabled: false`, so there is NO
+          # routing sidecar on the decode pod and nothing bridges 8000 to a
+          # higher port -- the engine binds `engine.servicePort` (8000) itself.
+          # Turn the sidecar back on and this has to become 8200.
+          #
+          # $(POD_IP), $(MODEL_NAME) and $(ENGINE_PORT) are container env vars
+          # expanded by Kubernetes; $(KV_EVENTS_ENDPOINT) comes from
+          # extraEnvVars below. `--block-size` is written out like every other
+          # flag; the EPP token processor above reads it back as
+          # `${model.blockSize}`, so the two cannot disagree and the KV index
+          # scores the blocks the engine actually writes.
+          command: |
+            vllm serve Qwen/Qwen3-32B \
             --host 0.0.0.0 \
-            --served-model-name $MODEL_NAME \
-            --port $VLLM_INFERENCE_PORT \
-            --block-size $VLLM_BLOCK_SIZE \
-            --max-model-len $VLLM_MAX_MODEL_LEN \
-            --max-num-seq $VLLM_MAX_NUM_SEQ \
-            --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-            --tensor-parallel-size $TP_SIZE \
-            --gpu-memory-utilization $VLLM_ACCELERATOR_MEM_UTIL \
-            ${accelerator.dtypeArgs} \
-            ${accelerator.executionArgs} \
+            --port 8000 \
+            --block-size 64 \
+            --max-model-len 16000 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 256 \
+            --tensor-parallel-size 2 \
+            --gpu-memory-utilization 0.95 \
+            --dtype bfloat16 \
             --prefix-caching-hash-algo sha256_cbor \
-            --kv-events-config '{"enable_kv_cache_events":true, "publisher":"zmq", "endpoint":"$(KV_EVENTS_ENDPOINT)", "topic":"kv@$(POD_IP):$(VLLM_INFERENCE_PORT)@$(MODEL_NAME)"}' \
+            --kv-events-config '{"enable_kv_cache_events":true, "publisher":"zmq", "endpoint":"$(KV_EVENTS_ENDPOINT)", "topic":"kv@$(POD_IP):$(ENGINE_PORT)@$(MODEL_NAME)"}' \
             --disable-uvicorn-access-log \
             --disable-access-log-for-endpoints=/health,/metrics,/v1/models
 
@@ -356,11 +398,6 @@ scenario:
               - name: shared-config
                 mountPath: /shared-config
 
-        parallelism:
-          tensor: 2
-          data: 1
-          dataLocal: 1
-          workers: 1
 
         # Resource configuration
         resources:
@@ -379,13 +416,18 @@ scenario:
 
         # -----------------------------------------------------------------------
         # Extra Container Configuration
-        # Corresponds to: LLMDBENCH_VLLM_COMMON_EXTRA_CONTAINER_CONFIG
         # -----------------------------------------------------------------------
         extraContainerConfig:
           ports:
             - containerPort: 5557  # NIXL side channel port
               protocol: TCP
-            - containerPort: 8200  # Metrics port
+            # The engine's own port, which is also where it serves /metrics.
+            # This guide disables the routing sidecar, so the engine binds
+            # `engine.servicePort` (8000) rather than the 8200 the other guides
+            # use -- see the `command` below. A stale 8200 here would leave the
+            # port the process actually listens on undeclared, and point a
+            # metrics scrape at a port no one holds.
+            - containerPort: 8000
               name: metrics
               protocol: TCP
           securityContext:
@@ -401,13 +443,11 @@ scenario:
 
         # -----------------------------------------------------------------------
         # Additional Volume Mounts
-        # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_VOLUME_MOUNTS
         # -----------------------------------------------------------------------
         additionalVolumeMounts: []
 
         # -----------------------------------------------------------------------
         # Additional Volumes
-        # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_VOLUMES
         # -----------------------------------------------------------------------
         additionalVolumes: []
 

@@ -1,5 +1,4 @@
 # OpenShift Container Platform CI/CD Scenario
-# Based on scenarios/cicd/ocp_fb.sh
 #
 # CI/CD scenario for OpenShift clusters.
 # Uses Qwen/Qwen3-8B so the standalone baseline and FMA nightlies exercise a
@@ -16,10 +15,11 @@ scenario:
         labelValue: NVIDIA-H100-80GB-HBM3
       # Model
       model:
-        name: Qwen/Qwen3-8B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact the launch command states; a short name is a
+        # choice, so it stays here -- derived, it is a
+        # `{first8}-{sha8}-{last8}` hash.
         shortName: qwen-qwen3-8b
-        path: models/Qwen/Qwen3-8B
-        huggingfaceId: Qwen/Qwen3-8B
         # Keeping it similar to FMA launcher's vLLM (24_fma-deployment.yaml.j2)
         maxModelLen: 40960
         blockSize: 16
@@ -36,15 +36,8 @@ scenario:
       #   workloadPvc:
       #     storageClassName: ocs-storagecluster-cephfs
 
-      vllmCommon:
+      engine:
         priorityClassName: nightly-gpu-critical
-        flags:
-          # Disable enforce_eager so the standalone vLLM runs torch.compile +
-          # CUDA-graph capture -- otherwise Dynamo / Torch Compile / Memory
-          # Profiling metrics are all 0 (those phases are skipped under eager).
-          enforceEager: false
-          # FMA runs with prefix caching off (--no-enable-prefix-caching)
-          noPrefixCaching: true
 
       images:
         benchmark:
@@ -61,7 +54,11 @@ scenario:
       prefill:
         enabled: true
         replicas: 1
-
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3-8B \
+            --port 8000 \
+            --no-enable-prefix-caching
 
       decode:
         enabled: true
@@ -70,6 +67,20 @@ scenario:
           labelKey: nvidia.com/gpu.product
           # labelValue: NVIDIA-L40S
           labelValue: NVIDIA-H100-80GB-HBM3
+        # The command reaches the container verbatim -- paste the line you
+        # would run by hand. Two things this CI job needs from it:
+        #   * --port 8200, because the routing sidecar owns the Service port
+        #     (8000) on a decode pod and forwards here.
+        #   * --no-enable-prefix-caching, so a nightly comparison is not
+        #     measuring a warm prefix cache. torch.compile and CUDA-graph
+        #     capture are deliberately left on (no --enforce-eager): without
+        #     them the Dynamo / Torch Compile / Memory Profiling metrics this
+        #     job collects are all zero, since those phases never run.
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3-8B \
+            --port 8200 \
+            --no-enable-prefix-caching
 
     fma:
       enabled: false

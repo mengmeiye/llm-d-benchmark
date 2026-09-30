@@ -45,7 +45,7 @@
 #     merged, so the nesting is purely an authoring convenience - it
 #     documents that these keys only take effect on the modelservice
 #     deploy path. Sections that are NOT method-specific (accelerator,
-#     model, vllmCommon, storage, harness, workDir) stay at the root.
+#     model, engine, storage, harness, workDir) stay at the root.
 #
 # What changed relative to the single-model guide, and why:
 #
@@ -77,7 +77,7 @@
 #
 # Everything else - the EPP scheduling profile, the Envoy sidecar args and
 # resources, the InferencePool connection-pool limits, the HTTPRoute
-# timeouts, the decode `customCommand`, the preprocess init container - is
+# timeouts, the decode engine command, the preprocess init container - is
 # carried over from the guide verbatim.
 #
 # Stack naming convention:
@@ -150,10 +150,18 @@ shared:
   #     # cloud.google.com/gke-accelerator: nvidia-h100-80gb  # GKE
 
   # --------------------------------------------------------------------------
-  # VLLM COMMON - same across pools. Individual settings can be overridden
-  # per-stack below if a specific model needs different tuning.
+  # ENGINE - the pod shape shared by every stack: volumes, shared memory, the
+  # shell the launch line is exec'd in. No engine flags live here; the launch
+  # line itself is stated once in `modelservice.decode.engine.command` below,
+  # and anything that has to differ per stack is read out of that stack's own
+  # config with `${...}`.
   # --------------------------------------------------------------------------
-  vllmCommon:
+  engine:
+    # Sourced before the engine command, in the same shell: the `preprocess`
+    # initContainer below writes this file with the network facts only the
+    # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+    # library path. Engine commands never mention it.
+    preprocessScript: ". /shared-config/llmdbench_env.sh"
     #      priorityClassName: nightly-gpu-critical
     volumes:
       - name: shared-config
@@ -356,25 +364,44 @@ shared:
           runAsUser: 0
         imagePullPolicy: Always
 
-      vllm:
-        # `${accelerator.*}` fragments and `$MODEL_PATH` / `$MODEL_NAME` /
-        # `$VLLM_*` are resolved per stack (the former at render time against
-        # each stack's merged config, the latter in each pod's environment),
-        # so this one command string is correct for every model.
-        customCommand: |
-          ${accelerator.runtimePreamble}
-          vllm serve $MODEL_SERVE_REF \
+      # The launch line, verbatim: what this says is what the engine gets, and
+      # it is also where llm-d-benchmark reads the handful of facts it needs
+      # (the `--port` for the Service and the probes, the context length and
+      # memory fraction for the pre-deploy capacity check).
+      #
+      # ONE command string serves EVERY stack here, and the stacks serve
+      # different models -- so this is the one scenario shape where the serve
+      # target cannot be written out. `${model.name}` is resolved at render time
+      # against each stack's own merged config, so it picks up that stack's
+      # `model.name` from the `scenario:` blocks below. It is the serve target
+      # and the advertised id both: under the default `pvc+hf` those are the same
+      # string, so there is no second flag to keep in step.
+      #
+      # Every FLAG is written out, values and all, exactly as in a single-model
+      # scenario -- and read back the same way, so `blockSize`,
+      # `maxModelLen` and `gpuMemoryUtilization` are stated once, here.
+      #
+      # A stack that needs a different value for one of these does not restate
+      # the command: it appends `engine.extraArgs`, and the later flag wins (see
+      # the commented-out example in the llama stack below). Nothing parses those
+      # words -- they are concatenated onto the end of this line -- so a
+      # per-stack difference costs two tokens instead of sixteen duplicated
+      # lines, and no flag becomes something llm-d-benchmark has to know about.
+      #
+      # --port 8200: the routing sidecar owns the Service port (8000) on a
+      # decode pod and forwards here.
+      engine:
+        command: |
+          vllm serve ${model.name} \
           --host 0.0.0.0 \
-          --served-model-name $MODEL_NAME \
-          --port $VLLM_METRICS_PORT \
-          ${accelerator.blockSizeArgs} \
-          --max-model-len $VLLM_MAX_MODEL_LEN \
-          --max-num-seq $VLLM_MAX_NUM_SEQ \
-          --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
-          --tensor-parallel-size $TP_SIZE \
-          ${accelerator.memoryUtilizationArgs} \
-          ${accelerator.dtypeArgs} \
-          ${accelerator.executionArgs} \
+          --port 8200 \
+          --block-size 64 \
+          --max-model-len 8192 \
+          --max-num-seqs 256 \
+          --max-num-batched-tokens 256 \
+          --tensor-parallel-size 1 \
+          --gpu-memory-utilization 0.95 \
+          --dtype bfloat16 \
           --no-enable-log-requests \
           --disable-uvicorn-access-log \
           --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
@@ -397,9 +424,10 @@ shared:
 
       # ----------------------------------------------------------------------
       # Extra Environment Variables
-      # No custom env vars for this scenario -- uses default ENVVARS_TO_YAML
-      # mechanism. Auto-populated vars (UCX_TLS, VLLM_NIXL_*, etc.) are set
-      # by the preprocess script at pod runtime.
+      # No environment variables for this scenario. Nothing is auto-populated:
+      # whatever the engine -- or a library beneath it (UCX_*, NCCL_*,
+      # VLLM_NIXL_*, ...) -- needs must be listed here, the same way the
+      # engine command lists its own flags.
       # ----------------------------------------------------------------------
       extraEnvVars: []
 
@@ -429,9 +457,8 @@ scenario:
       path: models/Qwen/Qwen3-0.6B
       huggingfaceId: Qwen/Qwen3-0.6B
       size: 8Gi
-      maxModelLen: 8192
-      blockSize: 64
-      gpuMemoryUtilization: 0.95
+      # No maxModelLen / blockSize / gpuMemoryUtilization: all three are written
+      # out in the shared command and read back off it, like everywhere else.
 
     modelservice:
       decode:
@@ -456,9 +483,6 @@ scenario:
       path: models/unsloth/Meta-Llama-3.1-8B
       huggingfaceId: unsloth/Meta-Llama-3.1-8B
       size: 32Gi
-      maxModelLen: 8192
-      blockSize: 64
-      gpuMemoryUtilization: 0.95
 
     modelservice:
       decode:
@@ -470,3 +494,19 @@ scenario:
           requests:
             memory: 48Gi
             cpu: "16"
+
+        # This stack runs the shared command as written. If it needed different
+        # engine flags -- a shorter context because an 8B model at this memory
+        # limit cannot hold 8192, or two GPUs instead of one -- it would say so
+        # here rather than restating the whole launch line:
+        #
+        #   engine:
+        #     extraArgs: ["--max-model-len", "4096", "--tensor-parallel-size", "2"]
+        #
+        # The words are appended to the end of the shared command, unexamined.
+        # A flag that appears twice is settled by the engine's own argument
+        # parser, which keeps the last one -- and the reader that pulls
+        # `--max-model-len` back out for the capacity check reads the same way,
+        # so it would see 4096 too. Widths the llm-d chart needs for multi-node
+        # layout are still chart values: a real tensor-parallel-size change also
+        # sets `parallelism.tensor` and the accelerator count below.

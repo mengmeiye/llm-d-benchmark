@@ -83,7 +83,10 @@ class TestDefaultsValidation:
         assert config.model.name == "facebook/opt-125m"
         assert config.decode.enabled is True
         assert config.prefill.enabled is False
-        assert config.vllmCommon.inferencePort == 8000
+        assert config.engine.servicePort == 8000
+        # llm-d's engine-neutral container name: no manifest, probe or log
+        # lookup should have to know which engine is running.
+        assert config.engine.containerName == "modelserver"
 
 
 # ---------------------------------------------------------------------------
@@ -147,11 +150,11 @@ class TestTypoDetection:
             f"Expected 'naem' typo to be caught, got: {warnings}"
         )
 
-    def test_vllm_common_typo_caught(self, defaults_copy: dict) -> None:
-        defaults_copy["vllmCommon"]["inferenceProt"] = 8000
+    def test_engine_common_typo_caught(self, defaults_copy: dict) -> None:
+        defaults_copy["engine"]["serviceProt"] = 8000
         warnings = validate_config(defaults_copy)
-        assert any("inferenceProt" in w for w in warnings), (
-            f"Expected 'inferenceProt' typo to be caught, got: {warnings}"
+        assert any("serviceProt" in w for w in warnings), (
+            f"Expected 'serviceProt' typo to be caught, got: {warnings}"
         )
 
     def test_harness_typo_caught(self, defaults_copy: dict) -> None:
@@ -161,11 +164,14 @@ class TestTypoDetection:
             f"Expected 'waitTimout' typo to be caught, got: {warnings}"
         )
 
-    def test_prefill_vllm_typo_caught(self, defaults_copy: dict) -> None:
-        defaults_copy["prefill"]["vllm"]["addtionalFlags"] = []
+    def test_prefill_engine_typo_caught(self, defaults_copy: dict) -> None:
+        # The engine section is the one place a scenario now writes, so a typo
+        # here is the most likely one there is -- and a silently ignored
+        # `comand` would stand the role up on the image's entrypoint instead.
+        defaults_copy["prefill"]["engine"]["comand"] = "vllm serve m"
         warnings = validate_config(defaults_copy)
-        assert any("addtionalFlags" in w for w in warnings), (
-            f"Expected 'addtionalFlags' typo to be caught, got: {warnings}"
+        assert any("comand" in w for w in warnings), (
+            f"Expected 'comand' typo to be caught, got: {warnings}"
         )
 
 
@@ -250,10 +256,18 @@ class TestAllowSections:
             f"extraContainerConfig should accept arbitrary keys: {warnings}"
         )
 
-    def test_vllm_flags_accept_new_flags(self, defaults_copy: dict) -> None:
-        defaults_copy["vllmCommon"]["flags"]["someNewVllmFlag"] = True
+    def test_engine_command_accepts_unknown_flags(self, defaults_copy: dict) -> None:
+        """A flag llm-d-benchmark has never heard of must still validate.
+
+        This is the whole point of the verbatim-command contract: engine flags
+        live in the command string, which the schema does not interpret, so a
+        new vLLM/SGLang release needs no change here.
+        """
+        defaults_copy["decode"]["engine"]["command"] = (
+            "vllm serve ${model.name} --port 8200 --some-flag-from-next-release 7"
+        )
         warnings = validate_config(defaults_copy)
-        assert warnings == [], f"vllmCommon.flags should accept new flags: {warnings}"
+        assert warnings == [], f"engine.command should not be parsed: {warnings}"
 
     def test_root_accepts_unknown_top_level(self, defaults_copy: dict) -> None:
         defaults_copy["someNewTopLevelKey"] = {"foo": "bar"}
@@ -271,24 +285,31 @@ class TestAllowSections:
 class TestScenarioOnlyFields:
     """Fields that exist in scenarios but not defaults must be accepted."""
 
-    def test_vllm_common_tensor_parallelism_rejected(self, defaults_copy: dict) -> None:
-        defaults_copy["vllmCommon"]["tensorParallelism"] = 4
+    def test_engine_tensor_parallelism_rejected(self, defaults_copy: dict) -> None:
+        # Parallelism is stated once, in the command (`--tensor-parallel-size`
+        # / `--tp-size` / ...), and read back out by resolve_engines. A second
+        # place to say it could disagree with the command, so it is not a key.
+        defaults_copy["engine"]["tensorParallelism"] = 4
         warnings = validate_config(defaults_copy)
         assert any("tensorParallelism" in w for w in warnings), (
-            "vllmCommon.tensorParallelism should be rejected (use decode/prefill parallelism.tensor)"
+            "engine.tensorParallelism should be rejected (state it in the command)"
         )
 
-    def test_vllm_common_max_model_len_rejected(self, defaults_copy: dict) -> None:
-        defaults_copy["vllmCommon"]["maxModelLen"] = 8192
+    def test_engine_max_model_len_rejected(self, defaults_copy: dict) -> None:
+        # Same reasoning: context length is a pure engine parameter and belongs
+        # only in the command.
+        defaults_copy["engine"]["maxModelLen"] = 8192
         warnings = validate_config(defaults_copy)
         assert any("maxModelLen" in w for w in warnings), (
-            "vllmCommon.maxModelLen should be rejected (use model.maxModelLen)"
+            "engine.maxModelLen should be rejected (state it in the command)"
         )
 
-    def test_vllm_common_shm_memory(self, defaults_copy: dict) -> None:
-        defaults_copy["vllmCommon"]["shmMemory"] = "16Gi"
+    def test_engine_shm_memory(self, defaults_copy: dict) -> None:
+        # Not an engine parameter: it sizes the /dev/shm volume on the pod, so
+        # it stays a key.
+        defaults_copy["engine"]["shmMemory"] = "16Gi"
         warnings = validate_config(defaults_copy)
-        assert warnings == [], f"vllmCommon.shmMemory should be accepted: {warnings}"
+        assert warnings == [], f"engine.shmMemory should be accepted: {warnings}"
 
     def test_harness_experiment_profile(self, defaults_copy: dict) -> None:
         defaults_copy["harness"]["experimentProfile"] = "sanity_random.yaml"
@@ -307,21 +328,30 @@ class TestScenarioOnlyFields:
         warnings = validate_config(defaults_copy)
         assert warnings == [], f"decode.accelerator should be accepted: {warnings}"
 
-    def test_decode_vllm_model_command(self, defaults_copy: dict) -> None:
-        defaults_copy["decode"]["vllm"]["modelCommand"] = "serve"
+    def test_decode_engine_model_command(self, defaults_copy: dict) -> None:
+        defaults_copy["decode"]["engine"]["modelCommand"] = "imageDefault"
         warnings = validate_config(defaults_copy)
         assert warnings == [], (
-            f"decode.vllm.modelCommand should be accepted: {warnings}"
+            f"decode.engine.modelCommand should be accepted: {warnings}"
         )
 
-    def test_model_max_num_seq(self, defaults_copy: dict) -> None:
+    def test_a_batch_width_has_no_key(self, defaults_copy: dict) -> None:
+        """Only the capacity pair is modeled under ``model``.
+
+        ``--max-num-seqs`` is read by the engine and by nobody else, so there is
+        no ``model.maxNumSeq`` for it to be restated in -- writing one is a typo,
+        not a setting.
+        """
         defaults_copy["model"]["maxNumSeq"] = 128
         warnings = validate_config(defaults_copy)
-        assert warnings == [], f"model.maxNumSeq should be accepted: {warnings}"
-
-    def test_flags_no_prefix_caching(self, defaults_copy: dict) -> None:
-        defaults_copy["vllmCommon"]["flags"]["noPrefixCaching"] = True
-        warnings = validate_config(defaults_copy)
-        assert warnings == [], (
-            f"vllmCommon.flags.noPrefixCaching should be accepted: {warnings}"
+        assert any("maxNumSeq" in w for w in warnings), (
+            f"Expected model.maxNumSeq to be rejected, got: {warnings}"
         )
+
+    def test_no_prefix_caching_lives_in_the_command(self, defaults_copy: dict) -> None:
+        """An engine flag is command text, not a config key."""
+        defaults_copy["decode"]["engine"]["command"] = (
+            "vllm serve ${model.name} --port 8200 --no-enable-prefix-caching"
+        )
+        warnings = validate_config(defaults_copy)
+        assert warnings == [], f"Expected no warnings, got: {warnings}"

@@ -46,25 +46,19 @@ scenario:
       # MODEL CONFIGURATION
       # =========================================================================
       model:
-        name: Qwen/Qwen3-32B
+        # This stack's Kubernetes name prefix (Deployments, Services, PVCs).
+        # The model id is a fact decode's launch command states; a short name is
+        # a choice, so it stays here.
         shortName: qwen-qwen3-32b
-        path: models/Qwen/Qwen3-32B
-        huggingfaceId: Qwen/Qwen3-32B
         size: 1Ti
-        maxModelLen: 16000
-        blockSize: 64
-        gpuMemoryUtilization: 0.95
-
-        # The prefill chunk. Unset, _macros.j2 falls back to a hardcoded '256',
-        # which turns an 8192-token prompt into 32 chunked prefill passes and
-        # makes the prefill-heavy shape measure chunking overhead instead of
-        # prefill capacity. MUST equal the calibration's CHUNK_SIZE or the
-        # measured peakPrefillThroughput is silently wrong.
-        # NOTE: this key is only valid on `model` (ModelConfig in
-        # parser/config_schema.py). _macros.j2 also probes
-        # `vllmCommon.maxNumBatchedTokens`, but STRICT_CONFIG rejects that path,
-        # so the model-level key is the only usable one.
-        maxNumBatchedTokens: 8192
+        # maxModelLen / blockSize / gpuMemoryUtilization are deliberately NOT set
+        # here: they are pure engine parameters, so the launch command states them
+        # and they are read back out for the pre-deploy capacity check and the
+        # router's prefix-cache index.
+        #
+        # The prefill chunk (`--max-num-batched-tokens`) is in that command too,
+        # and this guide is the one place its value carries a second meaning: it
+        # MUST equal the calibration's CHUNK_SIZE. See the command itself.
 
       # =========================================================================
       # STORAGE
@@ -85,20 +79,18 @@ scenario:
           daemonSetTimeout: 3600
 
       # =========================================================================
-      # VLLM COMMON CONFIGURATION
+      # ENGINE CONFIGURATION
+      #
+      # Nothing engine-specific lives here: the volumes the engine container
+      # needs, and one line sourced ahead of the launch command. Every vLLM flag
+      # this guide wants is in decode's command below.
       # =========================================================================
-      vllmCommon:
-        kvTransfer:
-          enabled: true
-          connector: NixlConnector
-          role: kv_both
-
-        flags:
-          enforceEager: true
-          disableLogRequests: true
-          disableUvicornAccessLog: true
-          allowLongMaxModelLen: "1"
-          serverDevMode: "1"
+      engine:
+        # Sourced before the engine command, in the same shell: the `preprocess`
+        # initContainer below writes this file with the network facts only the
+        # node can tell us (RDMA/IB device names, GID index) plus the CUDA
+        # library path. Engine commands never mention it.
+        preprocessScript: ". /shared-config/llmdbench_env.sh"
 
         volumes:
           - name: shared-config
@@ -190,6 +182,46 @@ scenario:
         # starting point, not a ceiling (maxReplicaCount: 4 is the ceiling).
         replicas: 1
 
+        # The launch command, verbatim -- the same line you would run by hand.
+        # It reaches the container unchanged, so every flag here is read by vLLM
+        # and none of them by llm-d-benchmark, which reads only what decides
+        # Kubernetes objects: `--port` (container port, probes, the routing
+        # sidecar's upstream) and the capacity numbers the pre-deploy check needs.
+        #
+        # Decode binds 8200: the routing sidecar the chart injects on decode pods
+        # owns `engine.servicePort` (8000) and forwards here.
+        #
+        # `--max-num-batched-tokens` is the flag this guide cares about most. It
+        # is the prefill chunk, and it MUST equal the CHUNK_SIZE the calibration
+        # measures V_P with (`make calibrate-peak-prefill CHUNK_SIZE=...`, 8192 by
+        # default) -- a chunk larger than the batch budget is prefilled in several
+        # passes, so the measured TTFT is not one prefill pass and the resulting
+        # peakPrefillThroughput is silently wrong. The Makefile target reads this
+        # very flag back off the running pods and refuses to run when the two
+        # disagree, so the number below is the single source of truth: change it
+        # here and re-calibrate.
+        #
+        # P and D are co-located in this one Deployment, so `--kv-transfer-config`
+        # names NixlConnector with `kv_both`. It is written out here rather than
+        # assembled from a connector/role pair, so the JSON vLLM parses is the
+        # JSON in this file.
+        engine:
+          command: |
+            vllm serve Qwen/Qwen3-32B \
+            --host 0.0.0.0 \
+            --port 8200 \
+            --max-model-len 16000 \
+            --max-num-seqs 256 \
+            --max-num-batched-tokens 8192 \
+            --tensor-parallel-size 2 \
+            --block-size 64 \
+            --gpu-memory-utilization 0.95 \
+            --dtype bfloat16 \
+            --enforce-eager \
+            --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"}' \
+            --no-enable-log-requests \
+            --disable-uvicorn-access-log
+
         initContainers:
           - name: preprocess
             imageKey: benchmark
@@ -213,7 +245,21 @@ scenario:
             memory: 64Gi
             cpu: "16"
 
-        extraEnvVars: []
+        # vLLM reads these from the environment rather than the command line, so
+        # they stay env vars. Their names are vLLM's own.
+        extraEnvVars:
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: "1"
+          - name: VLLM_SERVER_DEV_MODE
+            value: "1"
+          # NixlConnector publishes this address to its peer as where the KV
+          # blocks can be read from, and takes it from the environment rather
+          # than the launch line. vLLM defaults it to `localhost`, which no other
+          # pod can reach -- the same declaration the llm-d guides make.
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
 
         extraContainerConfig:
           ports:

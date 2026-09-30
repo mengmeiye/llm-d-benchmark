@@ -8,22 +8,11 @@ accelerator:
   env:
     intel-i915: []
     intel-xe: []
-  # B60 does not need a runtime compatibility preamble. Keep the empty value
-  # so accelerator-neutral guide commands can use the same substitution point
-  # as the CUDA profile.
-  runtimePreamble: ""
-  dtypeArgs: "--dtype bfloat16"
-  executionArgs: "--enforce-eager --disable-sliding-window"
-  # The XPU FMHA kernel in the v0.7.0 image selects its supported page size;
-  # passing the canonical CUDA value (16) fails on first inference with
-  # "Unsupported page size for fmha". The former working XPU guide likewise
-  # kept model.blockSize as metadata but omitted --block-size from vLLM.
-  blockSizeArgs: ""
-  # The Kind/B60 validation path may run two decode processes or a compact
-  # 2-decode/1-prefill P/D topology on one physical device. Leave headroom for
-  # three shared-device processes on the 22.7 GiB XPU.
-  memoryUtilizationArgs: "--gpu-memory-utilization 0.35"
-  kvBufferDeviceJson: ', "kv_buffer_device":"cpu"'
+  # This profile carries no command fragments. XPU needs a materially different
+  # command (--enforce-eager, no --block-size at all, lower memory utilization,
+  # host-memory KV staging), and a substitution point per difference made every
+  # guide command unreadable for the 95% of readers on CUDA. The XPU command
+  # lives, spelled out, in config/scenarios/examples/intel-xpu.yaml.
 
 images:
   vllm:
@@ -32,18 +21,28 @@ images:
     pullPolicy: IfNotPresent
     sourceRepo: https://github.com/llm-d/llm-d
 
-# Portable default for the Intel XPU guide path. Keep this in the shared
-# accelerator profile so every canonical guide selects the same fitting model
-# without per-guide copies. An explicit CLI/setup model override still wins.
+# An accelerator profile does not choose a model, for the same reason it no
+# longer carries command fragments: the launch command names the model, so a
+# model named here would either be ignored (the usual case) or quietly disagree
+# with the command the engine is handed. A scenario meant for this hardware
+# names a fitting model in its own command --
+# config/scenarios/examples/intel-xpu.yaml serves Qwen/Qwen3-0.6B, which is what
+# a single B60 holds. What stays here is what the machine decides.
 model:
-  name: Qwen/Qwen3-0.6B
-  shortName: qwen-qwen3-06b
-  path: models/Qwen/Qwen3-0.6B
-  huggingfaceId: Qwen/Qwen3-0.6B
+  # Sized for that scenario's model. A larger one needs a larger modelPvc, which
+  # is a scenario-level `storage.modelPvc.size`.
   size: 50Gi
-  maxModelLen: 16000
+  # Context length and memory fraction are deliberately absent: an engine
+  # command always states both, and the capacity planner reads them back from
+  # it. Stating them here as well would let the planner do its KV-cache
+  # arithmetic against numbers the engine never received.
+  #
+  # `blockSize` is the exception the planner cannot cover. The XPU FMHA kernel
+  # picks its own page size, so an XPU command carries no `--block-size` at all
+  # (config/scenarios/examples/intel-xpu.yaml) and there is nothing to read
+  # back -- but the precise prefix-cache router's token processor must be told
+  # one, and it must be the one the kernel uses.
   blockSize: 16
-  gpuMemoryUtilization: 0.9
 
 decode:
   parallelism:
@@ -72,9 +71,18 @@ prefill:
       capabilities:
         add: []
 
-# Intel XPU NIXL transport uses host memory/TCP rather than CUDA IPC or GDR.
-vllmCommon:
-  ucxTls: tcp
+# Intel XPU NIXL transport uses host memory/TCP rather than CUDA IPC or GDR,
+# which means UCX_TLS=tcp. That is not set here: it is a container environment
+# variable (the preprocess reads it from the environment, see
+# set_llmdbench_environment.py), and its home is the role's `extraEnvVars`.
+# An accelerator profile cannot contribute one entry to that list -- lists are
+# replaced, not merged, so an override here would drop whatever env vars the
+# guide itself set. A P/D guide meant to run on XPU states it per role:
+#
+#   decode:
+#     extraEnvVars:
+#       - name: UCX_TLS
+#         value: tcp
 
 # The compact single-node XPU validation environment has 20 CPUs. The precise
 # prefix-cache guide otherwise requests 8 CPUs per EPP replica before model

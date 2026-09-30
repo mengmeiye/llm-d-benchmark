@@ -103,7 +103,7 @@ scenario:
     common:
       model: { name: Qwen/Qwen3-8B }
       storage: { modelPvc: { size: 200Gi } }
-      vllmCommon: { inferencePort: 8000 }
+      engine: { servicePort: 8000 }
     standalone: { enabled: false }
     modelservice:
       enabled: true
@@ -171,8 +171,9 @@ Modeled sections:
 | Model | Scope |
 |-------|-------|
 | `ModelConfig` | Model name, path, HuggingFace ID, size, maxModelLen, gpuMemoryUtilization |
-| `DecodeConfig` / `PrefillConfig` | Deployment config (replicas, autoscaling, parallelism, resources, probes, vllm, monitoring) |
-| `VllmCommonConfig` | Shared vLLM config (ports, KV transfer, KV events, flags, volumes) |
+| `DecodeConfig` / `PrefillConfig` | Per-role deployment config (replicas, autoscaling, parallelism, resources, probes, engine, monitoring) |
+| `EngineConfig` | A role's engine: `command`, `args`, `image`, `port`, preprocess hooks |
+| `EngineCommonConfig` | Engine settings shared by every role (servicePort, shell, volumes, HOME) |
 | `HarnessConfig` | Harness name, profile, executable, resources, timeout |
 | `ParallelismConfig` | data, dataLocal, tensor, workers parallelism settings |
 
@@ -188,7 +189,7 @@ During plan rendering, the following resolvers execute in order on the merged va
 6. **Model resolution** -- Apply CLI `--models` override.
 7. **Model ID label resolution** (`_resolve_model_id_label`) -- Compute `model_id_label` from the model name using the hashed format `{first8}-{sha256_8}-{last8}`. This label is used in all templates for Kubernetes resource naming.
 8. **Per-stack identity resolution** (`_resolve_per_stack_identity`) -- Multi-stack scenarios (N >= 2) only. Auto-suffix shipped-default resource names (`storage.modelPvc.name`, `downloadJob.name`, `router.monitoring.secretName`) with `-{model_id_label}` so each stack gets unique names and Helm releases / PVCs don't collide in a shared namespace. Explicit overrides are preserved. See `_STACK_SCOPED_DEFAULTS` for the full list.
-9. **Custom command conflict warning** -- Warns when CLI `--models` won't propagate into hardcoded `customCommand` values.
+9. **Engine command conflict warning** (`_warn_custom_command_conflicts`) -- Warns when CLI `--models` won't propagate, because a role's `engine.command` names a model literally instead of writing it as `${model.name}`.
 10. **Deploy method resolution** -- Apply CLI `--methods` override (`standalone` or `modelservice`). Only one may be active.
 11. **Monitoring resolution** -- Apply CLI `--monitoring` flag. Enables PodMonitor and metrics scraping.
 12. **HuggingFace token auto-detection** -- Detect HF token from `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` env vars when the configured token is a sentinel value (`REPLACE_TOKEN` or empty).
@@ -210,7 +211,7 @@ Image tag resolution order: the registry's `/v2/<repo>/tags/list` then podman `s
 
 Chart version resolution order: `helm search repo`, then for repo URLs: OCI uses `helm show chart`, traditional repos temporarily add/search/remove.
 
-Resolved fields: `images.*.tag`, `standalone.image.tag`, `wva.image.tag`, `chartVersions.*`, `gateway.version` (from istio version), and init container images with `:auto` suffix across decode/prefill/standalone.
+Resolved fields: `images.*.tag`, `<role>.engine.image.tag` (decode/prefill/standalone/nok8s per-role server image overrides), `wva.image.tag`, `chartVersions.*`, `gateway.version` (from istio version), and init container images with `:auto` suffix across decode/prefill/standalone.
 
 ## Cluster Resource Resolver (`cluster_resource_resolver.py`)
 
@@ -229,12 +230,12 @@ Resolved fields:
 | Config Path | Resolution |
 |-------------|------------|
 | `accelerator.resource` | First detected GPU resource key from node capacities (nvidia.com/gpu, amd.com/gpu, habana.ai/gaudi, etc.) |
-| `vllmCommon.networkResource` | First detected RDMA/IB resource (rdma/rdma_shared_device_a, etc.). Cleared if none found (templates skip network section). |
-| `vllmCommon.networkNr` | Set to `"1"` when network resource found, `""` otherwise |
+| `engine.networkResource` | First detected RDMA/IB resource (rdma/rdma_shared_device_a, etc.). Cleared if none found (templates skip network section). |
+| `engine.networkNr` | Set to `"1"` when network resource found, `""` otherwise |
 | `affinity.nodeSelector` | Built from GPU product labels (e.g. `{"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"}`) |
 | `*.acceleratorType.labelValue` | GPU product label key and value for decode/prefill/standalone |
 
-After resolution, `_propagate_network_to_methods()` copies `vllmCommon` network settings to per-method sections (decode, prefill, standalone) when their values are `"auto"` or empty.
+After resolution, `_propagate_network_to_methods()` copies the plan-wide `engine` network settings to per-method sections (decode, prefill, standalone) when their values are `"auto"` or empty.
 
 In dry-run mode, unresolved fields produce warnings instead of errors.
 

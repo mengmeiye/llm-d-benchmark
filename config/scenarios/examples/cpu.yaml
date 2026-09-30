@@ -1,6 +1,4 @@
 # CPU Example Scenario for LLM-D Deployment
-# Migrated from bash environment variables to YAML format
-# Based on scenarios/examples/cpu.sh
 #
 # This scenario deploys a model on CPU-only nodes without GPU accelerators.
 # Uses the vLLM CPU release image with large shared memory and CPU allocation.
@@ -24,7 +22,6 @@ scenario:
     common :
       # -------------------------------------------------------------------------
       # Accelerator Configuration -- no GPUs
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_ACCELERATOR_NR=0
       # -------------------------------------------------------------------------
       accelerator:
         count: 0
@@ -35,7 +32,6 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Affinity / Node Selection
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_AFFINITY=kubernetes.io/os:linux
       # By default, affinity is disabled and pods schedule on any available node.
       # Options:
       #   1. Leave commented out -- no node selection constraint
@@ -50,7 +46,6 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Model Configuration
-      # Corresponds to: LLMDBENCH_DEPLOY_MODEL_LIST (commented -- user selects)
       # -------------------------------------------------------------------------
       # -------------------------------------------------------------------------
       # Model Configuration
@@ -59,16 +54,15 @@ scenario:
       #   meta-llama/Llama-3.1-70B-Instruct, deepseek-ai/DeepSeek-R1-0528
       # -------------------------------------------------------------------------
       model:
-        name: facebook/opt-125m
-        shortName: facebook-opt-125m
-        path: models/facebook/opt-125m
-        huggingfaceId: facebook/opt-125m
+        # 0 means "do not pass --gpu-memory-utilization": there is no device
+        # memory to reserve a fraction of on a CPU-only node. The capacity
+        # planner reads it, the engine never sees it.
         gpuMemoryUtilization: 0
-        maxModelLen: 1024
+        # Context length is stated once, in `decode.engine.command` below -- the
+        # planner reads it back off the command.
 
       # -------------------------------------------------------------------------
       # PVC Configuration
-      # Corresponds to: LLMDBENCH_VLLM_COMMON_PVC_STORAGE_CLASS (left for auto-detect)
       # -------------------------------------------------------------------------
       # Uncomment to override storage class:
       # storage:
@@ -81,33 +75,27 @@ scenario:
       #     size: 1Ti
       # -------------------------------------------------------------------------
 
+      # The CPU build of the same vLLM release `images.vllm` pins for GPUs --
+      # the tag is asserted equal to `_anchors.vllm-openai_version` by
+      # tests/test_image_pin_sync.py, so only the repository differs.
+      # (vLLM's older CPU repo, public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo,
+      # stopped publishing after v0.9.2 and cannot serve this pin.)
       images:
-        vllmOpenai:
-          repository: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo
-          tag: v0.30.0
         vllm:
-          repository: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo
+          repository: docker.io/vllm/vllm-openai-cpu
           tag: v0.30.0
 
       # -------------------------------------------------------------------------
-      # vLLM Common Configuration
-      # Shared settings for both decode and prefill pods.
-      # When no customCommand is set on decode/prefill, the vLLM serve command
-      # is auto-generated from these fields:
-      #   - model.maxModelLen, model.blockSize maps to --max-model-len, --block-size
-      #   - model.gpuMemoryUtilization maps to --gpu-memory-utilization
-      #   - decode/prefill.parallelism.tensor maps to --tensor-parallel-size
-      #   - vllmCommon.flags.* maps to --enforce-eager, --no-enable-log-requests, etc.
-      #   - vllmCommon.kvTransfer.* maps to --kv-transfer-config (if enabled)
-      #   - vllmCommon.kvEvents.* maps to --kv-events-config (if enabled)
-      #   - decode/prefill.vllm.additionalFlags maps to appended as extra CLI args
-      # When decode.vllm.customCommand or prefill.vllm.customCommand IS set, it replaces the auto-generated
-      # command entirely. Only --kv-transfer-config and --kv-events-config are
-      # still appended from vllmCommon if enabled. All other vllmCommon.flags
-      # are ignored -- the custom command must include its own flags.
+      # Engine Configuration -- the pod shape shared by every role.
+      # No engine flags here: each role states its own launch line in
+      # `<role>.engine.command`, in the engine's own spelling, and that line
+      # reaches the container verbatim. What belongs here is what
+      # llm-d-benchmark builds around whatever engine runs: the shell it is
+      # exec'd in, shared memory, the preprocess step, volumes and mounts.
       # -------------------------------------------------------------------------
-      vllmCommon:
-        # Shell used in the vLLM container `command:` field. Defaults to /bin/bash.
+      engine:
+        # Shell used in the model-server container `command:` field.
+        # Defaults to /bin/bash.
         # shell: /bin/sh
 
         shmMemory: 16Gi
@@ -140,22 +128,9 @@ scenario:
             mountPath: /etc/kubeconfig
             readOnly: true
 
-        # These flags control the auto-generated vllm serve command.
-        # Flags not listed here inherit from defaults.yaml (e.g. allowLongMaxModelLen, serverDevMode).
-        # To use a fully custom command instead, set decode.vllm.customCommand.
-        flags:
-          enforceEager: false          # old cpu.sh did not use --enforce-eager
-          disableLogRequests: true     # modelservice only -- upstream vllm-openai (v0.9+) dropped --no-enable-log-requests
-          disableUvicornAccessLog: true  # --disable-uvicorn-access-log
-          noPrefixCaching: true        # --no-enable-prefix-caching
-
-  # =========================================================================
-  # STANDALONE -- Only applies when standalone.enabled: true
-  # =========================================================================
-    standalone:
-      enabled: false
-      replicas: 1
-
+    # Shared by every role in this stack, so the live role and the disabled
+    # alternatives below it cannot drift apart. A role that names a key wins.
+    roleDefaults:
       resources:
         limits:
           memory: 32Gi
@@ -163,6 +138,13 @@ scenario:
         requests:
           memory: 32Gi
           cpu: "8"
+
+  # =========================================================================
+  # STANDALONE -- Only applies when standalone.enabled: true
+  # =========================================================================
+    standalone:
+      enabled: false
+      replicas: 1
 
   # =========================================================================
   # MODELSERVICE -- Only applies when modelservice.enabled: true
@@ -201,7 +183,6 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Prefill Configuration -- disabled (0 prefill pods)
-      # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_PREFILL_REPLICAS=0
       # -------------------------------------------------------------------------
       prefill:
         enabled: false
@@ -209,9 +190,6 @@ scenario:
 
       # -------------------------------------------------------------------------
       # Decode Configuration -- 2 decode pods on CPU
-      # Corresponds to: LLMDBENCH_VLLM_MODELSERVICE_DECODE_*
-      # No customCommand -- the vLLM serve command is auto-generated
-      # from model.*, vllmCommon.flags.*, and decode.vllm.additionalFlags.
       # -------------------------------------------------------------------------
       decode:
         replicas: 2
@@ -222,25 +200,46 @@ scenario:
           dataLocal: 1
           workers: 1
 
-        resources:
-          limits:
-            memory: 32Gi
-            cpu: "8"
-          requests:
-            memory: 32Gi
-            cpu: "8"
+        # The launch line, verbatim -- paste what you would run by hand. It is
+        # read once for the facts Kubernetes needs before the engine starts
+        # (--port sizes the container port and probes, the capacity flags feed
+        # the pre-deploy check) and is otherwise passed through untouched.
+        #
+        #   --port 8200            the routing sidecar owns the Service port
+        #                          (8000) on a decode pod and forwards here.
+        #   --no-enable-prefix-caching
+        #                          a CPU run is slow enough that a warm prefix
+        #                          cache would dominate the measurement.
+        #   no --gpu-memory-utilization, no --enforce-eager
+        #                          neither applies on the CPU backend, and the
+        #                          old cpu.sh passed neither.
+        #   --block-size 32        vLLM's CPU attention backend accepts only
+        #                          multiples of 32 (MultipleOf(32) in
+        #                          v1/attention/backends/cpu_attn.py); 16, the
+        #                          engine's own default and what cpu.sh used,
+        #                          now aborts startup with "No common block
+        #                          size for 16".
+        engine:
+          command: |
+            vllm serve facebook/opt-125m \
+            --host 0.0.0.0 \
+            --port 8200 \
+            --block-size 32 \
+            --max-model-len 1024 \
+            --tensor-parallel-size 1 \
+            --no-enable-log-requests \
+            --disable-uvicorn-access-log \
+            --no-enable-prefix-caching
 
     # =========================================================================
     # WORKLOAD / HARNESS -- Benchmark execution configuration
     # =========================================================================
     # -------------------------------------------------------------------------
     # Workload/Harness Configuration
-    # Corresponds to: LLMDBENCH_HARNESS_NAME=inference-perf
     # -------------------------------------------------------------------------
     harness:
       name: inference-perf
       experimentProfile: sanity_random.yaml
 
-    # Corresponds to: LLMDBENCH_CONTROL_WORK_DIR=~/data/cpu
     # Used as workspace when --workspace is not specified on the CLI.
     workDir: "~/data/cpu"
