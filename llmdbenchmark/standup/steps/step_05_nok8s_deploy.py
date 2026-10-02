@@ -1,6 +1,6 @@
 """Step 05 -- Deploy the llm-d stack as containers (no Kubernetes).
 
-Launches vLLM worker(s) + EPP (router) + Envoy as docker/podman containers,
+Launches model-server worker(s) + EPP (router) + Envoy as docker/podman containers,
 driven by the rendered ``34_nok8s-containers.yaml`` launch spec and the
 ``31/32/33_nok8s-*`` config files.  No cluster is involved; the EPP uses the
 file-discovery plugin (reads endpoints.yaml).
@@ -21,7 +21,7 @@ handled explicitly below.
   expanding the client's ``$HOME``.
 * **Readiness.** ``curl http://localhost:<port>`` from the client would probe
   the client. The probe is executed on the daemon host, so what it proves is
-  that the node is serving -- which is also why the vLLM ports need no
+  that the node is serving -- which is also why the engine ports need no
   client-side reachability.
 """
 
@@ -49,7 +49,7 @@ class NoK8sDeployStep(Step):
         super().__init__(
             number=5,
             name="nok8s_deploy",
-            description="Deploy vLLM + EPP + Envoy as local containers (no k8s)",
+            description="Deploy model server + EPP + Envoy as local containers (no k8s)",
             phase=Phase.STANDUP,
             per_stack=True,
         )
@@ -414,7 +414,7 @@ class NoK8sDeployStep(Step):
         process's environment, so nothing is needed. Under ssh transport the
         runtime runs on the node, where that variable is unset -- without this
         a gated model would fail to download and the only symptom would be a
-        401 deep in the vLLM log.
+        401 deep in the model-server log.
 
         The value goes over stdin rather than in the command, because commands
         are written to the workspace command log and this one is a credential.

@@ -137,13 +137,18 @@ def add_subcommands(
         "--standalone-deploy-timeout",
         type=int,
         default=env_int("LLMDBENCH_STANDALONE_DEPLOY_TIMEOUT"),
-        help="Seconds to wait for the vLLM pods to deploy during standup in standalone mode.",
+        help=(
+            "Seconds to wait for model-server pods to deploy during standalone standup."
+        ),
     )
     standup_parser.add_argument(
         "--nok8s-deploy-timeout",
         type=int,
         default=env_int("LLMDBENCH_NOK8S_DEPLOY_TIMEOUT"),
-        help="Seconds to wait for the vLLM/EPP/Envoy containers to become ready in nok8s mode.",
+        help=(
+            "Seconds to wait for model-server, EPP, and Envoy containers to "
+            "become ready in nok8s mode."
+        ),
     )
     standup_parser.add_argument(
         "--gateway-deploy-timeout",

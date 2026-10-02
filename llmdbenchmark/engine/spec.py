@@ -1,30 +1,9 @@
-"""Inference-engine registry.
+"""Minimal registry for facts orchestration must read from launch commands.
 
-An engine's command line is the user's to write, verbatim (see
-:mod:`llmdbenchmark.engine.command`). This module holds the only engine
-knowledge llm-d-benchmark cannot do without, which is small on purpose:
-
-* how to recognise the server invocation inside a shell snippet, so a preamble
-  (``export ...; source ...;``) can be told apart from the launch;
-* which flag carries the model reference and the bind port -- the two facts
-  Kubernetes needs *before* the process exists, because the Service and the
-  probes have to name a port and the model volume has to name a model;
-* which flag carries the context length and the memory fraction, the two
-  numbers the pre-deploy capacity check reads;
-* engine-neutral defaults (health path, metrics path, default port, image key)
-  used when the command says nothing.
-
-Everything else -- parallelism, quantization, scheduler knobs, cache policy,
-attention backend -- is the engine's business and passes through untouched.
-Adding an engine means adding one :class:`EngineSpec` here: no new template
-branch, no new scenario key, no new flag table.
-
-Flag names come from each engine's own argument definitions:
-
-* vLLM                -- ``vllm/entrypoints/openai/cli_args.py`` + ``EngineArgs``
-* SGLang              -- ``python/sglang/srt/arg_groups/fields/*.py``
-* TensorRT-LLM        -- ``tensorrt_llm/commands/serve.py`` (underscore flags)
-* llm-d-inference-sim -- ``--model`` / ``--port``
+Each spec identifies a server launcher, its model and port options, optional
+capacity inputs, and endpoint/image defaults. All other engine arguments remain
+opaque. Flag spellings are sourced from the local vLLM, SGLang, TensorRT-LLM,
+and llm-d-inference-sim implementations.
 """
 
 from __future__ import annotations
@@ -32,27 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-#: Values for :attr:`EngineSpec.memoryFractionScope` -- what an engine's memory
-#: fraction is a fraction *of*. One number, three denominators:
-#:
-#: ``DEVICE``
-#:     The whole device budget: weights, activations and the KV cache together.
-#:     vLLM's ``--gpu-memory-utilization`` ("the fraction of GPU memory to be
-#:     used for the model executor").
-#: ``WEIGHTS_AND_KV``
-#:     Weights plus the KV pool only. Activations, CUDA graphs and allocator
-#:     overhead are taken *on top*, out of what the fraction left behind.
-#:     SGLang's ``--mem-fraction-static`` ("the fraction of the memory used for
-#:     static allocation (model weights and KV cache memory pool)").
-#: ``FREE_AFTER_LOAD``
-#:     The fraction of whatever is still free once weights and peak activation
-#:     are in place, all of it KV. TRT-LLM's
-#:     ``--kv_cache_free_gpu_memory_fraction`` ("the fraction of free GPU memory
-#:     to be used for the KV cache").
-#:
-#: The same 0.88 therefore means three different KV pools, which is why the
-#: pre-deploy capacity check reads this rather than assuming vLLM's reading --
-#: see :mod:`llmdbenchmark.utilities.capacity_validator`.
+#: Denominators used by each engine's memory-fraction option. The capacity
+#: validator distinguishes whole-device (vLLM), weights-plus-KV (SGLang), and
+#: free-after-load (TensorRT-LLM) fractions.
 MEMORY_FRACTION_DEVICE = "device"
 MEMORY_FRACTION_WEIGHTS_AND_KV = "weightsAndKv"
 MEMORY_FRACTION_FREE_AFTER_LOAD = "freeAfterLoad"
@@ -70,66 +31,41 @@ class EngineSpec:
 
     name: str
 
-    # ---- recognising the launch inside a shell snippet ---------------------
-    # Each entry is a token sequence that introduces the server. A snippet
-    # matches when its tokens contain the sequence in order and adjacent
-    # (``vllm serve``), or -- for single-token entries -- when a token's
-    # basename equals it (``trtllm-serve``, ``/usr/bin/trtllm-serve``).
+    # Token sequences that identify a server invocation.
     launchers: tuple[tuple[str, ...], ...] = ()
 
-    # Subcommands of a launcher that is a command group. ``trtllm-serve serve
-    # <model>`` and ``trtllm-serve <model>`` are the same invocation -- both
-    # appear in the llm-d guides -- so the subcommand is skipped before the
-    # positionals are read, or it would be taken for the model.
+    # Command-group words skipped before positional arguments are read.
     subcommands: tuple[str, ...] = ()
 
-    # ---- the model the command serves -------------------------------------
-    # ``positionalModel`` means the engine also accepts the model as a bare
-    # positional right after the launcher (vLLM, TRT-LLM).
-    modelFlags: tuple[str, ...] = ()
-    positionalModel: bool = False
-    servedModelFlags: tuple[str, ...] = ()
+    # Model and served-name options. positionalModel accepts a bare model after
+    # the launcher.
+    model_flags: tuple[str, ...] = ()
+    positional_model: bool = False
+    served_model_flags: tuple[str, ...] = ()
 
-    # ---- the port the engine binds ----------------------------------------
-    # Every engine here spells this ``--port``; the tuple exists so one that
-    # does not can be added without touching the parser.
-    portFlags: tuple[str, ...] = ("--port",)
+    port_flags: tuple[str, ...] = ("--port",)
 
-    # ---- numbers read back onto ``model.*`` -------------------------------
-    # KV-cache headroom needs the context window and the fraction of device
-    # memory the engine is allowed to take; the router's prefix-cache index
-    # needs the KV page size, because it rebuilds block hashes on the same
-    # boundaries the engine writes. All three are read from the flag the user
-    # already wrote, so the scenario does not restate them; a command that omits
-    # one leaves it unknown and whatever needed it turns itself off.
-    maxModelLenFlags: tuple[str, ...] = ()
-    memoryUtilFlags: tuple[str, ...] = ()
-    blockSizeFlags: tuple[str, ...] = ()
+    # Optional values consumed by capacity checks and prefix-cache routing.
+    max_model_len_flags: tuple[str, ...] = ()
+    memory_util_flags: tuple[str, ...] = ()
+    block_size_flags: tuple[str, ...] = ()
 
-    # What the fraction above measures. Engines spell one number three ways and
-    # mean three different splits of the device by it, so the capacity check
-    # cannot subtract the same things from all of them: see the scope constants
-    # at the top of this module. An engine with no `memoryUtilFlags` never has
-    # this read -- nothing states a fraction to interpret.
-    memoryFractionScope: str = MEMORY_FRACTION_DEVICE
+    memory_fraction_scope: str = MEMORY_FRACTION_DEVICE
 
-    # ---- engine-neutral defaults ------------------------------------------
-    defaultPort: int = 8000
-    healthPath: str = "/health"
-    metricsPath: str = "/metrics"
+    default_port: int = 8000
+    health_path: str = "/health"
+    metrics_path: str = "/metrics"
 
-    # Key under ``images:`` in defaults.yaml supplying the default image.
-    imageKey: str = "vllm"
+    image_key: str = "vllm"
 
-    # Human-facing aliases accepted for ``engine.name`` in a scenario.
     aliases: tuple[str, ...] = ()
 
     def flags_for_metric(self, metric: str) -> tuple[str, ...]:
         """Return the flag spellings for one ``MODEL_READS`` entry."""
         return {
-            "maxModelLen": self.maxModelLenFlags,
-            "gpuMemoryUtilization": self.memoryUtilFlags,
-            "blockSize": self.blockSizeFlags,
+            "maxModelLen": self.max_model_len_flags,
+            "gpuMemoryUtilization": self.memory_util_flags,
+            "blockSize": self.block_size_flags,
         }.get(metric, ())
 
 
@@ -137,51 +73,44 @@ VLLM = EngineSpec(
     name="vllm",
     launchers=(
         ("vllm", "serve"),
-        ("vllm", "bench"),
         ("-m", "vllm.entrypoints.openai.api_server"),
     ),
-    modelFlags=("--model",),
-    positionalModel=True,
-    servedModelFlags=("--served-model-name",),
-    maxModelLenFlags=("--max-model-len",),
-    memoryUtilFlags=("--gpu-memory-utilization",),
-    memoryFractionScope=MEMORY_FRACTION_DEVICE,
-    blockSizeFlags=("--block-size",),
-    defaultPort=8000,
-    healthPath="/health",
-    metricsPath="/metrics",
-    imageKey="vllm",
+    model_flags=("--model",),
+    positional_model=True,
+    served_model_flags=("--served-model-name",),
+    max_model_len_flags=("--max-model-len",),
+    memory_util_flags=("--gpu-memory-utilization",),
+    memory_fraction_scope=MEMORY_FRACTION_DEVICE,
+    block_size_flags=("--block-size",),
+    default_port=8000,
+    health_path="/health",
+    metrics_path="/metrics",
+    image_key="vllm",
 )
 
 SGLANG = EngineSpec(
     name="sglang",
     launchers=(
+        ("sglang", "serve"),
         ("-m", "sglang.launch_server"),
         ("sglang.launch_server",),
     ),
-    modelFlags=("--model-path", "--model"),
-    positionalModel=False,
-    servedModelFlags=("--served-model-name",),
-    maxModelLenFlags=("--context-length",),
-    memoryUtilFlags=("--mem-fraction-static",),
-    # Weights and the KV pool; activations and CUDA graphs come out of the rest
-    # of the device, which is why a fraction vLLM is happy with can OOM SGLang
-    # mid-forward.
-    memoryFractionScope=MEMORY_FRACTION_WEIGHTS_AND_KV,
-    # SGLang calls a KV block a page ("The number of tokens in a page").
-    blockSizeFlags=("--page-size",),
-    defaultPort=30000,
-    healthPath="/health",
-    metricsPath="/metrics",
-    imageKey="sglang",
+    model_flags=("--model-path", "--model"),
+    positional_model=True,
+    served_model_flags=("--served-model-name",),
+    max_model_len_flags=("--context-length",),
+    memory_util_flags=("--mem-fraction-static",),
+    memory_fraction_scope=MEMORY_FRACTION_WEIGHTS_AND_KV,
+    block_size_flags=("--page-size",),
+    default_port=30000,
+    health_path="/health",
+    metrics_path="/metrics",
+    image_key="sglang",
 )
 
 TRTLLM = EngineSpec(
     name="trtllm",
     launchers=(("trtllm-serve",),),
-    # trtllm-serve is a click group whose unrecognised first argument falls
-    # through to `serve` (see DefaultGroup in tensorrt_llm/commands/serve.py),
-    # so the llm-d guides spell it `trtllm-serve serve <model>`.
     subcommands=(
         "serve",
         "disaggregated",
@@ -189,56 +118,46 @@ TRTLLM = EngineSpec(
         "mm_embedding_serve",
         "embeddings",
     ),
-    # trtllm-serve takes the model as a click argument; --model_path exists on
-    # some subcommands. Underscore spelling is TRT-LLM's convention.
-    modelFlags=("--model", "--model_path"),
-    positionalModel=True,
-    servedModelFlags=("--served_model_name", "--served-model-name"),
-    maxModelLenFlags=("--max_seq_len",),
-    # trtllm-serve declares one option under two names
-    # (`@stability_option("--free_gpu_memory_fraction",
-    # "--kv_cache_free_gpu_memory_fraction", ...)`), and the llm-d
-    # optimized-baseline TRT-LLM guide writes the longer one. Both are read.
-    memoryUtilFlags=(
+    model_flags=("--model", "--model_path"),
+    positional_model=True,
+    served_model_flags=("--served_model_name", "--served-model-name"),
+    max_model_len_flags=("--max_seq_len",),
+    memory_util_flags=(
         "--free_gpu_memory_fraction",
         "--kv_cache_free_gpu_memory_fraction",
     ),
-    # "free" is what is left after the engine has loaded and profiled, so this
-    # fraction is taken of a much smaller number than vLLM's or SGLang's -- and
-    # 0.9 of it is a normal, safe setting rather than an aggressive one.
-    memoryFractionScope=MEMORY_FRACTION_FREE_AFTER_LOAD,
-    defaultPort=8000,
-    healthPath="/health",
-    metricsPath="/prometheus/metrics",
-    imageKey="trtllm",
+    memory_fraction_scope=MEMORY_FRACTION_FREE_AFTER_LOAD,
+    default_port=8000,
+    health_path="/health",
+    metrics_path="/prometheus/metrics",
+    image_key="trtllm",
     aliases=("tensorrt", "tensorrt-llm", "tensorrt_llm", "tensorrtllm"),
 )
 
 SIM = EngineSpec(
     name="sim",
     launchers=(("llm-d-inference-sim",), ("vllm-sim",)),
-    modelFlags=("--model",),
-    positionalModel=False,
-    servedModelFlags=("--served-model-name",),
-    maxModelLenFlags=("--max-model-len",),
-    blockSizeFlags=("--block-size",),
-    defaultPort=8000,
-    healthPath="/health",
-    metricsPath="/metrics",
-    imageKey="llmdInferenceSim",
+    model_flags=("--model",),
+    positional_model=False,
+    served_model_flags=("--served-model-name",),
+    max_model_len_flags=("--max-model-len",),
+    block_size_flags=("--block-size",),
+    default_port=8000,
+    health_path="/health",
+    metrics_path="/metrics",
+    image_key="llmdInferenceSim",
     aliases=("inference-sim", "llm-d-inference-sim", "vllm-sim"),
 )
 
-# Escape hatch: an engine we have no spec for. The command still runs verbatim;
-# only the derived facts are unavailable, so the scenario states `engine.port`
-# (or the command writes `--port $ENGINE_PORT`) instead.
+# Unknown launchers still support common model and port spellings. Their image
+# and nonstandard endpoint paths must be stated explicitly.
 GENERIC = EngineSpec(
     name="generic",
     launchers=(),
-    modelFlags=("--model", "--model-path"),
-    positionalModel=False,
-    defaultPort=8000,
-    imageKey="vllm",
+    model_flags=("--model", "--model-path"),
+    positional_model=False,
+    default_port=8000,
+    image_key="vllm",
     aliases=("custom", "other"),
 )
 
@@ -301,7 +220,11 @@ def _launcher_index(tokens: list[str], spec: EngineSpec) -> int | None:
         else:
             span = len(sig)
             for i in range(len(tokens) - span + 1):
-                if tuple(tokens[i : i + span]) == sig:
+                window = tokens[i : i + span]
+                if (
+                    window[0].rsplit("/", 1)[-1] == sig[0]
+                    and tuple(window[1:]) == sig[1:]
+                ):
                     return i + span
     return None
 

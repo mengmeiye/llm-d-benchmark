@@ -258,12 +258,12 @@ scenario:
         # dataLocal x tensor = 8 -- matching the 8 GPUs requested below, so
         # the chart's acceleratorWarning annotation stays clear.
         #
-        # `tensor` is not restated here: it is read off the command's
-        # `--tensor-parallel-size 8`, which is the single source of truth for
-        # parallelism. `workers` has no engine flag behind it -- it is a gang
-        # size, not something vLLM is told -- so it does live here.
+        # The chart needs these widths to size each worker and the LWS gang;
+        # they must agree with the command's TP8 x PP4 configuration.
         data: 1
         dataLocal: 1
+        tensor: 8
+        pipeline: 4
         workers: 4
 
       accelerator:
@@ -271,21 +271,6 @@ scenario:
         # so a later edit to `tensor` cannot silently change the pod's GPU
         # request out from under the layer split.
         count: 8
-
-      # EXPECTED FALSE WARNING from the capacity planner during standup.
-      # utilities/capacity_validator.py:357 hardcodes `pp = 1` ("Pipeline
-      # parallelism not yet exposed per-method"), because PP genuinely is not a
-      # ParallelismConfig field -- this scenario carries it in
-      # decode.engine.command, where the validator cannot see it. So it sizes the
-      # model against tp x pp x dp = 8 GPUs / 640 GiB instead of the real 32 /
-      # 2.5 TiB, and reports that a 1.42 TiB model does not fit. It does fit;
-      # the measured footprint is 69.5 of 71.3 usable GiB per GPU.
-      #
-      # control.ignoreFailedValidation defaults to true, so this is logged as a
-      # WARNING and standup continues. Do not "fix" it by inflating
-      # accelerator.count -- that value becomes the pod's actual
-      # nvidia.com/gpu request, and 32 would leave every pod unschedulable on
-      # an 8-GPU node.
 
       # -----------------------------------------------------------------------
       # The launch line, verbatim: what this says is what the engine gets, and
@@ -597,9 +582,7 @@ scenario:
       name: inference-perf
       experimentProfile: guide_kimi-k3-h100_1.yaml
 
-      # Read by step_10_smoketest.py / smoketests/base.py. Not modeled in the
-      # STRICT HarnessConfig, so `validate_config` logs an advisory
-      # "Extra inputs" warning for this block -- expected, and harmless.
+      # Read by step_10_smoketest.py / smoketests/base.py.
       smoketest:
         modelReadyTimeout: 7200     # 2 h; the model needs ~1.5 h to load
         modelReadyPollInterval: 30

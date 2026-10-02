@@ -1110,9 +1110,8 @@ Scope: applies to both deployment modes (`modelservice` and `standalone`). The
 templates render `engine.shell` directly with no jinja fallback, so the
 defaults.yaml value is always authoritative -- unsetting it in a scenario does
 not "fall back to /bin/sh"; it removes the field and breaks rendering. A
-distroless image that ships no shell at all needs
-`<role>.engine.modelCommand: imageDefault` instead, which renders `args:` with
-no `command:` so the image's own entrypoint runs.
+distroless image sets `<role>.engine.command: ""` and supplies
+`<role>.engine.args`; the resolver then uses the image entrypoint.
 
 ### How Templates Are Rendered
 

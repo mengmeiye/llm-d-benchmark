@@ -173,8 +173,9 @@ Modeled sections:
 | `ModelConfig` | Model name, path, HuggingFace ID, size, maxModelLen, gpuMemoryUtilization |
 | `DecodeConfig` / `PrefillConfig` | Per-role deployment config (replicas, autoscaling, parallelism, resources, probes, engine, monitoring) |
 | `EngineConfig` | A role's engine: `command`, `args`, `image`, `port`, preprocess hooks |
+| `ResolvedServingRoleConfig` | Derived immutable runtime snapshot consumed by templates, standup, and smoketest |
 | `EngineCommonConfig` | Engine settings shared by every role (servicePort, shell, volumes, HOME) |
-| `HarnessConfig` | Harness name, profile, executable, resources, timeout |
+| `HarnessConfig` | Harness identity, resources, environment, and smoketest readiness settings |
 | `ParallelismConfig` | data, dataLocal, tensor, workers parallelism settings |
 
 ## Resolver Chain
@@ -193,7 +194,10 @@ During plan rendering, the following resolvers execute in order on the merged va
 10. **Deploy method resolution** -- Apply CLI `--methods` override (`standalone` or `modelservice`). Only one may be active.
 11. **Monitoring resolution** -- Apply CLI `--monitoring` flag. Enables PodMonitor and metrics scraping.
 12. **HuggingFace token auto-detection** -- Detect HF token from `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` env vars when the configured token is a sentinel value (`REPLACE_TOKEN` or empty).
-13. **Config schema validation** -- Non-blocking Pydantic validation.
+13. **Engine and serving-role resolution** -- Parse each active command once,
+    settle inheritance and runtime defaults, then publish the immutable
+    `resolvedServingRoles` snapshot used by templates and execution steps.
+14. **Config schema validation** -- Non-blocking Pydantic validation.
 
 ## Version Resolver (`version_resolver.py`)
 

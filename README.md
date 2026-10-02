@@ -28,7 +28,7 @@ Provide a single source of automation for repeatable and reproducible experiment
 - **Reproducibility**: A deterministic config merge chain (`defaults.yaml` to scenario to CLI overrides) captures the exact configuration in each workspace. Any result traces back to its inputs.
 - **Structured experiments**: Built-in Design of Experiments (DoE) support automates parameter sweeps across both infrastructure and workload configurations.
 - **Multiple harnesses**: Swap between [inference-perf](https://github.com/kubernetes-sigs/inference-perf), [guidellm](https://github.com/vllm-project/guidellm.git), [vllm-benchmark](https://github.com/vllm-project/vllm.git), and others with a CLI flag (`-l`).
-- **Post-deployment validation**" Per-scenario smoketests verify that deployed pod configurations match what the scenario defines -- resources, parallelism, env vars, probes, routing, and vLLM flags.
+- **Post-deployment validation**: Per-scenario smoketests verify that deployed pod configurations match what the scenario defines -- resources, parallelism, environment variables, probes, routing, and the engine command.
 
 ## Prerequisites
 
@@ -424,7 +424,7 @@ llmdbenchmark --version
 | `-p NS` | `LLMDBENCH_NAMESPACE` | Namespace(s) to render into the plan |
 | `-m MODELS` | `LLMDBENCH_MODELS` | Model to render the plan for |
 | `-t METHODS` | `LLMDBENCH_METHODS` | Deployment method (`standalone`, `modelservice`) |
-| `--gateway-class CLASS` | `LLMDBENCH_GATEWAY_CLASS` | Override the scenario's `gateway.className`. Accepted on the modelservice path: `none`, `epponly`, `istio`, `agentgateway`, `gke`, `data-science-gateway-class`. `none` exposes decode vLLM directly through a plain Service with no Gateway, EPP, Envoy, or routing proxy. Ignored when the active deploy method is `kustomize`, `standalone`, or `fma`. |
+| `--gateway-class CLASS` | `LLMDBENCH_GATEWAY_CLASS` | Override the scenario's `gateway.className`. Accepted on the modelservice path: `none`, `epponly`, `istio`, `agentgateway`, `gke`, `data-science-gateway-class`. `none` exposes the decode engine directly through a plain Service with no Gateway, EPP, Envoy, or routing proxy. Ignored when the active deploy method is `kustomize`, `standalone`, or `fma`. |
 | `-f` / `--monitoring` | | Enable monitoring in rendered templates (PodMonitor, EPP verbosity) |
 | `-k FILE` | `LLMDBENCH_KUBECONFIG` / `KUBECONFIG` | Kubeconfig path (used for cluster resource auto-detection) |
 
@@ -700,7 +700,7 @@ Both paths share steps 00-05 (infrastructure, namespaces, secrets) and step 10 (
 | 03 | workload_monitoring | Global | Workload monitoring, node resource discovery |
 | 04 | model_namespace | Per-stack | Model namespace (PVCs, secrets, download job) |
 | 05 | harness_namespace | Per-stack | Harness namespace (PVC, data access pod, preprocess) |
-| 06 | standalone_deploy | Per-stack | Standalone vLLM deployment (Deployment + Service) |
+| 06 | standalone_deploy | Per-stack | Standalone model-server deployment (Deployment + Service) |
 | 07 | deploy_setup | Per-stack | Helm repos and gateway infrastructure (helmfile) |
 | 08 | deploy_router | Per-stack | llm-d router (EPP + provider resources) deployment |
 | 09 | deploy_modelservice | Per-stack | Modelservice deployment (helmfile + LWS) |
@@ -784,7 +784,7 @@ llmdbenchmark/                Python package
         validators/           Per-scenario config validators
 
     standup/                  Standup phase (see standup/README.md)
-        preprocess/           Scripts mounted as ConfigMaps in vLLM pods
+        preprocess/           Scripts mounted as ConfigMaps in model-server pods
         steps/                Step implementations (00-11)
 
     teardown/                 Teardown phase (see teardown/README.md)

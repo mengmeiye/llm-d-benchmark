@@ -21,7 +21,7 @@ So ``0.88`` describes three different KV pools, and reading all three as vLLM's
 is not a rounding error: on one 80 GiB device it declares a working SGLang
 deployment of Qwen3-32B dead ("cannot serve any requests", because it subtracts
 activations a second time), and passes a TRT-LLM one it has understated by 3x.
-:attr:`~llmdbenchmark.engine.spec.EngineSpec.memoryFractionScope` records which
+:attr:`~llmdbenchmark.engine.spec.EngineSpec.memory_fraction_scope` records which
 reading an engine takes and :func:`_memory_budget` does that engine's
 subtraction; everything downstream -- the verdict, the concurrency estimate, the
 suggestions -- follows from it. ``planner.capacity_planner`` supplies the model
@@ -41,7 +41,6 @@ from typing import Any, Protocol, TYPE_CHECKING
 # pulls in the command parser and the resolver, and a capacity check has no
 # business importing either.
 from llmdbenchmark.engine.spec import (
-    MEMORY_FRACTION_DEVICE,
     MEMORY_FRACTION_FREE_AFTER_LOAD,
     MEMORY_FRACTION_WEIGHTS_AND_KV,
     get_engine_spec,
@@ -228,8 +227,10 @@ def _memory_budget(
         + non_torch_per_gpu * gpu_count
     )
 
-    scope = getattr(spec, "memoryFractionScope", MEMORY_FRACTION_DEVICE)
-    flag = spec.memoryUtilFlags[0] if spec.memoryUtilFlags else "the memory fraction"
+    scope = spec.memory_fraction_scope
+    flag = (
+        spec.memory_util_flags[0] if spec.memory_util_flags else "the memory fraction"
+    )
 
     if scope == MEMORY_FRACTION_WEIGHTS_AND_KV:
         claimed = total * fraction
@@ -290,7 +291,7 @@ def validate_vllm_params(
     # reads it turns itself off anyway.
     spec = get_engine_spec(params.engine)
     fraction_flag = (
-        spec.memoryUtilFlags[0] if spec.memoryUtilFlags else "the memory fraction"
+        spec.memory_util_flags[0] if spec.memory_util_flags else "the memory fraction"
     )
 
     def msg(text: str) -> None:
@@ -528,7 +529,7 @@ def _log_config_suggestions(
     what that fraction measures.
     """
     spec = get_engine_spec(params.engine)
-    flag = spec.memoryUtilFlags[0] if spec.memoryUtilFlags else "memory fraction"
+    flag = spec.memory_util_flags[0] if spec.memory_util_flags else "memory fraction"
 
     msg_fn("  Current config:")
     msg_fn(f"    engine: {spec.name}")

@@ -164,6 +164,16 @@ class TestTypoDetection:
             f"Expected 'waitTimout' typo to be caught, got: {warnings}"
         )
 
+    def test_harness_smoketest_typo_caught(self, defaults_copy: dict) -> None:
+        defaults_copy["harness"]["smoketest"] = {
+            "modelReadyTimout": 3600,
+            "modelReadyPollInterval": 30,
+        }
+        warnings = validate_config(defaults_copy)
+        assert any("modelReadyTimout" in w for w in warnings), (
+            f"Expected 'modelReadyTimout' typo to be caught, got: {warnings}"
+        )
+
     def test_prefill_engine_typo_caught(self, defaults_copy: dict) -> None:
         # The engine section is the one place a scenario now writes, so a typo
         # here is the most likely one there is -- and a silently ignored
@@ -286,13 +296,12 @@ class TestScenarioOnlyFields:
     """Fields that exist in scenarios but not defaults must be accepted."""
 
     def test_engine_tensor_parallelism_rejected(self, defaults_copy: dict) -> None:
-        # Parallelism is stated once, in the command (`--tensor-parallel-size`
-        # / `--tp-size` / ...), and read back out by resolve_engines. A second
-        # place to say it could disagree with the command, so it is not a key.
+        # Kubernetes/chart parallelism belongs under each role. Engine-specific
+        # parallelism flags remain in that role's command.
         defaults_copy["engine"]["tensorParallelism"] = 4
         warnings = validate_config(defaults_copy)
         assert any("tensorParallelism" in w for w in warnings), (
-            "engine.tensorParallelism should be rejected (state it in the command)"
+            "engine.tensorParallelism should be rejected (use role.parallelism)"
         )
 
     def test_engine_max_model_len_rejected(self, defaults_copy: dict) -> None:
@@ -318,6 +327,20 @@ class TestScenarioOnlyFields:
             f"harness.experimentProfile should be accepted: {warnings}"
         )
 
+    def test_harness_extra_env_vars(self, defaults_copy: dict) -> None:
+        defaults_copy["harness"]["extraEnvVars"] = [
+            {"name": "PRE_HARNESS_CMD", "value": "prepare-harness"},
+        ]
+        warnings = validate_config(defaults_copy)
+        assert warnings == [], f"harness.extraEnvVars should be accepted: {warnings}"
+
+    def test_harness_smoketest_settings(self, defaults_copy: dict) -> None:
+        defaults_copy["harness"]["smoketest"] = {
+            "modelReadyTimeout": 3600,
+        }
+        warnings = validate_config(defaults_copy)
+        assert warnings == [], f"harness.smoketest should be accepted: {warnings}"
+
     def test_work_dir(self, defaults_copy: dict) -> None:
         defaults_copy["workDir"] = "/workspace"
         warnings = validate_config(defaults_copy)
@@ -328,12 +351,12 @@ class TestScenarioOnlyFields:
         warnings = validate_config(defaults_copy)
         assert warnings == [], f"decode.accelerator should be accepted: {warnings}"
 
-    def test_decode_engine_model_command(self, defaults_copy: dict) -> None:
+    def test_decode_engine_model_command_is_not_a_user_setting(
+        self, defaults_copy: dict
+    ) -> None:
         defaults_copy["decode"]["engine"]["modelCommand"] = "imageDefault"
         warnings = validate_config(defaults_copy)
-        assert warnings == [], (
-            f"decode.engine.modelCommand should be accepted: {warnings}"
-        )
+        assert any("modelCommand" in warning for warning in warnings)
 
     def test_a_batch_width_has_no_key(self, defaults_copy: dict) -> None:
         """Only the capacity pair is modeled under ``model``.

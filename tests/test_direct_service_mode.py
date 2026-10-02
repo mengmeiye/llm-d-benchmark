@@ -125,13 +125,8 @@ def test_direct_mode_leaves_the_decode_command_alone() -> None:
     assert result["routing"]["proxy"]["enabled"] is False
 
 
-def test_direct_mode_reports_a_decode_command_that_misses_the_service_port() -> None:
-    """The error has to name the port to change, and where to change it.
-
-    Without the sidecar nothing bridges 8000 to 8200, so this stack comes up
-    green and answers nothing -- the failure mode that makes this an error
-    rather than a warning.
-    """
+def test_direct_mode_accepts_a_decode_command_on_a_different_target_port() -> None:
+    """The direct Service bridges its public port to the command's bind port."""
     values = {
         "gateway": {"className": "none"},
         "modelservice": {"enabled": True},
@@ -140,12 +135,7 @@ def test_direct_mode_reports_a_decode_command_that_misses_the_service_port() -> 
     }
     RenderPlans._normalize_direct_service_mode(values)
 
-    errors = RenderPlans._validate_engine_ports(values, "stack")
-
-    assert len(errors) == 1, errors
-    assert "routing sidecar is disabled" in errors[0]
-    assert "decode.engine.command" in errors[0]
-    assert "8000" in errors[0]
+    assert RenderPlans._validate_engine_ports(values, "stack") == []
 
 
 def test_direct_mode_accepts_a_decode_command_that_binds_the_service_port() -> None:
@@ -376,6 +366,12 @@ def test_direct_service_uses_gateway_namespace_and_decode_target_port(
     )
     document = yaml.safe_load(scenario_file.read_text(encoding="utf-8"))
     _branch(document["scenario"][0]["modelservice"], "routing")["servicePort"] = 8000
+    decode_engine = _branch(
+        _branch(document["scenario"][0]["modelservice"], "decode"), "engine"
+    )
+    decode_engine["command"] = decode_engine["command"].replace(
+        "--port 8100", "--port 8200"
+    )
     scenario_file.write_text(yaml.dump(document, sort_keys=False), encoding="utf-8")
     output_dir = tmp_path / "rendered"
     logger = MagicMock()
@@ -401,4 +397,4 @@ def test_direct_service_uses_gateway_namespace_and_decode_target_port(
     assert config["gateway"]["namespace"] == "model-serving"
     assert direct_service["metadata"]["namespace"] == "model-serving"
     assert direct_service["spec"]["ports"][0]["port"] == 8000
-    assert direct_service["spec"]["ports"][0]["targetPort"] == 8100
+    assert direct_service["spec"]["ports"][0]["targetPort"] == 8200

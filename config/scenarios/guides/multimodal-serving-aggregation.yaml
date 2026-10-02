@@ -300,13 +300,9 @@ scenario:
 
       decode:
         replicas: 8
-        # The launch command, verbatim -- the same line you would run by hand.
-        # It reaches the container unchanged, so every flag here is read by vLLM
-        # and none of them by llm-d-benchmark, which reads only what decides
-        # Kubernetes objects: `--port` (container port, probes, the routing
-        # sidecar's upstream) and the capacity numbers the pre-deploy check
-        # needs. The two GPUs per decode pod (16 across 8 replicas) are stated
-        # as `parallelism.tensor` below, not read from `--tensor-parallel-size`.
+        # Verbatim launch command. llm-d-benchmark reads only the port and
+        # capacity inputs. The two GPUs per pod are stated separately as
+        # `parallelism.tensor`.
         #
         # Decode binds 8200: the routing sidecar the chart injects on decode pods
         # owns `engine.servicePort` (8000) and forwards here.

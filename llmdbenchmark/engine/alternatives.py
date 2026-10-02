@@ -1,25 +1,4 @@
-"""Engines a scenario can be switched to without editing it.
-
-A scenario states its engine as a verbatim launch command, so "run this same
-stack on another engine" is an edit to one string -- and a scenario file will
-often carry that other string already, commented out, next to the prose
-explaining it. Commented text is covered by nothing, though: it can drift out of
-step with the engine's flags, with the file's own indentation, or with a
-companion key that has to move alongside it, and nothing notices until someone
-uncomments it by hand.
-
-Tagging each commented group with ``# @engine <name>`` makes the switch
-machine-readable. :func:`alternative_engines` reports which engines a file
-offers and :func:`apply_alternative` performs the edit, so the same switch can
-be rendered by a test, planned by ``util/scenario-inventory.py --apply`` and run
-by ``llmdbenchmark --engine <name>``.
-
-The edit is not a plain uncomment. Each group *replaces* a definition that is
-live in the file, and leaving that definition in place produces either invalid
-YAML (an uncommented ``extraEnvVars:`` list under a live ``extraEnvVars: []``)
-or a mapping with two ``command:`` keys, which is not a switch but a coin toss.
-So the replaced keys are deleted as part of applying the group.
-"""
+"""Apply ``# @engine NAME`` alternative blocks from scenario files."""
 
 from __future__ import annotations
 
@@ -56,13 +35,7 @@ def _is_code(line: str) -> bool:
 
 
 def tagged_groups(text: str) -> list[tuple[str, int, int]]:
-    """``(engine, tag_line, end)`` for each ``# @engine NAME`` group in ``text``.
-
-    The group is the run of commented lines directly below the tag, ending at
-    the first blank or uncommented line -- the same thing a reader sees as "the
-    block below the tag". A tag with nothing commented under it is not a group,
-    which is what keeps prose *quoting* the tag from being mistaken for one.
-    """
+    """Return ``(engine, tag line, end line)`` for tagged comment blocks."""
     lines = text.splitlines()
     groups = []
     for index, line in enumerate(lines):
@@ -83,13 +56,7 @@ def alternative_engines(text: str) -> list[str]:
 
 
 def declared_engines(text: str) -> list[str]:
-    """Engines the *live* commands in ``text`` launch.
-
-    Read off each role's ``engine.command`` by launcher signature, the same way
-    the renderer reads it. Used only to tell "switch this scenario" apart from
-    "this scenario is already that engine", so an unparseable file or a command
-    that names no known launcher simply reports nothing.
-    """
+    """Return engines detected in live role commands."""
     try:
         document = yaml.safe_load(text)
     except yaml.YAMLError:
@@ -121,14 +88,7 @@ def declared_engines(text: str) -> list[str]:
 
 
 def _scope(lines: list[str], at: int, indent: int) -> tuple[int, int]:
-    """Line range around ``at`` that stays inside the mapping ``indent`` is in.
-
-    Walks out in both directions until a line YAML reads is shallower than
-    ``indent`` -- i.e. until the enclosing mapping ends. Comments and blanks
-    never close a mapping, so they are stepped over, which is what lets a
-    commented group sit under a paragraph of prose and still belong to the key
-    above it.
-    """
+    """Return the enclosing YAML mapping's line range."""
     low = at
     while low > 0 and not (
         _is_code(lines[low - 1]) and _indent(lines[low - 1]) < indent
@@ -143,11 +103,7 @@ def _scope(lines: list[str], at: int, indent: int) -> tuple[int, int]:
 
 
 def _block_end(lines: list[str], start: int) -> int:
-    """End of the value that begins on line ``start``.
-
-    Everything more deeply indented belongs to it, as do same-indent sequence
-    items (a list written flush with its key) and any blank lines between.
-    """
+    """Return the line after the YAML value beginning at ``start``."""
     indent = _indent(lines[start])
     end = last = start + 1
     while end < len(lines):
@@ -166,16 +122,7 @@ def _block_end(lines: list[str], start: int) -> int:
 
 
 def apply_alternative(text: str, engine: str) -> str:
-    """``text`` with every ``# @engine <engine>`` group uncommented.
-
-    This is the edit the scenario's own comments ask the reader to make, done
-    mechanically so it can be tested: strip one comment marker from each line of
-    the tagged groups, drop the tag lines, and delete the active definition each
-    group replaces.
-
-    Groups are applied bottom-up so that a deletion never moves a group that
-    has not been applied yet.
-    """
+    """Uncomment an engine's groups and remove the definitions they replace."""
     groups = [g for g in tagged_groups(text) if g[0] == engine.lower()]
     if not groups:
         raise ValueError(
@@ -214,17 +161,7 @@ def apply_alternative(text: str, engine: str) -> str:
 
 
 def switch_scenario_file(scenario: Path, engine: str, out_dir: Path) -> Path | None:
-    """Write ``scenario`` switched to ``engine``, or None if it already is.
-
-    The repo is never touched: the switched copy is written under ``out_dir``
-    (the run's plan directory, so it is kept with the run's other artifacts) and
-    its path returned for the caller to render instead of the original.
-
-    Returns None when ``scenario`` already launches ``engine`` and offers no
-    alternative for it -- asking for the engine a file already states is a
-    no-op, not an error. Raises :class:`ValueError` when the file neither states
-    nor offers it.
-    """
+    """Write a switched copy under ``out_dir``; return ``None`` if unchanged."""
     scenario = Path(scenario)
     text = scenario.read_text(encoding="utf-8")
     wanted = engine.strip().lower()

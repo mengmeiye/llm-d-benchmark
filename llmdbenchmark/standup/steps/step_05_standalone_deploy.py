@@ -1,4 +1,4 @@
-"""Step 05 -- Deploy vLLM as standalone Kubernetes Deployments and Services."""
+"""Step 05 -- Deploy model servers as Kubernetes Deployments and Services."""
 
 from pathlib import Path
 
@@ -10,13 +10,13 @@ from llmdbenchmark.executor.command import CommandExecutor
 
 
 class StandaloneDeployStep(Step):
-    """Deploy vLLM models as standalone Kubernetes Deployments and Services."""
+    """Deploy model servers as standalone Deployments and Services."""
 
     def __init__(self):
         super().__init__(
             number=5,
             name="standalone_deploy",
-            description="Deploy vLLM standalone models (Deployment + Service)",
+            description="Deploy standalone model servers (Deployment + Service)",
             phase=Phase.STANDUP,
             per_stack=True,
         )
@@ -250,7 +250,7 @@ class StandaloneDeployStep(Step):
 
             # The port the route sends to: what the Service exposes, not the
             # port the engine binds inside the pod (that one comes out of the
-            # role's command and lives in `standalone.engine.port`).
+            # role's command and lives in its resolved serving snapshot).
             inference_port = self._require_config(plan_config, "engine", "servicePort")
 
             if svc_name:

@@ -27,10 +27,8 @@ spec:
   ports:
   - name: http
     port: {{ standalone.service.port | default(80) }}
-{# Whatever the engine command binds. `standalone.engine.port` is read out of
-   that command's --port (or stated when the command cannot say), so changing
-   the port in the command moves this with it. #}
-    targetPort: {{ standalone.engine.port | default(engine.servicePort, true) }}
+{# Whatever the resolved engine command binds. #}
+    targetPort: {{ resolvedServingRoles.standalone.port | default(engine.servicePort, true) }}
 {% if standalone.service.type == 'NodePort' and standalone.service.nodePort is defined %}
     nodePort: {{ standalone.service.nodePort }}
 {% endif %}

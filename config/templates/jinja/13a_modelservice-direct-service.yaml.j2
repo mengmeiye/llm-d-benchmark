@@ -1,6 +1,6 @@
-{# Modelservice direct baseline: expose decode vLLM without Gateway, EPP,
-   Envoy, or the routing proxy.  RenderPlans forces routing.proxy.enabled=false
-   for this mode, so vLLM binds directly to engine.servicePort. #}
+{# Modelservice direct baseline: expose the decode engine without Gateway, EPP,
+   Envoy, or the routing proxy. RenderPlans forces routing.proxy.enabled=false
+   for this mode; the Service targets the port read from the engine command. #}
 {% set decode_create = (decode.enabled if decode.enabled is defined else (decode.replicas | default(0) | int > 0)) %}
 {% if standalone.enabled is defined and not standalone.enabled
       and not (kustomize.enabled | default(false))
@@ -26,6 +26,6 @@ spec:
     - name: http
       appProtocol: http
       port: {{ routing.servicePort }}
-      targetPort: {{ engine.servicePort }}
+      targetPort: {{ resolvedServingRoles.decode.port | default(engine.servicePort, true) }}
       protocol: TCP
 {% endif %}

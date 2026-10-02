@@ -450,7 +450,7 @@ class WorkloadMonitoringStep(Step):
         plan_config: dict | None,
         errors: list,
     ) -> None:
-        """Validate vLLM deployment using the model-aware capacity planner."""
+        """Validate the deployment using the model-aware capacity planner."""
         if context.dry_run:
             context.logger.log_info("[DRY RUN] Would run capacity planner validation")
             return

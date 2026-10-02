@@ -92,8 +92,7 @@ scenario:
         # The same stack under SGLang -- swap the command, nothing else. The
         # image follows the engine automatically (images.sglang):
         #   command: |
-        #     python3 -m sglang.launch_server \
-        #       --model-path Qwen/Qwen2.5-0.5B-Instruct \
+        #     sglang serve Qwen/Qwen2.5-0.5B-Instruct \
         #       --host 0.0.0.0 \
         #       --port 30000 \
         #       --tp-size 1

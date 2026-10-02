@@ -9,8 +9,9 @@ from llmdbenchmark.engine import (
     detect_engine,
     get_engine_spec,
     is_known_engine,
-    serving_engine,
+    resolved_serving_role,
     serving_port,
+    serving_role,
     tokenize,
 )
 from llmdbenchmark.executor.command import CommandExecutor
@@ -123,10 +124,10 @@ class BaseSmoketest:
         """Return True when the gateway routes /health to upstream pods.
 
         A shared HTTPRoute with ``rewriteTo: /`` routes everything, so
-        `/{stack-prefix}/health` reaches vLLM's /health at the root. But
-        ``rewriteTo: /v1`` (or any non-root path) narrows routing to the
-        /v1/* namespace - /health isn't under /v1, so the gateway would
-        have no rule matching it and a smoketest probe would 404.
+        `/{stack-prefix}/health` reaches the model server's health endpoint at
+        the root. But ``rewriteTo: /v1`` (or any non-root path) narrows routing
+        to the /v1/* namespace; the health endpoint is not under /v1, so the
+        gateway would have no matching rule and a smoketest probe would 404.
 
         The smoketest uses this to decide whether to skip the /health
         probe gracefully in shared-HTTPRoute scenarios where the operator
@@ -662,7 +663,7 @@ class BaseSmoketest:
         # -> this stack's InferencePool). Bake the prefix into base_url so
         # every downstream {base_url}/v1/completions becomes
         # {base_url}/pool-a/v1/completions - the gateway then rewrites
-        # /pool-a/* -> /* before the request reaches vLLM. Empty string for
+        # /pool-a/* -> /* before the request reaches the model server. Empty for
         # every other scenario, preserving existing behavior.
         prefix = self._gateway_path_prefix_for_stack(
             plan_config,
@@ -986,29 +987,17 @@ class BaseSmoketest:
 
     @staticmethod
     def expected_engine_repository(config: dict, *roles: str) -> str:
-        """Image repository the first of *roles* with a resolved engine will run.
-
-        ``<role>.engine.image`` is what resolve_engines filled in for whichever
-        engine that role's command launches, so it is the right answer for a
-        pod running SGLang as much as for one running vLLM. ``images.vllm`` is
-        the last-resort fallback for a config that predates the per-role image.
-        """
+        """Return the first resolved role image, with a legacy-plan fallback."""
         for role in roles or ("decode", "standalone"):
-            repo = _nested_get(config, role, "engine", "image", "repository")
-            if repo:
-                return str(repo)
+            resolved = resolved_serving_role(config, role)
+            if resolved and resolved.image_repository:
+                return resolved.image_repository
         engine_name = _nested_get(config, "engine", "name") or "vllm"
         return str(_nested_get(config, "images", engine_name, "repository") or "")
 
     @staticmethod
     def _repository_of(image: str) -> str:
-        """The repository out of an image reference.
-
-        ``repo:tag``, ``repo@sha256:...`` and a bare ``repo`` all reduce to
-        ``repo``. The tag is deliberately dropped: which build of an engine a
-        pod runs is the image-pin tests' business, and a digest-pinned pod
-        should still be recognised as that engine.
-        """
+        """Remove a tag or digest from an image reference."""
         ref = str(image).split("@", 1)[0]
         head, sep, tail = ref.rpartition(":")
         # A colon in the last path segment is a tag; one before a `/` is a
@@ -1027,17 +1016,16 @@ class BaseSmoketest:
     ) -> CheckResult:
         """Check the pod is running the engine the plan says it is.
 
-        ``<role>.engine.name`` is not evidence about a cluster: ``resolve_engines``
-        wrote it by reading the scenario's own command, so a check that compares
-        it against the plan compares the plan to itself and passes whatever is
-        actually running. This asks the *pod*, and each fact is one the plan
-        cannot supply:
+        The resolved engine name is not evidence about a cluster: it came from
+        the scenario's own command, so comparing it only with the plan would
+        pass whatever is actually running. This asks the *pod*, and each fact
+        is one the plan cannot supply:
 
           the launcher   ``detect_engine`` over the container's own args -- the
                          same signature matcher the resolver used, so no engine's
                          spelling is repeated here and a new ``EngineSpec`` is
                          covered by arriving.
-          the image      the repository ``engine.imageKey`` resolved to. An
+          the image      the resolved serving-role image repository. An
                          SGLang pod inspected against a TRT-LLM plan differs
                          here on the first token.
           the container  the serving container exists under the name every other
@@ -1372,14 +1360,11 @@ class BaseSmoketest:
         logger=None,
         context: ExecutionContext | None = None,
     ) -> list[dict]:
-        """Validate all aspects of pods for a given role (decode/prefill/standalone).
-
-        Checks replica count, resources, parallelism, env vars, init containers,
-        security context, volumes, probes, and engine args against the rendered config.
-
-        Returns the list of matching pods.
-        """
+        """Validate live pods for one role and return the matching pod specs."""
         role_config = _nested_get(config, role) or {}
+        resolved = resolved_serving_role(config, role)
+        resolved_resources = resolved.resources if resolved is not None else {}
+        resolved_parallelism = resolved.parallelism if resolved is not None else {}
         prefix = role  # used in check names
 
         # --- Replica count ---
@@ -1437,7 +1422,7 @@ class BaseSmoketest:
             # ``workers`` pods (1 leader + N-1 workers).
             multinode_enabled = _nested_get(config, "multinode", "enabled")
             if multinode_enabled:
-                workers = int(role_config.get("parallelism", {}).get("workers", 1))
+                workers = int(resolved_parallelism.get("workers", 1))
                 expected_pods = expected_replicas * workers
             else:
                 expected_pods = expected_replicas
@@ -1519,7 +1504,7 @@ class BaseSmoketest:
         # --- Resources (limits + requests) ---
         for section in ("limits", "requests"):
             for field in ("memory", "cpu", "ephemeral-storage"):
-                expected = _nested_get(role_config, "resources", section, field)
+                expected = _nested_get(resolved_resources, section, field)
                 if expected is not None:
                     report.add(
                         _tag(
@@ -1531,14 +1516,7 @@ class BaseSmoketest:
                         )
                     )
 
-        # --- Accelerators per pod, as the plan stated them ---
-        # A device count is a Kubernetes fact, so it is resolved exactly the way
-        # the renderer resolved it (`resources.limits.<resource>` ->
-        # `accelerator.count` per role -> plan-wide -> `parallelism.tensor x
-        # dataLocal`) and compared against what the pod actually got. A mismatch
-        # means the chart and the plan disagree, which shows up at runtime as a
-        # cryptic engine-side failure, so it is worth naming here. Zero means the
-        # role is CPU-only and there is nothing to check.
+        # Keep accelerator-count precedence aligned with the renderer.
         wanted_accelerators, _count_source = effective_accelerator_count(
             role_config, config
         )
@@ -1559,7 +1537,7 @@ class BaseSmoketest:
             )
 
         # --- Extra env vars ---
-        extra_env = role_config.get("extraEnvVars", [])
+        extra_env = resolved.environment if resolved is not None else ()
         for ev in extra_env:
             ev_name = ev.get("name")
             ev_value = ev.get("value")
@@ -1696,25 +1674,8 @@ class BaseSmoketest:
         probe_config = role_config.get("probes", {})
         self._validate_probes(pod, prefix, probe_config, report, group=group_name)
 
-        # --- The engine command, verbatim ---
-        # The scenario's command is the contract, and llm-d-benchmark's job is
-        # to deliver it to the container unchanged. So assert exactly that. It
-        # catches every way the chain between scenario and pod can damage a
-        # command -- a dropped line continuation, a quote eaten by a shell
-        # layer, ${...} substitution that left a placeholder behind, a role that
-        # silently inherited the plan-wide command when it meant to override it
-        # -- and it does so for vLLM, SGLang and TRT-LLM alike, with no
-        # per-engine knowledge. Checking flag by flag instead would mean
-        # re-deriving every engine's own spelling here, which is the bookkeeping
-        # the verbatim contract exists to avoid.
-        #
-        # Whether the flags inside the command are the right flags is the
-        # engine's judgement, not ours; a wrong one fails loudly at startup.
-        expected_command = (
-            _nested_get(role_config, "engine", "command")
-            or _nested_get(config, "engine", "command")
-            or ""
-        )
+        # Compare the complete command instead of maintaining per-engine flags.
+        expected_command = resolved.command if resolved is not None else ""
         if str(expected_command).strip():
             report.add(
                 _tag(
@@ -1724,13 +1685,8 @@ class BaseSmoketest:
                 )
             )
 
-        # --- The engine the pod is actually running ---
-        # resolve_engines detected the engine from the scenario's command and
-        # picked the image, health path and metrics path from it. Assert the
-        # running pod agrees -- see `assert_engine_identity` for why the plan's
-        # own `engine.name` is not evidence that it does.
-        engine_cfg = role_config.get("engine") or {}
-        engine_name = engine_cfg.get("name") or _nested_get(config, "engine", "name")
+        # Confirm the command-selected engine and image reached the pod.
+        engine_name = resolved.engine_name if resolved is not None else ""
         if engine_name:
             report.add(
                 _tag(
@@ -1738,20 +1694,16 @@ class BaseSmoketest:
                         pod,
                         str(engine_name),
                         check_name=f"{prefix}_engine",
-                        expected_repository=str(
-                            _nested_get(role_config, "engine", "image", "repository")
-                            or ""
+                        expected_repository=(
+                            resolved.image_repository if resolved is not None else ""
                         ),
                         pod_name=pod_name,
                     )
                 )
             )
 
-        # --- The port the engine binds ---
-        # Read out of the command by resolve_engines, then used for the
-        # container port and the probes. A pod whose containerPort disagrees
-        # with the command's --port passes its probes against nothing.
-        engine_port = engine_cfg.get("port")
+        # Confirm the resolved bind port is declared on the engine container.
+        engine_port = resolved.port if resolved is not None else None
         if engine_port and ports:
             declared = [p.get("containerPort") for p in ports]
             has_port = int(engine_port) in [p for p in declared if p is not None]
@@ -1883,13 +1835,12 @@ class BaseSmoketest:
         poll_interval: int = 10,
         url_path_prefix: str = "",
     ) -> str | None:
-        # The engine and its health path come from the plan, where
-        # `resolve_engines` published them for whichever launcher the scenario's
-        # command names -- so this log line says "sglang" on an SGLang stack, and
-        # an engine that serves its health elsewhere is polled where it serves.
-        engine_cfg = serving_engine(plan_config or {})
-        engine = str(engine_cfg.get("name") or "") or "the engine"
-        health_path = str(engine_cfg.get("healthPath") or "/health")
+        # Health path and engine identity come from the active resolved role.
+        resolved = serving_role(plan_config or {})
+        engine = (
+            resolved.engine_name if resolved and resolved.engine_name else "the engine"
+        )
+        health_path = resolved.health_path if resolved else "/health"
         protocol = "https" if str(port) == "443" else "http"
         prefix = _normalize_url_prefix(url_path_prefix)
         url = f"{protocol}://{host}:{port}{prefix}{health_path}"

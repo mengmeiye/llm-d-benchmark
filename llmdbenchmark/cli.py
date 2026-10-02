@@ -2249,7 +2249,7 @@ def cli() -> None:
     parser = argparse.ArgumentParser(
         prog="llmdbenchmark",
         description="Provision and drive experiments for LLM workloads focused on analyzing "
-        "the performance of llm-d and vllm inference platform stacks. "
+        "the performance of llm-d and standalone inference stacks. "
         f"Visit {__package_home__} for more information.",
         epilog=(
             "A command must be supplied. Commands correspond to high-level actions "

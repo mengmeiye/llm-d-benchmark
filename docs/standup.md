@@ -2,16 +2,28 @@
 `llm-d-benchmark` provides its own automated framework for the standup of stacks serving large language models in a Kubernetes cluster.
 
 ## Motivation
-In order to allow reproducible and flexible experiments, and taking into account that the configuration paramaters have significant impact on the overall performance, it is necessary to provide the user with the ability to `standup` and `teardown` stacks.
+Reproducible experiments require control over the configuration parameters that
+affect performance. The `standup` and `teardown` commands provide that control
+for deployed stacks.
 
 ## Methods
-Currently, the following standup methods are supported
-a) "Standalone", with multiple VLLM `pods` controlled by a `deployment` behind a single `service`
-b) "llm-d", which leverages a combination of [llm-d-infra](https://github.com/llm-d-incubation/llm-d-infra.git) and [llm-d-modelservice](https://github.com/llm-d/llm-d-model-service.git) to deploy a full-fledged `llm-d` stack
-c) "No-Kubernetes (`nok8s`)", which runs the routing stack (vLLM + EPP + Envoy) as plain `docker`/`podman` containers on a single host, with **no cluster** -- see [No-Kubernetes deploy method](nok8s.md)
+Currently, the following standup methods are supported:
+
+- "Standalone", with model-server pods controlled by a Deployment behind a
+  single Service.
+- "llm-d", which leverages a combination of
+  [llm-d-infra](https://github.com/llm-d-incubation/llm-d-infra.git) and
+  [llm-d-modelservice](https://github.com/llm-d/llm-d-model-service.git) to
+  deploy a full llm-d stack.
+- "No-Kubernetes (`nok8s`)", which runs the routing stack (model server, EPP,
+  and Envoy) as plain `docker`/`podman` containers on a single host -- see
+  [No-Kubernetes deploy method](nok8s.md).
 
 ## Scenarios
-All the information required for the standup of a stack is contained on a "scenario file". This information is encoded in the form of environment variables, with default values defined in `config/defaults.yaml` which can be then overriden inside a [scenario file](../config/scenarios) (YAML-based) or via [specification templates](../config/specification) (Jinja2 `.yaml.j2` files).
+All information required to stand up a stack is contained in a scenario file.
+Defaults are defined in `config/templates/values/defaults.yaml` and can be
+overridden in a [scenario file](../config/scenarios) (YAML) or through a
+[specification template](../config/specification) (Jinja2 `.yaml.j2`).
 
 ### Multi-Stack Scenarios
 
@@ -262,14 +274,14 @@ Hugging Face credentials are read from the environment, never from the scenario,
 
 ### What comes from the scenario file
 
-Everything else. The single rule that shapes the file: **an engine flag is never a scenario key.** A role states its own launch command, verbatim, in the engine's own spelling; llm-d-benchmark reads that text for the handful of facts Kubernetes needs before the process starts (which engine, which port, how many accelerators, the model reference) and passes the rest through untouched. So there is no key for `--max-model-len`, `--tp-size` or `--kv-transfer-config`: they go in the command, exactly as the llm-d guides write them.
+Everything else. The single rule that shapes the file: **an engine flag is never a scenario key.** A role states its launch command in the engine's own spelling. llm-d-benchmark reads only the model, bind port, and values needed by capacity or routing checks; all other flags pass through untouched. Kubernetes resources and chart parallelism remain explicit scenario fields because the pod must be sized before the engine starts.
 
 [`config/README.md`](../config/README.md) is the full key reference -- every key, its default, and what reads it. The areas standup draws on:
 
 | Area                       | Keys                                                                                                                                                                              |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Engine launch              | `<role>.engine.command` (`decode`, `prefill`, `standalone`, `nok8s`), `standalone.engine.args`, `engine.preprocessScript`, `<role>.engine.port`, `engine.servicePort`, `engine.name` |
-| Model                      | `model.name`, `model.shortName`, `model.size`, `modelservice.uriProtocol` (`pvc` \| `hf`)                                                                                          |
+| Model                      | `model.name`, `model.shortName`, `model.size`, `modelservice.uriProtocol` (`pvc+hf` \| `pvc` \| `hf`)                                                                             |
 | Scale and hardware         | `<role>.replicas`, `<role>.resources`, `<role>.parallelism`, `accelerator.resource`, `accelerator.type`, `accelerator.memory`, `<role>.acceleratorType`, `affinity`                 |
 | Storage                    | `storage.modelPvc.*`, `storage.workloadPvc.*`, `storage.downloadTimeout`, `storage.hostPath.*`, `standalone.modelMountPath`                                                        |
 | Routing                    | `gateway.className`, `routing.proxy.enabled`, `routing.connector`, `router.epp.*`, `httpRoute.*`                                                                                   |
@@ -454,7 +466,7 @@ Standup deploys the llm-d charts -- modelservice, the router/endpoint picker, an
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `modelservice.enabled`                    | Deploy via the modelservice chart (`decode`/`prefill` roles). The alternative lanes are `standalone`, `kustomize`, `nok8s` and `fma`. |
 | `modelservice.uriProtocol`                | `pvc` (default: a download Job stages the weights and the engine reads them from the PVC) or `hf` (the chart hands the engine an `hf://` artifact and it pulls at start). Read at this level -- under `storage:` it parses and nothing reads it. |
-| `decode.engine.port`, `prefill.engine.port` | Override the port a role binds. Normally omit: it is read from the command, and the default follows the topology -- decode binds 8200 behind the routing sidecar, 8000 without it; prefill and standalone bind 8000. |
+| `<role>.engine.port` | Fallback port when the command does not contain a numeric `--port` (for example, an image entrypoint or `--port $ENGINE_PORT`). Normally omit it: the command's numeric port is authoritative. |
 | `gateway.className`                       | Router topology -- see the table above.                                                                          |
 | `gateway.name`, `gateway.namespace`, `gateway.logLevel`, `gateway.service.type`, `gateway.resources` | The Gateway object and its data plane, for the gateway-backed classes. |
 | `router.epp.replicas`, `router.epp.resources`, `router.epp.env`, `router.epp.verbosity` | The endpoint picker pod.                                        |

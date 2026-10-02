@@ -4,7 +4,7 @@ Post-deployment validation for llm-d-benchmark. Runs automatically after standup
 
 ## Why smoketests
 
-Standing up an llm-d stack involves many moving parts -- Helm charts, init containers, sidecars, routing proxies, EPP pods, and scenario-specific vLLM flags. A successful `helm install` doesn't guarantee the pods are configured correctly. The smoketest module catches configuration drift, port mismatches, missing env vars, and broken routing before you spend GPU hours on a benchmark that was doomed from the start.
+Standing up an llm-d stack involves many moving parts -- Helm charts, init containers, sidecars, routing proxies, EPP pods, and the engine command. A successful `helm install` doesn't guarantee the pods are configured correctly. The smoketest module catches configuration drift, port mismatches, missing env vars, and broken routing before you spend accelerator hours on a benchmark that was doomed from the start.
 
 ## Usage
 
@@ -29,7 +29,7 @@ Smoketests also run automatically at the end of `llmdbenchmark standup`. Use `--
 |------|------|--------------|----------|
 | 00 | `health_check` | Verifies pods are running, `/health` responds, `/v1/models` returns the expected model, service/gateway is reachable, pod IPs respond, OpenShift route works (if applicable). When both decode and prefill are configured, checks both pod groups. | All scenarios |
 | 01 | `inference_test` | Sends a sample `/v1/completions` request (falls back to `/v1/chat/completions`), logs generated text and a copy-pasteable curl command for demo purposes | All scenarios |
-| 02 | `validate_config` | Compares the live pod spec against the rendered `config.yaml` to catch mismatches in resources, parallelism, env vars, probes, volumes, security context, and vLLM flags | Scenarios with a dedicated validator |
+| 02 | `validate_config` | Compares the live pod spec against the rendered `config.yaml` to catch mismatches in resources, parallelism, env vars, probes, volumes, security context, and the engine command | Scenarios with a dedicated validator |
 
 Scenarios without a dedicated validator (cicd paths, sim, etc.) run steps 00 and 01 only. Step 02 logs a skip message and passes.
 
@@ -54,8 +54,8 @@ from the standup and run phases:
   HTTPRoute get `""` and the existing single-model behavior is unchanged.
 - **Health-probe skip for narrowed routing.** If an operator sets
   `httpRoute.rewriteTo` to something other than `"/"` (e.g. `/v1`), the
-  gateway intentionally doesn't route `/health` (which lives at vLLM's
-  root, not under `/v1`). The smoketest detects this case via
+  gateway intentionally doesn't route the engine health path (normally
+  `/health` at the root, not under `/v1`). The smoketest detects this case via
   `_gateway_routes_health` and logs an INFO skip instead of failing -
   `/v1/models` + direct-pod-IP probes still run and still validate health.
 
@@ -64,7 +64,7 @@ from the standup and run phases:
 The health check validates every layer of the serving stack:
 
 - **Pod status** -- all model-serving pods are in Running state with ready containers. When both decode and prefill pods are configured (e.g. pd-disaggregation), both groups are checked independently. Logs explicitly distinguish "decode pod(s)" from "prefill pod(s)".
-- **`/health` endpoint** -- the vLLM health endpoint returns 200
+- **Engine health endpoint** -- the resolved health path returns 200
 - **`/v1/models`** -- the models API returns the expected model name
 - **Service test** -- the Kubernetes Service routes traffic to pods
 - **Pod direct IP test** -- each pod responds on its direct IP (bypassing the Service)
@@ -82,7 +82,7 @@ Sends a real inference request to validate end-to-end functionality:
 
 ### How it works
 
-The rendered `config.yaml` in the plan directory captures the exact configuration the scenario intended. Step 02 queries the live cluster for pod specs and compares them field by field. Nothing is hardcoded in the validators -- expected values come from the config, so they adapt automatically when the scenario changes.
+The rendered `config.yaml` in the plan directory captures the exact configuration the scenario intended. Its derived `resolvedServingRoles` block is the final runtime snapshot after overrides, deployment selection, command parsing, and inheritance. Step 02 queries the live cluster for pod specs and compares them field by field against that snapshot. Nothing is hardcoded in the validators, so they adapt automatically when the scenario changes.
 
 The base class (`validate_role_pods`) handles the common checks that apply to every scenario. Per-scenario validators add checks specific to their deployment pattern.
 

@@ -1,9 +1,10 @@
 {% if standalone.enabled %}
+{% set serving = resolvedServingRoles.standalone %}
 
 {# ============================================================================
    standalone-deployment.yaml.j2
 
-   Standalone vLLM deployment without llm-d routing infrastructure.
+   Standalone model-server deployment without llm-d routing infrastructure.
    Useful for simple single-model deployments or testing.
 
    Volume handling:
@@ -37,8 +38,8 @@
    Mirrored by ``effective_accelerator_count`` in
    llmdbenchmark/parser/cluster_resource_resolver.py. #}
 {% set standalone_accel_resource = (standalone.accelerator.resource if standalone.accelerator is defined and standalone.accelerator.resource is defined else accelerator.resource | default('')) %}
-{% set standalone_stated_devices = standalone.resources.limits[standalone_accel_resource] if (standalone_accel_resource and standalone.resources.limits is defined and standalone.resources.limits[standalone_accel_resource] is defined) else none %}
-{% set standalone_chart_gpus = (standalone.parallelism.tensor | int) * (standalone.parallelism.dataLocal | default(1, true) | int) %}
+{% set standalone_stated_devices = serving.resources.limits[standalone_accel_resource] if (standalone_accel_resource and serving.resources.limits is defined and serving.resources.limits[standalone_accel_resource] is defined) else none %}
+{% set standalone_chart_gpus = (serving.parallelism.tensor | int) * (serving.parallelism.dataLocal | default(1, true) | int) %}
 {% set standalone_shorthand_gpus = (standalone.accelerator.count | int) if (standalone.accelerator is defined and standalone.accelerator.count is defined) else ((accelerator.count | int) if (accelerator is defined and accelerator.count is defined) else standalone_chart_gpus) %}
 {% set standalone_accel_count = (standalone_stated_devices | int) if standalone_stated_devices is not none else standalone_shorthand_gpus %}
 
@@ -193,15 +194,15 @@ spec:
         # specific environment (NIXL side channel, UCX, SGLang disaggregation,
         # ...) belongs in standalone.extraEnvVars.
         - name: ENGINE_PORT
-          value: "{{ standalone.engine.port | default(engine.servicePort) }}"
+          value: "{{ serving.port | default(engine.servicePort) }}"
         - name: SERVICE_PORT
           value: "{{ engine.servicePort }}"
         - name: DP_SIZE
-          value: "{{ (standalone.parallelism.data if standalone.parallelism is defined and standalone.parallelism.data is defined else '1') }}"
+          value: "{{ (serving.parallelism.data if serving.parallelism is defined and serving.parallelism.data is defined else '1') }}"
         - name: TP_SIZE
-          value: "{{ (standalone.parallelism.tensor if standalone.parallelism is defined and standalone.parallelism.tensor is defined else '1') }}"
+          value: "{{ (serving.parallelism.tensor if serving.parallelism is defined and serving.parallelism.tensor is defined else '1') }}"
         - name: DP_SIZE_LOCAL
-          value: "{{ (standalone.parallelism.dataLocal if standalone.parallelism is defined and standalone.parallelism.dataLocal is defined else '1') }}"
+          value: "{{ (serving.parallelism.dataLocal if serving.parallelism is defined and serving.parallelism.dataLocal is defined else '1') }}"
         - name: POD_IP
           valueFrom:
             fieldRef:
@@ -211,8 +212,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-{% if standalone.extraEnvVars is defined and standalone.extraEnvVars %}
-{% for extra in standalone.extraEnvVars %}
+{% if serving.environment is defined and serving.environment %}
+{% for extra in serving.environment %}
         - name: {{ extra.name }}
 {% if extra.value is defined %}
           value: "{{ extra.value }}"
@@ -241,14 +242,14 @@ spec:
 {% endif %}
       containers:
 {# ===== THE SERVING CONTAINER =====
-   Named from `standalone.engine.containerName`, which resolves to llm-d's
-   engine-neutral `modelserver`. A pod running SGLang should not carry a
+   Named from the resolved role's engine-neutral `modelserver` default. A pod
+   running SGLang should not carry a
    container called vllm-*, and `kubectl logs -c modelserver` then reads the
    same whichever engine the command launches. #}
-      - name: {{ standalone.engine.containerName | default('modelserver', true) }}
-        image: {{ standalone.engine.image.repository }}:{{ standalone.engine.image.tag }}
-        imagePullPolicy: {{ standalone.engine.image.pullPolicy }}
-{% set standalone_model_command = standalone.engine.modelCommand | default('custom') %}
+      - name: {{ serving.containerName }}
+        image: {{ serving.image.repository }}:{{ serving.image.tag }}
+        imagePullPolicy: {{ serving.image.pullPolicy }}
+{% set standalone_model_command = 'custom' if serving.launchMode == 'command' else 'imageDefault' %}
 {% if standalone_model_command == 'custom' %}
         command:
         - {{ engine.shell }}
@@ -256,11 +257,11 @@ spec:
         args:
         - |
 {{ render_engine_command('standalone') | indent(10, first=True) }}
-{% elif standalone.engine.args is defined and standalone.engine.args %}
+{% elif serving.entrypointArgs is defined and serving.entrypointArgs %}
 {# imageDefault: no `command:` -- the image entrypoint runs. Required for
    distroless server images that ship no shell to exec `<shell> -c`. #}
         args:
-{{ standalone.engine.args | toyaml | indent(8, true) }}
+{{ serving.entrypointArgs | toyaml | indent(8, true) }}
 {% endif %}
         env:
 {# No LLMDBENCH_VLLM_* here. The model is already MODEL_NAME/MODEL_PATH below,
@@ -307,7 +308,7 @@ spec:
         # specific environment (NIXL side channel, UCX, SGLang disaggregation,
         # ...) belongs in standalone.extraEnvVars.
         - name: ENGINE_PORT
-          value: "{{ standalone.engine.port | default(engine.servicePort) }}"
+          value: "{{ serving.port | default(engine.servicePort) }}"
         - name: SERVICE_PORT
           value: "{{ engine.servicePort }}"
         - name: POD_IP
@@ -323,8 +324,8 @@ spec:
         - name: LLMDBENCH_POD_LABELS
           value: "{{ standalone.podLabels }}"
 {% endif %}
-{% if standalone.extraEnvVars is defined %}
-{% for env in standalone.extraEnvVars %}
+{% if serving.environment is defined %}
+{% for env in serving.environment %}
         - name: {{ env.name }}
 {% if env.value is defined %}
           value: "{{ env.value }}"
@@ -346,19 +347,19 @@ spec:
 {% endfor %}
 {% endif %}
         ports:
-        - containerPort: {{ standalone.engine.port }}
+        - containerPort: {{ serving.port }}
           name: metrics
         startupProbe:
           httpGet:
-            path: {{ standalone.probes.startup.path | default(standalone.engine.healthPath | default('/health', true), true) }}
-            port: {{ standalone.engine.port }}
+            path: {{ standalone.probes.startup.path | default(serving.healthPath | default('/health', true), true) }}
+            port: {{ serving.port }}
           failureThreshold: {{ standalone.probes.startup.failureThreshold }}
           initialDelaySeconds: {{ standalone.probes.startup.initialDelaySeconds }}
           periodSeconds: {{ standalone.probes.startup.periodSeconds }}
           timeoutSeconds: {{ standalone.probes.startup.timeoutSeconds }}
         livenessProbe:
           tcpSocket:
-            port: {{ standalone.engine.port }}
+            port: {{ serving.port }}
           failureThreshold: {{ standalone.probes.liveness.failureThreshold }}
           periodSeconds: {{ standalone.probes.liveness.periodSeconds }}
 {% if standalone.probes.liveness.timeoutSeconds %}
@@ -366,8 +367,8 @@ spec:
 {% endif %}
         readinessProbe:
           httpGet:
-            path: {{ standalone.probes.readiness.path | default(standalone.engine.healthPath | default('/health', true), true) }}
-            port: {{ standalone.engine.port }}
+            path: {{ standalone.probes.readiness.path | default(serving.healthPath | default('/health', true), true) }}
+            port: {{ serving.port }}
           failureThreshold: {{ standalone.probes.readiness.failureThreshold }}
           periodSeconds: {{ standalone.probes.readiness.periodSeconds }}
 {% if standalone.probes.readiness.timeoutSeconds %}
@@ -375,8 +376,8 @@ spec:
 {% endif %}
         resources:
           limits:
-            memory: {{ standalone.resources.limits.memory }}
-            cpu: "{{ standalone.resources.limits.cpu }}"
+            memory: {{ serving.resources.limits.memory }}
+            cpu: "{{ serving.resources.limits.cpu }}"
 {% if standalone_accel_resource and standalone_accel_count > 0 %}
             {{ standalone_accel_resource }}: "{{ standalone_accel_count }}"
 {% endif %}
@@ -391,8 +392,8 @@ spec:
             {{ net_resource }}: "{{ net_nr }}"
 {% endif %}
           requests:
-            memory: {{ standalone.resources.requests.memory }}
-            cpu: "{{ standalone.resources.requests.cpu }}"
+            memory: {{ serving.resources.requests.memory }}
+            cpu: "{{ serving.resources.requests.cpu }}"
 {% if standalone_accel_resource and standalone_accel_count > 0 %}
             {{ standalone_accel_resource }}: "{{ standalone_accel_count }}"
 {% endif %}
@@ -441,7 +442,7 @@ spec:
 {# Shares same volumes, env vars, and resources as the main container.         #}
 {% if standalone.launcher is defined and standalone.launcher.enabled %}
       - name: launcher-{{ model_id_label }}
-        image: {{ standalone.launcher.image.repository | default(standalone.engine.image.repository) }}:{{ standalone.launcher.image.tag | default(standalone.engine.image.tag) }}
+        image: {{ standalone.launcher.image.repository | default(serving.image.repository) }}:{{ standalone.launcher.image.tag | default(serving.image.tag) }}
         imagePullPolicy: {{ standalone.launcher.imagePullPolicy }}
         command:
         - {{ engine.shell }}
@@ -489,7 +490,7 @@ spec:
         # specific environment (NIXL side channel, UCX, SGLang disaggregation,
         # ...) belongs in standalone.extraEnvVars.
         - name: ENGINE_PORT
-          value: "{{ standalone.engine.port | default(engine.servicePort) }}"
+          value: "{{ serving.port | default(engine.servicePort) }}"
         - name: SERVICE_PORT
           value: "{{ engine.servicePort }}"
         - name: POD_IP
@@ -505,8 +506,8 @@ spec:
         - name: LLMDBENCH_POD_LABELS
           value: "{{ standalone.podLabels }}"
 {% endif %}
-{% if standalone.extraEnvVars is defined %}
-{% for env in standalone.extraEnvVars %}
+{% if serving.environment is defined %}
+{% for env in serving.environment %}
         - name: {{ env.name }}
 {% if env.value is defined %}
           value: "{{ env.value }}"
@@ -532,8 +533,8 @@ spec:
 {# Launcher probes: startup/readiness use the engine port, liveness the launcher port #}
         startupProbe:
           httpGet:
-            path: {{ standalone.probes.startup.path | default(standalone.engine.healthPath | default('/health', true), true) }}
-            port: {{ standalone.engine.port }}
+            path: {{ standalone.probes.startup.path | default(serving.healthPath | default('/health', true), true) }}
+            port: {{ serving.port }}
           failureThreshold: {{ standalone.probes.startup.failureThreshold }}
           initialDelaySeconds: {{ standalone.probes.startup.initialDelaySeconds }}
           periodSeconds: 30
@@ -548,8 +549,8 @@ spec:
 {% endif %}
         readinessProbe:
           httpGet:
-            path: {{ standalone.probes.readiness.path | default(standalone.engine.healthPath | default('/health', true), true) }}
-            port: {{ standalone.engine.port }}
+            path: {{ standalone.probes.readiness.path | default(serving.healthPath | default('/health', true), true) }}
+            port: {{ serving.port }}
           failureThreshold: 3
           periodSeconds: 5
 {% if standalone.probes.readiness.timeoutSeconds %}
@@ -557,8 +558,8 @@ spec:
 {% endif %}
         resources:
           limits:
-            memory: {{ standalone.resources.limits.memory }}
-            cpu: "{{ standalone.resources.limits.cpu }}"
+            memory: {{ serving.resources.limits.memory }}
+            cpu: "{{ serving.resources.limits.cpu }}"
 {% if standalone_accel_resource and standalone_accel_count > 0 %}
             {{ standalone_accel_resource }}: "{{ standalone_accel_count }}"
 {% endif %}
@@ -569,8 +570,8 @@ spec:
             {{ net_resource }}: "{{ net_nr }}"
 {% endif %}
           requests:
-            memory: {{ standalone.resources.requests.memory }}
-            cpu: "{{ standalone.resources.requests.cpu }}"
+            memory: {{ serving.resources.requests.memory }}
+            cpu: "{{ serving.resources.requests.cpu }}"
 {% if standalone_accel_resource and standalone_accel_count > 0 %}
             {{ standalone_accel_resource }}: "{{ standalone_accel_count }}"
 {% endif %}

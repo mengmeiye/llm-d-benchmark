@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from llmdbenchmark.engine import resolved_serving_role
 from llmdbenchmark.executor.context import ExecutionContext
 from llmdbenchmark.smoketests.base import BaseSmoketest, _load_config, _nested_get
 from llmdbenchmark.smoketests.report import CheckResult, SmoketestReport
@@ -72,10 +73,10 @@ class OptimizedBaselineValidator(WvaSmoketestMixin, BaseSmoketest):
 
             # Scenario-specific: the engine also serves /metrics on the port it
             # binds, which is whatever its command's --port said (recorded by
-            # resolve_engines as decode.engine.port).
-            expected_port = _nested_get(config, "decode", "engine", "port")
-            if expected_port is not None:
-                expected_port = int(expected_port)
+            # command, then published in the resolved decode snapshot).
+            resolved = resolved_serving_role(config, "decode")
+            if resolved is not None:
+                expected_port = resolved.port
                 has_metrics = any(
                     p.get("name") == "metrics"
                     or p.get("containerPort") == expected_port

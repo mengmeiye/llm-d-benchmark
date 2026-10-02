@@ -876,7 +876,7 @@ class AdminPrerequisitesStep(Step):
     ):
         """Apply OpenShift SCC assignments if on OpenShift.
 
-        Grants ``anyuid`` and ``privileged`` SCCs to the vLLM workload
+        Grants ``anyuid`` and ``privileged`` SCCs to the model-server workload
         service account.  When the gateway provider is **agentgateway**,
         creates a minimal custom SCC (``llmdbench-agentgateway``) that
         permits only UID 10101 and the ``NET_BIND_SERVICE`` capability,

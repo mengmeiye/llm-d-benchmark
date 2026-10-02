@@ -50,7 +50,7 @@ def _scenario(tmp_path: Path, engine: str) -> Path:
     return switched
 
 
-def _render(tmp_path: Path, scenario: Path):
+def _render(tmp_path: Path, scenario: Path, *, cli_methods: str | None = None):
     logger = MagicMock()
     renderer = RenderPlans(
         template_dir=TEMPLATES,
@@ -60,6 +60,7 @@ def _render(tmp_path: Path, scenario: Path):
         logger=logger,
         version_resolver=VersionResolver(logger=logger, dry_run=True),
         cluster_resource_resolver=ClusterResourceResolver(logger=logger, dry_run=True),
+        cli_methods=cli_methods,
     )
     result = renderer.eval()
     assert not result.has_errors
@@ -165,8 +166,7 @@ def test_sglang_command_reaches_the_container_verbatim(tmp_path):
     assert container["command"] == ["/bin/bash", "-c"]
     # Every flag the user wrote, in the spelling they wrote it.
     for flag in (
-        "python3 -m sglang.launch_server",
-        "--model-path",
+        "sglang serve Qwen/Qwen3-0.6B",
         "--tp-size 1",
         "--context-length 32768",
         "--page-size 64",
@@ -296,3 +296,53 @@ def test_model_id_is_read_off_the_command(tmp_path, name):
     assert merged["model"]["path"] == "models/Qwen/Qwen3-0.6B"
     # Nothing rewrote the command to get there.
     assert "--served-model-name" not in command
+
+
+@pytest.mark.parametrize("name", ["vllm", "sglang", "trtllm"])
+def test_resolved_role_is_the_manifest_source_of_truth(tmp_path, name):
+    """Every engine reaches the pod through the same normalized role shape."""
+    _, plan_dir, merged = _render(tmp_path, _resolve(tmp_path, name))
+    resolved = merged["resolvedServingRoles"]["decode"]
+    container = yaml.safe_load(
+        (plan_dir / "13_ms-values.yaml").read_text(encoding="utf-8")
+    )["decode"]["containers"][0]
+
+    assert resolved["active"] is True
+    assert resolved["engineName"] == name
+    assert resolved["launchMode"] == "command"
+    assert resolved["command"] in container["args"][-1]
+    assert container["name"] == resolved["containerName"]
+    assert container["image"] == (
+        f"{resolved['image']['repository']}:{resolved['image']['tag']}"
+    )
+    assert container["extraConfig"]["startupProbe"]["httpGet"] == {
+        "path": resolved["healthPath"],
+        "port": resolved["port"],
+    }
+    assert (
+        container["resources"]["limits"]["memory"]
+        == resolved["resources"]["limits"]["memory"]
+    )
+
+
+@pytest.mark.parametrize("name", ["vllm", "sglang", "trtllm"])
+def test_standalone_uses_the_same_resolved_role_contract(tmp_path, name):
+    _, plan_dir, merged = _render(
+        tmp_path, _resolve(tmp_path, name), cli_methods="standalone"
+    )
+    resolved = merged["resolvedServingRoles"]["standalone"]
+    deployment = yaml.safe_load(
+        (plan_dir / "14_standalone-deployment_yaml.yaml").read_text(encoding="utf-8")
+    )
+    service = yaml.safe_load(
+        (plan_dir / "15_standalone-service_yaml.yaml").read_text(encoding="utf-8")
+    )
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+
+    assert resolved["active"] is True
+    assert resolved["inheritedFrom"] == "decode"
+    assert resolved["engineName"] == name
+    assert resolved["command"] in container["args"][-1]
+    assert container["name"] == resolved["containerName"]
+    assert container["ports"][0]["containerPort"] == resolved["port"]
+    assert service["spec"]["ports"][0]["targetPort"] == resolved["port"]

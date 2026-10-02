@@ -1,7 +1,7 @@
 {# ============================================================================
    18_podmonitor.yaml.j2
 
-   PodMonitor for Prometheus to scrape vLLM model serving pods deployed via
+   PodMonitor for Prometheus to scrape model-serving pods deployed via
    modelservice (decode/prefill) or FMA (launcher pods). Only rendered when
    monitoring.podmonitor.enabled is true. Matches bash step 09
    generate_podmonitor_yaml().
@@ -40,7 +40,7 @@ spec:
 {% if _fma_enabled %}
   - interval: {{ monitoring.scrapeInterval | default('30s') }}
 {# Engine knowledge, from the resolved spec -- see 17_standalone-podmonitor. #}
-    path: {{ monitoring.metricsPath | default(decode.engine.metricsPath, true) | default('/metrics', true) }}
+    path: {{ monitoring.metricsPath | default(resolvedServingRoles.decode.metricsPath, true) | default('/metrics', true) }}
     relabelings:
       - sourceLabels: [__meta_kubernetes_pod_container_name]
         action: keep
@@ -60,7 +60,7 @@ spec:
 {% else %}
   - port: {{ monitoring.podmonitor.portName | default('metrics') }}
 {# Engine knowledge, from the resolved spec -- see 17_standalone-podmonitor. #}
-    path: {{ monitoring.metricsPath | default(decode.engine.metricsPath, true) | default('/metrics', true) }}
+    path: {{ monitoring.metricsPath | default(resolvedServingRoles.decode.metricsPath, true) | default('/metrics', true) }}
     interval: {{ monitoring.scrapeInterval | default('30s') }}
 {% if _wva_enabled %}
     relabelings:

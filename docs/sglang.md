@@ -1,19 +1,56 @@
 # Benchmarking SGLang
 
-`llm-d-benchmark` can stand up and benchmark [SGLang](https://github.com/sgl-project/sglang)
-as the inference engine instead of the default vLLM. SGLang support reuses the
-**SGLang model-server overlays that ship in the upstream llm-d guides**, so it is
-available exclusively through the [kustomize deploy method](kustomize.md)
-(`-t kustomize`). The workload/harness and analysis stages are engine-agnostic
-and work unchanged.
+`llm-d-benchmark` can stand up and smoketest
+[SGLang](https://github.com/sgl-project/sglang) with the `modelservice`,
+`standalone`, or [kustomize](kustomize.md) deployment methods. For
+`modelservice` and `standalone`, put the SGLang launch line in the role's
+`engine.command`; the launcher selects the SGLang image and defaults while all
+other flags pass through unchanged. The current pinned image supports the
+recommended `sglang serve <model>` CLI. The legacy
+`python3 -m sglang.launch_server --model-path <model>` form is also recognised.
 
-> [!IMPORTANT]
-> SGLang is **only** supported with the `kustomize` standup method. The
-> `modelservice` and `standalone` methods render vLLM `vllm serve` commands from
-> the scenario templates and have no SGLang equivalent. If you need SGLang, you
-> must deploy an upstream guide via `-t kustomize` (see below).
+## Modelservice and standalone
 
-## How it works
+[`config/scenarios/examples/engines.yaml`](../config/scenarios/examples/engines.yaml)
+contains a tested SGLang alternative. Select it without editing the scenario:
+
+```bash
+export NS=llmd-sglang
+
+llmdbenchmark --spec examples/engines --engine sglang standup \
+  -t modelservice -p "$NS" --skip-smoketest
+llmdbenchmark --spec examples/engines --engine sglang smoketest \
+  -t modelservice -p "$NS"
+
+# The same command and pod shape can be deployed without the llm-d router.
+llmdbenchmark --spec examples/engines --engine sglang standup \
+  -t standalone -p "$NS" --skip-smoketest
+llmdbenchmark --spec examples/engines --engine sglang smoketest \
+  -t standalone -p "$NS"
+```
+
+A scenario can state the command directly:
+
+```yaml
+decode:
+  engine:
+    command: |
+      sglang serve Qwen/Qwen3-0.6B \
+        --host 0.0.0.0 \
+        --port 8200 \
+        --tp-size 1 \
+        --context-length 32768 \
+        --page-size 64 \
+        --mem-fraction-static 0.9 \
+        --enable-metrics
+```
+
+The modelservice routing sidecar normally owns port 8000 and forwards to the
+model server on 8200. Standalone inherits decode's command and its Service
+targets the resolved engine port, so the command does not need to be copied or
+rewritten for standalone.
+
+## Kustomize
 
 Under `-t kustomize`, standup applies an upstream llm-d guide directly
 (`guides/<guideName>` in the [llm-d repo](https://github.com/llm-d/llm-d)). Each
@@ -70,7 +107,7 @@ Same as any kustomize deploy (see [Quickstart](quickstart.md) and
   `llm-d-hf-token` Secret from it. See the HF_TOKEN section in
   [kustomize.md](kustomize.md#hf_token-handling).
 
-## Quick start
+## Kustomize quick start
 
 Any guide scenario can be run with SGLang without a second scenario file, by
 overriding `kustomize.acceleratorBackend` from the CLI. `-t kustomize`

@@ -33,6 +33,7 @@ from llmdbenchmark.engine import (
     MODEL_READS,
     model_id_from_commands,
     resolve_engines,
+    resolved_serving_role,
 )
 from llmdbenchmark.parser.config_schema import validate_config
 from llmdbenchmark.parser.render_result import StackErrors, RenderResult
@@ -648,8 +649,8 @@ class RenderPlans:
 
         The sidecar terminates the Service port and forwards upstream; upstream
         is the engine. ``routing.proxy.targetPort`` is only a chart value, so it
-        has to follow ``decode.engine.port`` -- otherwise changing ``--port`` in
-        the command silently breaks every request while the pod stays healthy.
+        has to follow the resolved decode port -- otherwise changing ``--port``
+        in the command silently breaks every request while the pod stays healthy.
         An explicitly set ``targetPort`` is left alone.
         """
         routing = values.get("routing")
@@ -660,9 +661,9 @@ class RenderPlans:
             return values
         if proxy.get("targetPort"):
             return values
-        engine_port = ((values.get("decode") or {}).get("engine") or {}).get("port")
-        if engine_port:
-            proxy["targetPort"] = int(engine_port)
+        decode = resolved_serving_role(values, "decode")
+        if decode is not None:
+            proxy["targetPort"] = decode.port
         return values
 
     def _warn_custom_command_conflicts(self, values: dict) -> None:
@@ -1069,8 +1070,6 @@ class RenderPlans:
         - Decode with the routing sidecar: the sidecar owns ``servicePort`` and
           forwards upstream, so the engine must bind something else. Binding the
           same port means two listeners on one pod -- one of them loses.
-        - Decode without the sidecar (``gateway.className=none``): nothing
-          bridges, so the engine must bind ``servicePort`` itself.
         - Prefill: never gets a sidecar, so the same rule applies -- and the
           decode sidecar reaches prefill on ``servicePort`` for P/D.
 
@@ -1094,11 +1093,10 @@ class RenderPlans:
                 continue
             if int(role_cfg.get("replicas", 0) or 0) < 1:
                 continue
-            engine_cfg = role_cfg.get("engine") or {}
-            port = engine_cfg.get("port")
-            if not port:
+            resolved = resolved_serving_role(values, role)
+            if resolved is None:
                 continue
-            port = int(port)
+            port = resolved.port
             if has_sidecar and port == service_port:
                 errors.append(
                     f"[{stack_name}] {role}.engine.command binds {port}, which "
@@ -1107,15 +1105,11 @@ class RenderPlans:
                     f"--port (8200 is the llm-d convention), or disable the "
                     f"sidecar with routing.proxy.enabled=false."
                 )
-            elif not has_sidecar and port != service_port:
-                reason = (
-                    "the routing sidecar is disabled"
-                    if role == "decode"
-                    else "prefill pods never get a routing sidecar"
-                )
+            elif role == "prefill" and not has_sidecar and port != service_port:
                 errors.append(
                     f"[{stack_name}] {role}.engine.command binds {port} but "
-                    f"{reason}, so nothing bridges engine.servicePort "
+                    "prefill pods never get a routing sidecar, so nothing "
+                    "bridges engine.servicePort "
                     f"({service_port}) to it and every request would reach a "
                     f"port no one listens on. Change --port to {service_port} "
                     f"in {role}.engine.command."
@@ -2733,6 +2727,10 @@ class RenderPlans:
                 )
 
         merged_values = self._resolve_namespace(merged_values)
+        # Select the deployment method before reading the model from engine
+        # commands. A `-t standalone` render must ignore the populated but
+        # inactive decode role when standalone supplies its own command.
+        merged_values = self._resolve_deploy_method(merged_values)
         merged_values = self._resolve_model(
             merged_values,
             total_stacks=total_stacks,
@@ -2740,7 +2738,6 @@ class RenderPlans:
         )
         merged_values = self._adopt_model_from_command(merged_values, defaults)
         self._warn_custom_command_conflicts(merged_values)
-        merged_values = self._resolve_deploy_method(merged_values)
         merged_values = self._resolve_gateway_class(merged_values)
         merged_values = self._resolve_monitoring(merged_values)
         merged_values = self._resolve_prism(merged_values)
@@ -2768,7 +2765,7 @@ class RenderPlans:
         # values. Everything the manifests need that the command decides -- the
         # port the probes and the sidecar follow, the image, the health and
         # metrics paths, the context length and the KV page size -- is settled
-        # here and recorded under `<role>.engine` or `model.*`.
+        # here and recorded in the immutable serving-role snapshot or `model.*`.
         for warning in resolve_engines(merged_values):
             self.logger.log_warning(f"[{stack_name}] {warning}")
         merged_values = self._sync_routing_target_port(merged_values)

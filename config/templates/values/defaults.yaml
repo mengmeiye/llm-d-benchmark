@@ -951,55 +951,11 @@ httpRoute:
 # ============================================================================
 # ENGINE CONFIGURATION
 #
-# llm-d-benchmark does not model inference-engine parameters. A role states its
-# launch command verbatim -- the same line you would run by hand, or the one
-# already in your llm-d guide -- and the command is rendered into the container
-# unchanged:
-#
-#   decode:
-#     engine:
-#       command: |
-#         vllm serve meta-llama/Llama-3.1-70B-Instruct \
-#           --port 8200 \
-#           --tensor-parallel-size 4 \
-#           --gpu-memory-utilization 0.95
-#
-# Switching engine is switching the command:
-#
-#   decode:
-#     engine:
-#       command: |
-#         python3 -m sglang.launch_server --model-path meta-llama/Llama-3.1-70B-Instruct \
-#           --port 8200 --tp-size 4 --mem-fraction-static 0.9 --enable-metrics
-#
-# The command is read once, only for the handful of facts that decide
-# Kubernetes objects rather than engine behaviour: which engine it launches
-# (hence the default image, health path and metrics path), the model it serves,
-# the port it binds (hence the container port, probes and the routing sidecar's
-# upstream), and the context length and memory fraction the pre-deploy capacity
-# check sizes KV cache against. Everything else in the command is passed through
-# untouched -- llm-d-benchmark never needs to know what a flag means.
-#
-# What the command cannot answer is stated in Kubernetes' vocabulary instead.
-# How many devices a pod holds is the clearest case: the kubelet grants
-# accelerators before the engine process exists, so the count comes from the pod
-# spec (`<role>.resources.limits.<accelerator resource>`, or the
-# `accelerator.count` / `<role>.parallelism` shorthands) and has to agree with
-# the width the command gives the engine.
-#
-# This section holds what is left: the pod- and cluster-level settings that
-# belong to no engine. Nothing here is an engine parameter.
+# Each role supplies its engine's launch command. This section contains only
+# shared container and Service settings. See config/README.md#engine-command.
 # ============================================================================
 engine:
-  # Default engine for every role. Left unset on purpose: the command's own
-  # launcher (`vllm serve`, `python3 -m sglang.launch_server`, `trtllm-serve`,
-  # `llm-d-inference-sim`) identifies it, and a role with no command at all
-  # falls back to vLLM. Naming an engine here is a *declaration*, checked
-  # against what each role's command actually launches -- so a value inherited
-  # by every scenario would contradict the first SGLang command anyone writes.
-  # Set it (here or on one role) only when a role has no command, because its
-  # image's entrypoint launches the server, and the image, health path and
-  # metrics path must still be picked. Known: vllm, sglang, trtllm, sim.
+  # Usually detected from the command. Set for image-entrypoint/custom engines.
   name: null
 
   # Fallback command for roles that do not state their own. Leave null and put
@@ -1012,9 +968,7 @@ engine:
   # this one rather than adding to it, the same as `command`.
   extraArgs: []
 
-  # Name of the serving container. llm-d uses the engine-neutral `modelserver`
-  # so manifests, `kubectl logs` and `kubectl exec` read the same whichever
-  # engine runs.
+  # Engine-neutral serving-container name.
   containerName: modelserver
 
   # Shell used to exec a role's engine command. Override to /bin/sh for an
@@ -1024,9 +978,7 @@ engine:
   # Script run before the engine starts, inside the same container.
   preprocessScript: *preprocess_script
 
-  # Port the Service/gateway exposes. Infrastructure, not an engine parameter:
-  # the engine's own port comes from its command's --port. Steps reference this
-  # as the canonical endpoint port for smoketests and routes.
+  # Public Service port; distinct from each role's resolved engine bind port.
   servicePort: *service_port
 
   # PriorityClassName for pod scheduling priority (optional)
@@ -1134,63 +1086,14 @@ decode:
     # command (the image's entrypoint launches the server).
     name: null
 
-    # The launch command, exactly as you would run it. A scenario that states
-    # one replaces this line wholesale -- nothing here is merged into it, and
-    # no flag below is special to llm-d-benchmark.
-    #
-    # This is the smallest command that serves the configured model, so a
-    # scenario that says nothing about the engine still stands up. Two things
-    # are worth knowing when you write your own:
-    #
-    #   ${model.name}    the serve target. A command you write names the model
-    #                    the way you would on a node -- `vllm serve
-    #                    Qwen/Qwen3-32B` -- and `model.name` is read off it.
-    #                    This default cannot, because it has to serve whatever
-    #                    model the scenario or `-m/--models` picked, so it
-    #                    points back at `model.name` instead. Either way the id
-    #                    is written once. No `--served-model-name`: every engine
-    #                    advertises whatever it was asked to serve.
-    #   --port 8200      the llm-d convention on a decode pod: the routing
-    #                    sidecar owns `engine.servicePort` (8000) and forwards
-    #                    here. In direct mode (`gateway.className: none`) there
-    #                    is no sidecar, so bind 8000 instead.
+    # Minimal fallback. Scenario commands replace it wholesale. Decode binds
+    # 8200 because the routing sidecar normally owns Service port 8000.
     command: |
       vllm serve ${model.name} \
         --port 8200
 
-    # Words appended to the command above, verbatim and unexamined. Empty here
-    # and rarely set: a single-stack scenario just writes the flag into its own
-    # command, where the whole launch line is visible in one place.
-    #
-    # What this is for is the multi-model shape -- several stacks behind one
-    # gateway, sharing ONE command, where a few models differ in a flag or two.
-    # Repeating a flag the command already carries overrides it, because every
-    # engine's argument parser keeps the last occurrence of a flag, and the
-    # reader that pulls --max-model-len / --block-size / --gpu-memory-utilization
-    # back out reads the same way -- so the numbers the capacity check and the
-    # router's prefix-cache index use are the ones the engine actually gets:
-    #
-    #   shared:
-    #     modelservice:
-    #       decode:
-    #         engine:
-    #           command: |
-    #             vllm serve ${model.name} \
-    #               --port 8200 --max-model-len 8192 --tensor-parallel-size 1
-    #   scenario:
-    #     - name: small          # nothing to say: the shared command is right
-    #       ...
-    #     - name: big
-    #       modelservice:
-    #         decode:
-    #           engine:
-    #             extraArgs: ["--max-model-len", "4096", "--tensor-parallel-size", "2"]
-    #
-    # Nothing is parsed and no flag is named, so this stays engine-agnostic. Two
-    # limits are worth knowing: the words are appended at the END, so they cannot
-    # change the serve target itself (that positional is what ${model.name} is
-    # for), and a role's own list replaces a plan-wide `engine.extraArgs` rather
-    # than adding to it.
+    # Opaque words appended to the command. A role's list replaces the
+    # plan-wide list; repeated flags are left for the engine to resolve.
     extraArgs: []
 
     # Port the engine binds. Normally read from the command's --port; set it
@@ -1400,7 +1303,7 @@ prefill:
 
 # ============================================================================
 # STANDALONE DEPLOYMENT CONFIGURATION
-# For simple single-model vLLM deployments without llm-d routing infrastructure
+# For simple single-model deployments without llm-d routing infrastructure
 # ============================================================================
 standalone:
   enabled: false
@@ -1512,27 +1415,8 @@ standalone:
   engine:
     name: null
 
-    # There is deliberately no command here. Standalone serves the same model
-    # with the same engine as decode does -- it just drops the router in front
-    # of it -- so it inherits `decode.engine.command` when it states none of
-    # its own, and `-t standalone` runs the line the scenario already
-    # documents. A default here would instead name an engine the scenario
-    # never mentioned: every scenario that does not write a standalone block
-    # would silently serve whatever this line said.
-    #
-    # The resolution order is therefore:
-    #   standalone.engine.command   stated here      -- used as written
-    #   standalone.engine.command: ""  stated empty  -- image entrypoint, and
-    #                                                   decode is NOT inherited
-    #   (absent)                                     -- decode.engine.command
-    #   (absent, and decode has none)                -- image entrypoint
-    #
-    # Only state one when standalone genuinely differs from decode -- a
-    # different image whose entrypoint takes different flags, for instance
-    # (examples/launcher.yaml). Restating decode's line here just to change
-    # `--port` is not a difference: the Service targets whatever the command
-    # binds (see standalone.service in 15_standalone-service_yaml.j2), so a
-    # command that binds 8200 works unchanged.
+    # Omitted: standalone inherits decode's command and command-coupled runtime
+    # settings. Set a different command here, or "" to use the image entrypoint.
     # command: |
     #   vllm serve my-org/my-model \
     #     --port 8000
@@ -1550,34 +1434,8 @@ standalone:
     #   repository: quay.io/my-org/vllm
     #   tag: nightly
 
-    # How the container is launched. Resolved automatically -- `custom` when
-    # this role has a command, `imageDefault` when it has none. A role drops
-    # the inherited command with `command: ""`; an empty string, not `null`,
-    # because a YAML key with no value never clobbers a default.
-    #   custom       -- render `command: [<engine.shell>, -c]` plus the
-    #                   command above. Requires a shell in the server image.
-    #   imageDefault -- emit no `command:`; the image entrypoint runs and
-    #                   `args` below is passed verbatim. Required for
-    #                   distroless images, which have no shell to exec --
-    #                   e.g. llm-d-inference-sim v0.9+ ships only
-    #                   /app/llm-d-inference-sim (v0.8.2 still had bash).
-    # modelCommand: imageDefault
-
-    # Argument list for `modelCommand: imageDefault`. Ignored when the role has
-    # a command. Supports ${dotted.path} substitution. Rendered as `args:`, so
-    # the image ENTRYPOINT supplies argv[0] (both server images have one:
-    # vllm-openai is `vllm serve`, inference-sim is /app/llm-d-inference-sim).
-    # For a CMD-only image with no ENTRYPOINT, make the binary the first
-    # element -- `args` replaces CMD outright.
+    # Passed to the image entrypoint when command is empty.
     args: []
-    # Example:
-    # args:
-    #   - "--model"
-    #   - "/model-cache/${model.path}"
-    #   - "--port"
-    #   - "8000"
-    #   - "--served-model-name"
-    #   - "${model.name}"
 
   # Model volume configuration
   # NOTE: The model PVC is standalone-specific (not in engine.volumes)
@@ -2203,4 +2061,3 @@ control:
 # RELEASE CONFIGURATION
 # ============================================================================
 release: llmdbench
-

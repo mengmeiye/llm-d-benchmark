@@ -3,6 +3,12 @@
    with runtime values (endpoint URL, experiment ID, results directory).
    It is NOT rendered during the plan phase.
 #}
+{# `run` can consume plans rendered by an older llmdbenchmark, so keep the
+   legacy decode.engine fallback here until those plans age out. #}
+{% set _resolved_roles = resolvedServingRoles | default({}, true) %}
+{% set _decode = decode | default({}, true) %}
+{% set _legacy_engine = _decode.engine | default({}, true) %}
+{% set harness_serving = _resolved_roles.get('decode') | default(_legacy_engine, true) %}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -140,11 +146,11 @@ spec:
       value: "{{ monitoring.metricsScrapeEnabled | lower }}"
     {# Where a decode pod serves /metrics: the port its engine command binds. #}
     - name: LLMDBENCH_VLLM_COMMON_METRICS_PORT
-      value: "{{ decode.engine.port | default(engine.servicePort, true) }}"
+      value: "{{ harness_serving.port | default(engine.servicePort, true) }}"
     {# Same resolution order as the PodMonitors: explicit override, else the
        engine the decode role actually launches, else /metrics. #}
     - name: LLMDBENCH_VLLM_MONITORING_METRICS_PATH
-      value: "{{ monitoring.metricsPath | default(decode.engine.metricsPath, true) | default('/metrics', true) }}"
+      value: "{{ monitoring.metricsPath | default(harness_serving.metricsPath, true) | default('/metrics', true) }}"
     - name: LLMDBENCH_EPP_METRICS_SECRET
       value: "{{ router.monitoring.secretName | default('inference-gateway-sa-metrics-reader-secret') }}"
 {% if monitoring.timeSeriesMetrics is defined %}

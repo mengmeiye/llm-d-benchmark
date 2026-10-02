@@ -282,12 +282,8 @@ scenario:
       # -------------------------------------------------------------------------
       decode:
         replicas: 2
-        # The launch command, verbatim -- the same line you would run by hand, or
-        # the one already in the llm-d guide. It is rendered into the container
-        # unchanged, so every flag here is read by vLLM and none of them by
-        # llm-d-benchmark, which reads only what decides Kubernetes objects:
-        # `--port` (container port, probes, the routing sidecar's upstream) and
-        # the capacity numbers the pre-deploy check needs.
+        # Verbatim launch command. llm-d-benchmark only reads the port and
+        # capacity inputs needed by the surrounding infrastructure.
         #
         # Decode binds 8200, not 8000: the routing sidecar the chart injects on
         # decode pods owns `engine.servicePort` (8000) and forwards here. In

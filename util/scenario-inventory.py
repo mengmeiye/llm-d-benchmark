@@ -1,47 +1,9 @@
 #!/usr/bin/env python3
-"""List what each scenario deploys: which engine, which deploy method.
+"""Inventory scenario engines, deployment methods, and switchable alternatives.
 
-This is a *reading* tool -- it opens the scenario files, never the cluster, and
-answers the questions a test run needs before it starts:
-
-  * **which inference engine does each role launch?**  Read out of the role's
-    verbatim ``engine.command`` with :func:`llmdbenchmark.engine.parse_command`,
-    the same way the renderer reads it. No engine list is maintained here: add
-    an ``EngineSpec`` and the scenarios using it are classified by it.
-  * **which deploy method is the scenario written for?**  Read off the
-    ``enabled:`` flags, with defaults.yaml supplying the ones a scenario omits.
-  * **which ``--spec`` name runs it?**  A file under config/specification/ says
-    which scenario it reads, so the two spellings can disagree; the name the CLI
-    actually accepts is reported (``-`` when no specification reads the file at
-    all, which means nothing can run that scenario).
-  * **which engines can it be switched to without editing it?**  A scenario may
-    carry a commented-out launch command for another engine, tagged
-    ``# @engine <name>``. Those tags are reported as the stack's
-    *alternatives*, and ``--apply <name>`` performs the switch -- see
-    :func:`apply_alternative`.
-
-so a test run can select by engine or by method instead of carrying
-hand-maintained scenario lists that go stale as scenarios are added.
-
-Where a role's engine comes from is reported too, because it changes what a
-test proves:
-
-  ``vllm``            the scenario states a ``vllm serve`` line; that line runs.
-  ``vllm(default)``   the scenario states no command, so the role inherits the
-                      minimal launch line from defaults.yaml.
-  ``sglang(kust)``    the kustomize method: the upstream llm-d guide supplies
-                      the command, and ``kustomize.acceleratorBackend`` picks
-                      the engine.
-  ``image-default``   the command is explicitly empty -- the image's own
-                      entrypoint launches the server (llm-d-inference-sim).
-
-Usage:
-  util/scenario-inventory.py                        # every stack, as a table
-  util/scenario-inventory.py --engine sglang        # only SGLang stacks
-  util/scenario-inventory.py --method standalone --format specs
-  util/scenario-inventory.py --alternative trtllm   # switchable to TRT-LLM
-  util/scenario-inventory.py --select guides/optimized-baseline --apply sglang
-  util/scenario-inventory.py --json
+The tool reads configuration only; it never contacts a cluster. Source suffixes
+in table output are ``(default)``, ``(decode)`` for standalone inheritance,
+``(kust)``, and ``(declared)``. Use ``--help`` for filters and output formats.
 """
 
 from __future__ import annotations
@@ -93,13 +55,7 @@ IMAGE_DEFAULT = "image-default"
 
 
 def spec_names() -> dict[str, list[str]]:
-    """Map each scenario file to the ``--spec`` names that drive it.
-
-    `--spec` names a file under config/specification/, and that file says which
-    scenario it reads. The two names usually match, but they are separate files
-    and a rename can leave them disagreeing -- so the name the CLI accepts is
-    read here rather than guessed from the scenario's own path.
-    """
+    """Map scenario paths to the ``--spec`` names that reference them."""
     found: dict[str, list[str]] = {}
     for path in sorted(SPEC_DIR.rglob("*.yaml.j2")):
         name = path.relative_to(SPEC_DIR).name[: -len(".yaml.j2")]
@@ -126,13 +82,7 @@ def dig(source, path: str):
 
 
 def lookup(*sources, path: str):
-    """First non-None value at dotted ``path`` across ``sources``.
-
-    A scenario may state a key at the stack's top level, under ``common:``
-    (which the renderer hoists), nested under ``modelservice:``, or -- in a
-    multi-stack file -- once in ``shared:``. Reading each in precedence order
-    answers a question about the merge without re-implementing it.
-    """
+    """Return the first non-None dotted-path value across ``sources``."""
     for source in sources:
         value = dig(source, path) if isinstance(source, dict) else None
         if value is not None:
@@ -141,14 +91,7 @@ def lookup(*sources, path: str):
 
 
 def engine_commands(node, trail=()) -> dict[str, str]:
-    """Map role name -> its ``engine.command`` text, for every one in ``node``.
-
-    Walks the tree rather than reading fixed paths: a command sits under
-    ``modelservice.decode.engine.command`` in one scenario and
-    ``decode.engine.command`` in the next, and only the nearest enclosing role
-    name matters. A command outside any role is keyed ``""`` -- the stack-wide
-    fallback a role without its own command inherits.
-    """
+    """Map each role to its nearest ``engine.command``; ``""`` is plan-wide."""
     found: dict[str, str] = {}
     if isinstance(node, dict):
         for key, value in node.items():
@@ -165,13 +108,7 @@ def engine_commands(node, trail=()) -> dict[str, str]:
 
 
 def image_engine(images) -> str | None:
-    """Engine named by an image repository, e.g. ``.../llm-d-inference-sim``.
-
-    Read only when a role's command is explicitly empty: the image's entrypoint
-    is then the launcher, and its name is the only statement of which engine
-    that is. Repository basenames are matched against the registry's own
-    aliases, so nothing engine-specific is spelled here.
-    """
+    """Return an engine identified by an image repository basename."""
     if not isinstance(images, dict):
         return None
     for entry in images.values():
@@ -184,21 +121,23 @@ def image_engine(images) -> str | None:
 def role_engine(
     role, commands, declared, has_default_command, images=None
 ) -> tuple[str, str]:
-    """``(engine, source)`` for one role, by the resolver's own precedence.
-
-    ``source`` records where the launch line came from, because a role running
-    defaults.yaml's minimal line is not testing the scenario's own command.
-    """
+    """Return ``(engine, source)`` using the resolver's precedence."""
     name = declared.get(role) or declared.get("")
     command = commands.get(role)
     source = "scenario"
     if command is None:
         command = commands.get("")
     if command is None:
-        # defaults.yaml carries a minimal `vllm serve` line per role, so an
-        # unstated command means vLLM with that line, not the image entrypoint.
-        command = has_default_command.get(role)
-        source = "defaults"
+        # Standalone is decode without the router and inherits its resolved
+        # command. Decode may itself be using defaults.yaml's minimal line.
+        if role == "standalone":
+            command = commands.get("decode")
+            if command is None:
+                command = has_default_command.get("decode")
+            source = "decode"
+        else:
+            command = has_default_command.get(role)
+            source = "defaults"
     if isinstance(command, str) and not command.strip():
         named = name or image_engine(images)
         return (get_engine_spec(named).name if named else IMAGE_DEFAULT), "image"
@@ -250,9 +189,9 @@ def stack_facts(spec, stack, shared, defaults, spec_name="", alternatives=()) ->
 
     guide = lookup(stack, shared, path="kustomize.guideName")
     # Methods `-t` can select on this stack even though the scenario does not
-    # enable them. modelservice and standalone are always available (a role with
-    # no command of its own inherits defaults.yaml's line); the other three need
-    # the scenario to carry their section.
+    # enable them. modelservice is always available through decode's default;
+    # standalone inherits decode's resolved line. The other three need the
+    # scenario to carry their section.
     forcible = ["modelservice", "standalone"]
     if guide:
         forcible.append("kustomize")
@@ -264,8 +203,8 @@ def stack_facts(spec, stack, shared, defaults, spec_name="", alternatives=()) ->
 
     # Roles any selectable method would deploy. A role with no section of its
     # own is still reported: `-t standalone` on a scenario that does not enable
-    # standalone runs defaults.yaml's launch line, and a test run needs to know
-    # which engine that is.
+    # standalone runs decode's resolved launch line, and a test run needs to
+    # know which engine that is.
     reachable = live | {r for m in forcible for r in ROLES_BY_METHOD[m]}
     for role in ENGINE_ROLES:
         section = lookup(stack, nested, shared, path=role)
@@ -364,6 +303,7 @@ def inventory() -> list[dict]:
 SOURCE_MARK = {
     "scenario": "",
     "defaults": "(default)",
+    "decode": "(decode)",
     "kustomize": "(kust)",
     "image": "",
     "declared": "(declared)",

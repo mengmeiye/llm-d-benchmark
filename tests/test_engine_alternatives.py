@@ -115,12 +115,11 @@ def _render(tmp_path: Path, scenario_text: str) -> dict:
 
 
 def _serving_role(config: dict) -> dict:
-    """The role whose engine the alternative switched: the first one rendered."""
+    """The resolved role whose command the alternative switched."""
     for role in ("decode", "standalone", "prefill", "nok8s"):
-        section = config.get(role)
-        if isinstance(section, dict) and isinstance(section.get("engine"), dict):
-            if section["engine"].get("command"):
-                return section
+        resolved = (config.get("resolvedServingRoles") or {}).get(role)
+        if isinstance(resolved, dict) and resolved.get("command"):
+            return resolved
     raise AssertionError("no role with a launch command was rendered")
 
 
@@ -156,11 +155,10 @@ def test_alternative_renders_the_engine_it_claims(tmp_path, scenario, engine):
 
     # Detected from the command, not declared anywhere: if the launcher stopped
     # being recognised, the engine would fall back and the image with it.
-    assert role["engine"]["facts"]["engine"] == engine
+    assert role["engineName"] == engine
     # Which `images.<key>` entry the pod gets, chosen by the detected engine --
     # the scenario names no image at all.
-    assert role["engine"]["imageKey"] == engine
-    assert role["engine"]["image"]["repository"]
+    assert role["image"]["repository"]
 
 
 @pytest.mark.parametrize(("scenario", "engine"), ALTERNATIVES, ids=lambda v: str(v))
@@ -187,11 +185,8 @@ def test_alternative_keeps_the_facts_the_active_command_states(
         )
 
     active_role, switched_role = _serving_role(active), _serving_role(switched)
-    assert switched_role["engine"]["port"] == active_role["engine"]["port"]
-    assert (
-        switched_role["engine"]["facts"]["model"]
-        == active_role["engine"]["facts"]["model"]
-    )
+    assert switched_role["port"] == active_role["port"]
+    assert switched_role["modelId"] == active_role["modelId"]
 
 
 def test_applying_an_engine_with_no_group_is_an_error():
@@ -206,5 +201,5 @@ def test_the_switch_removes_the_definition_it_replaces():
     text = (_SCENARIOS / "guides/optimized-baseline.yaml").read_text()
     switched = apply_alternative(text, "sglang")
     assert len(_LAUNCH.findall(switched)) == 1, _LAUNCH.findall(switched)
-    assert "sglang.launch_server" in switched.split("command: |", 1)[1]
+    assert "sglang serve" in switched.split("command: |", 1)[1]
     assert "vllm serve" not in switched.split("command: |", 1)[1]

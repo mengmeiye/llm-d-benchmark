@@ -118,12 +118,10 @@ scenario:
 
     # =========================================================================
     # STANDALONE -- Only applies when standalone.enabled: true
-    # Note: standalone runs its own launch command (`standalone.engine.command`,
-    # defaulted in defaults.yaml) and binds engine.servicePort directly -- no
-    # routing sidecar exists on this path. Because each role states its own
-    # command, a flag one image accepts and another does not (upstream vLLM v0.9+
-    # dropped --no-enable-log-requests, for instance) stays confined to the role
-    # whose image accepts it.
+    # Standalone has no routing sidecar. When selected with `-t standalone`, it
+    # inherits decode's command, image, pod resources and parallelism. Its
+    # Service targets the port read from the inherited command, so the launch
+    # line does not need a standalone-specific copy.
     # =========================================================================
     standalone:
       enabled: false
@@ -252,14 +250,9 @@ scenario:
             value: "64,,16"
 
         # -----------------------------------------------------------------------
-        # The launch command, verbatim -- the same line you would run by hand,
-        # or the one already in your llm-d guide. It is rendered into the
-        # container unchanged, so every flag here is read by vLLM and none of
-        # them by llm-d-benchmark. Only a few facts are read back out of it:
-        # `--port` (container port, probes, the routing sidecar's upstream) and
-        # `--max-model-len` (the pre-deploy capacity check and the harness
-        # profile). How many accelerators a pod holds is a Kubernetes fact, so it
-        # is stated as `parallelism.tensor`, not read from here.
+        # Verbatim launch command. llm-d-benchmark only reads the port and
+        # capacity inputs needed by the surrounding infrastructure. Accelerator
+        # count is stated as `parallelism.tensor`, not read from here.
         #
         # 8200, not 8000: the routing sidecar the chart injects on decode pods
         # owns `engine.servicePort` (8000) and forwards here. In direct mode

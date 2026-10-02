@@ -59,7 +59,7 @@ def test_decode_probes_follow_the_port_in_the_engine_command(
     plan states a port: the routing sidecar holds 8000 on that pod, so a probe
     pointed there would pass while the engine was still loading -- or keep
     passing after it died. The number is read out of the command once
-    (``decode.engine.port``) and every consumer follows it, so changing the
+    in the resolved decode snapshot and every consumer follows it, so changing the
     command is the only edit a user has to make.
     """
     values = _render_pd_disaggregation(tmp_path)
@@ -86,13 +86,14 @@ def test_decode_engine_port_is_read_from_the_command(tmp_path: Path) -> None:
     """``resolve_engines`` records the command's port for the rest of the plan.
 
     The sidecar's upstream, the container port and the PodMonitor all read
-    ``decode.engine.port`` rather than re-parsing the command, so it has to be
-    populated even though the scenario never writes it.
+    the resolved decode port rather than re-parsing the command, so it has to
+    be populated even though the scenario never writes it.
     """
     _render_pd_disaggregation(tmp_path)
     plan = _render_plan_values(tmp_path)
 
     assert plan["decode"]["engine"]["port"] == 8200
+    assert plan["resolvedServingRoles"]["decode"]["port"] == 8200
     # Prefill gets no sidecar, so its command binds the Service port itself.
     assert plan["prefill"]["engine"]["port"] == 8000
     assert plan["engine"]["servicePort"] == 8000

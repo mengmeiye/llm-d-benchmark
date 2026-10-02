@@ -4,10 +4,9 @@ Sends a real inference request via an ephemeral curl pod to verify that
 the model can actually generate tokens, not just respond to health and
 metadata probes.
 
-Tries ``/v1/completions`` first (universal in vLLM for both base and
-chat models).  If the endpoint returns a non-transient error (e.g. 4xx),
-falls back to ``/v1/chat/completions`` for backends that only expose the
-chat API.
+Tries the OpenAI-compatible ``/v1/completions`` endpoint first. If the endpoint
+returns a non-transient error (e.g. 4xx), falls back to
+``/v1/chat/completions`` for engines or models that only expose the chat API.
 
 On success, prints the working curl command so the user can reproduce
 or demo it.
@@ -142,7 +141,7 @@ class InferenceTestStep(Step):
 
         context.logger.log_info(f"Running sample inference against {base_url}...")
 
-        # --- Try /v1/completions first (universal in vLLM) ---
+        # --- Try the OpenAI-compatible /v1/completions endpoint first ---
         context.logger.log_info("Trying /v1/completions endpoint...")
         completions_result = self._try_completions(
             cmd,

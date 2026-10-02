@@ -125,11 +125,9 @@ scenario:
       # llm-d-inference-sim is not an inference engine and takes no `vllm
       # serve` line: its image entrypoint is the launcher, so this role passes
       # an argument list instead of a command. `command: ""` is what selects
-      # that -- it drops the inherited default command (an empty string, since a
-      # YAML key with no value would leave the default in place), and
-      # modelCommand resolves to `imageDefault`, which emits `args:` and no
-      # `command:` (a distroless sim image has no shell to exec one in).
-      # ${dotted.path} reads the resolved plan.
+      # that -- it drops the inherited default command (a missing key would
+      # retain it) and emits `args:` without a `command:` override. The sim
+      # image is distroless and has no shell to exec.
       #
       # Port 8000, not 8200: a standalone pod has no routing sidecar in front of
       # it, so it holds the Service port itself.

@@ -29,6 +29,6 @@ spec:
    resolved engine spec (TRT-LLM serves /prometheus/metrics, not /metrics) --
    the same source _macros.j2 uses for the chart-rendered PodMonitor.
    `monitoring.metricsPath` stays ahead of it as the explicit override. #}
-    path: {{ monitoring.metricsPath | default(standalone.engine.metricsPath, true) | default('/metrics', true) }}
+    path: {{ monitoring.metricsPath | default(resolvedServingRoles.standalone.metricsPath, true) | default('/metrics', true) }}
     interval: {{ monitoring.scrapeInterval | default('30s') }}
 {% endif %}

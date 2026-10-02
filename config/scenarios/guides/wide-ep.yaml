@@ -454,14 +454,9 @@ scenario:
       enabled: true
       replicas: 1
 #      replicas: 8
-      # The launch command, verbatim -- the same line you would run by hand.
-      # It reaches the container unchanged, so every flag here is read by vLLM
-      # and none of them by llm-d-benchmark, which reads only what decides
-      # Kubernetes objects: `--port` and the two capacity numbers. The eight
-      # devices one replica holds are stated above as
-      # `roleDefaults.parallelism.dataLocal`, not read from
-      # `--data-parallel-size-local`: the kubelet grants them before the engine
-      # process exists.
+      # Verbatim launch command. llm-d-benchmark reads only the port and
+      # capacity inputs. The eight devices per replica are stated separately as
+      # `roleDefaults.parallelism.dataLocal`.
       #
       # Prefill binds 8000, the Service port: no routing sidecar is injected on
       # prefill pods, so nothing would bridge a higher port.

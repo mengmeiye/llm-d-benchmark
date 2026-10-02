@@ -38,11 +38,11 @@ ENGINE_NAMES = ("vllm", "sglang", "trtllm", "tensorrt")
 #: is legitimate here when the field it configures genuinely belongs to one role.
 #: Each entry has to say why, so an accidental one cannot hide among them.
 ALLOWED_ROLE_REFERENCES: dict[str, str] = {
-    "targetPort: {{ routing.proxy.targetPort | default(decode.engine.port, true) }}": (
+    "targetPort: {{ routing.proxy.targetPort | default(resolvedServingRoles.decode.port, true) }}": (
         "The routing sidecar is injected into decode pods only -- the chart "
-        "never puts it on prefill -- so the proxy's target is decode's engine "
-        "port by definition. This is a top-level `routing:` field, not a copy "
-        "of a role block."
+        "never puts it on prefill -- so the proxy's target is the resolved "
+        "decode port by definition. This is a top-level `routing:` field, not "
+        "a copy of a role block."
     ),
 }
 

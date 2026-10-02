@@ -5,6 +5,7 @@ import time
 from datetime import UTC
 from pathlib import Path
 
+from llmdbenchmark.engine import resolved_serving_role
 from llmdbenchmark.executor.command import CommandExecutor
 from llmdbenchmark.executor.context import ExecutionContext
 from llmdbenchmark.executor.step import Phase, Step, StepResult
@@ -1025,20 +1026,16 @@ class DeployModelserviceStep(Step):
                     "llmDInfra", ""
                 )
 
-            # Engine images actually used in this deployment. Recorded per role
-            # from `<role>.engine.image`, which resolve_engines filled in from
-            # `images.<engine>` for whichever engine the role's command launches
-            # -- so a decode running SGLang records the SGLang image, and there
-            # is no vLLM-shaped key to mislead a reader of this ConfigMap.
+            # Engine images actually used in this deployment. The normalized
+            # role snapshot records the image selected for the command.
             for role in ("decode", "prefill", "standalone"):
-                role_engine = plan_config.get(role, {}).get("engine") or {}
-                role_img = role_engine.get("image") or {}
-                repo = role_img.get("repository", "")
-                if not repo:
+                resolved = resolved_serving_role(plan_config, role)
+                if resolved is None or not resolved.image_repository:
                     continue
-                tag = role_img.get("tag", "latest")
-                params[f"image_{role}"] = f"{repo}:{tag}"
-                params[f"engine_{role}"] = role_engine.get("name", "")
+                params[f"image_{role}"] = (
+                    f"{resolved.image_repository}:{resolved.image_tag}"
+                )
+                params[f"engine_{role}"] = resolved.engine_name
 
         literal_args = []
         for key, value in params.items():

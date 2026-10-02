@@ -269,7 +269,7 @@ def find_direct_modelservice_endpoint(
 ) -> tuple[str | None, str | None, str]:
     """Find the plain Service used by ``gateway.className=none``.
 
-    The Service selects modelservice decode pods and targets vLLM directly;
+    The Service selects ModelService decode pods and targets the engine directly;
     no Gateway, EPP, Envoy, or routing proxy is in the request path.
     """
     if not model_id_label:

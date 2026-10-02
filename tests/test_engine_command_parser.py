@@ -23,6 +23,7 @@ from llmdbenchmark.engine import (
     MODEL_READS,
     detect_engine,
     get_engine_spec,
+    model_id_from_commands,
     parse_command,
     tokenize,
 )
@@ -39,6 +40,7 @@ from llmdbenchmark.engine import (
         ("vllm serve Qwen/Qwen3-0.6B", "vllm"),
         ("/usr/local/bin/vllm serve Qwen/Qwen3-0.6B", "vllm"),
         ("python3 -m vllm.entrypoints.openai.api_server --model x", "vllm"),
+        ("sglang serve x", "sglang"),
         ("python3 -m sglang.launch_server --model-path x", "sglang"),
         ("trtllm-serve Qwen/Qwen3-0.6B", "trtllm"),
         ("trtllm-serve serve Qwen/Qwen3-0.6B", "trtllm"),
@@ -53,14 +55,21 @@ def test_launcher_identifies_the_engine(text, expected):
 def test_unrecognised_launcher_notes_instead_of_failing():
     """A snippet we cannot read is advisory, never an error.
 
-    The flags are still read -- with vLLM's spelling, the fallback spec -- so a
-    stack can stand up; the note is what tells the user to state the port in the
-    scenario rather than trust the inference.
+    Common flags are still read with the generic spec so a stack can stand up;
+    the note tells the user which facts cannot be inferred safely.
     """
     parsed = parse_command("/opt/app-root/spyre_entrypoint.sh --model x --port 8200")
 
     assert any("could not identify the engine launcher" in n for n in parsed.notes)
+    assert parsed.engine == "generic"
     assert parsed.port == 8200
+
+
+def test_vllm_benchmark_client_is_not_mistaken_for_a_server():
+    parsed = parse_command("vllm bench serve --backend openai --port 8000")
+
+    assert parsed.engine == "generic"
+    assert any("could not identify the engine launcher" in n for n in parsed.notes)
 
 
 def test_declared_engine_reads_an_unrecognised_wrapper():
@@ -159,8 +168,7 @@ def test_sglang_command_from_the_guide():
     ``--block-size`` and lands on the same key."""
     parsed = parse_command(
         """
-        python3 -m sglang.launch_server \
-        --model-path Qwen/Qwen3-0.6B \
+        sglang serve Qwen/Qwen3-0.6B \
         --host 0.0.0.0 \
         --port 8200 \
         --tp-size 4 \
@@ -191,6 +199,7 @@ def test_sglang_model_flag_alias_is_read():
     assert (
         parse_command("python3 -m sglang.launch_server --model-path m/M").model == "m/M"
     )
+    assert parse_command("sglang serve m/M").model == "m/M"
 
 
 def test_trtllm_command_from_the_guide():
@@ -226,7 +235,7 @@ def test_trtllm_command_from_the_guide():
         "gpuMemoryUtilization": 0.9,
     }
     assert "blockSize" not in parsed.reads
-    assert get_engine_spec("trtllm").blockSizeFlags == ()
+    assert get_engine_spec("trtllm").block_size_flags == ()
     assert parsed.flags["--tp_size"] == "2"
     assert parsed.flags["--extra_llm_api_options"] == "/tmp/trtllm/llm_api_options.yaml"
 
@@ -378,7 +387,7 @@ def test_every_spec_has_a_launcher_and_a_default_port():
     entrypoint has no port to put on the Service."""
     for spec in ENGINE_SPECS:
         assert spec.launchers, f"{spec.name} has no launcher signature"
-        assert spec.defaultPort, f"{spec.name} has no default port"
+        assert spec.default_port, f"{spec.name} has no default port"
 
 
 def test_every_spec_is_reachable_by_name():
@@ -389,7 +398,7 @@ def test_every_spec_is_reachable_by_name():
 def test_detect_engine_agrees_with_parse_command():
     for text in (
         "vllm serve m",
-        "python3 -m sglang.launch_server --model-path m",
+        "sglang serve m",
         "trtllm-serve serve m",
         "llm-d-inference-sim --model m",
     ):
@@ -397,6 +406,12 @@ def test_detect_engine_agrees_with_parse_command():
         detected = detect_engine(tokens)
         assert detected is not None
         assert detected.name == parse_command(text).engine
+
+
+def test_inline_comment_and_unspaced_separator_do_not_override_launch_flags():
+    parsed = parse_command("vllm serve model --port 8200; echo done # --port 9000")
+
+    assert parsed.port == 8200
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +437,87 @@ def test_a_read_fills_a_model_number_the_scenario_left_unset():
 
     assert values["model"]["blockSize"] == 64
     assert warnings == []
+
+
+def test_command_port_overrules_a_conflicting_explicit_port():
+    warnings, values = _resolve(
+        {
+            "model": {},
+            "decode": {
+                "engine": {
+                    "command": "vllm serve m --port 8200",
+                    "port": 8000,
+                }
+            },
+        }
+    )
+
+    assert values["decode"]["engine"]["port"] == 8200
+    assert len(warnings) == 1
+    assert "command binds 8200" in warnings[0]
+    assert "command is authoritative" in warnings[0]
+
+
+def test_declared_custom_engine_name_is_preserved():
+    warnings, values = _resolve(
+        {
+            "model": {},
+            "decode": {
+                "engine": {
+                    "name": "my-engine",
+                    "command": "my-engine serve --model m --port 9000",
+                    "image": {"repository": "example/my-engine", "tag": "v1"},
+                }
+            },
+        }
+    )
+
+    assert values["decode"]["engine"]["name"] == "my-engine"
+    assert values["resolvedServingRoles"]["decode"]["engineName"] == "my-engine"
+    assert values["decode"]["engine"]["port"] == 9000
+    assert any(
+        "could not identify the engine launcher" in warning for warning in warnings
+    )
+
+
+def test_disabled_standalone_does_not_warn_about_inherited_disaggregation_flags():
+    warnings, _ = _resolve(
+        {
+            "model": {},
+            "decode": {
+                "engine": {
+                    "command": (
+                        "vllm serve m --port 8200 "
+                        '--kv-transfer-config \'{"kv_connector":"NixlConnector"}\''
+                    )
+                }
+            },
+            "standalone": {"enabled": False, "engine": {}},
+        }
+    )
+
+    assert not any(
+        "standalone has no engine.command" in warning for warning in warnings
+    )
+
+
+def test_active_standalone_warns_about_inherited_disaggregation_flags():
+    warnings, _ = _resolve(
+        {
+            "model": {},
+            "decode": {
+                "engine": {
+                    "command": (
+                        "vllm serve m --port 8200 "
+                        '--kv-transfer-config \'{"kv_connector":"NixlConnector"}\''
+                    )
+                }
+            },
+            "standalone": {"enabled": True, "engine": {}},
+        }
+    )
+
+    assert any("standalone has no engine.command" in warning for warning in warnings)
 
 
 def test_a_read_overrules_a_stated_number_and_says_so():
@@ -481,3 +577,103 @@ def test_a_disabled_roles_command_decides_nothing():
     )
 
     assert values["model"]["blockSize"] == 64
+
+
+def test_inactive_modelservice_command_decides_nothing_in_standalone_mode():
+    values = {
+        "model": {},
+        "modelservice": {"enabled": False},
+        "decode": {
+            "enabled": True,
+            "engine": {
+                "command": "vllm serve decode-model --port 8200 --block-size 64"
+            },
+        },
+        "standalone": {
+            "enabled": True,
+            "engine": {
+                "command": "sglang serve standalone-model --port 30000 --page-size 32"
+            },
+        },
+    }
+
+    assert model_id_from_commands(values) == "standalone-model"
+    _, resolved = _resolve(values)
+    assert resolved["model"]["blockSize"] == 32
+
+
+def test_standalone_inherits_the_model_id_from_decodes_command():
+    values = {
+        "model": {},
+        "modelservice": {"enabled": False},
+        "decode": {
+            "engine": {
+                "command": "vllm serve Qwen/Qwen3-0.6B --port 8200",
+                "extraArgs": ["--served-model-name", "qwen"],
+            },
+        },
+        "standalone": {
+            "enabled": True,
+            "engine": {"extraArgs": ["--dtype", "bfloat16"]},
+        },
+    }
+
+    model_id = model_id_from_commands(values)
+    assert model_id == "qwen"
+    values["model"]["name"] = model_id
+    warnings, resolved = _resolve(values)
+    standalone = resolved["resolvedServingRoles"]["standalone"]
+    assert standalone["servedModelName"] == "qwen"
+    assert standalone["command"].endswith("--dtype bfloat16")
+    assert not any("model.name" in warning for warning in warnings)
+
+
+def test_standalone_inherits_decodes_command_runtime_settings():
+    values = {
+        "model": {"name": "model"},
+        "modelservice": {"enabled": False},
+        "images": {"vllm": {"repository": "default/vllm", "tag": "latest"}},
+        "decode": {
+            "engine": {
+                "name": "my-engine",
+                "command": "my-engine serve --model model --port $ENGINE_PORT",
+                "port": 9000,
+                "preprocessCommand": "prepare-engine",
+                "image": {
+                    "repository": "example/my-engine",
+                    "tag": "v1",
+                    "pullPolicy": "Always",
+                },
+                "healthPath": "/ready",
+                "metricsPath": "/prometheus",
+                "containerName": "custom-server",
+            },
+        },
+        "standalone": {"enabled": True, "engine": {}},
+    }
+
+    _, resolved = _resolve(values)
+    standalone = resolved["standalone"]["engine"]
+
+    assert standalone["name"] == "my-engine"
+    assert standalone["port"] == 9000
+    assert standalone["preprocessCommand"] == "prepare-engine"
+    assert standalone["image"] == {
+        "repository": "example/my-engine",
+        "tag": "v1",
+        "pullPolicy": "Always",
+    }
+    assert standalone["healthPath"] == "/ready"
+    assert standalone["metricsPath"] == "/prometheus"
+    assert standalone["containerName"] == "custom-server"
+
+
+def test_empty_standalone_command_does_not_inherit_a_model_id():
+    values = {
+        "model": {},
+        "modelservice": {"enabled": False},
+        "decode": {"engine": {"command": "vllm serve decode-model"}},
+        "standalone": {"enabled": True, "engine": {"command": ""}},
+    }
+
+    assert model_id_from_commands(values) is None

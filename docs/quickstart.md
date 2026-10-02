@@ -194,7 +194,7 @@ The results directory path is printed in the final log line - something like `/t
 
 ## 5. Alternate path: standalone deployment
 
-The `standalone` method skips the llm-d-modelservice chart entirely and deploys a single vLLM pod directly. It's simpler, has fewer moving parts, and is a good second step after the modelservice path succeeds.
+The `standalone` method skips the llm-d-modelservice chart entirely and deploys a single model-server pod directly. It's simpler, has fewer moving parts, and is a good second step after the modelservice path succeeds.
 
 Use a different namespace so you don't clash with the modelservice run:
 

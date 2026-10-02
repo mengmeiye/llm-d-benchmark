@@ -3,7 +3,7 @@
 import time
 from pathlib import Path
 
-from llmdbenchmark.engine import serving_engine, serving_port
+from llmdbenchmark.engine import serving_port, serving_role
 from llmdbenchmark.executor.step import Step, StepResult, Phase
 from llmdbenchmark.executor.context import ExecutionContext
 from llmdbenchmark.executor.command import CommandExecutor
@@ -311,9 +311,11 @@ class SmoketestStep(Step):
         engine happens to serve /health today, but which engine is being polled
         belongs in the log line either way.
         """
-        engine_cfg = serving_engine(plan_config or {})
-        engine = str(engine_cfg.get("name") or "") or "the engine"
-        health_path = str(engine_cfg.get("healthPath") or "/health")
+        resolved = serving_role(plan_config or {})
+        engine = (
+            resolved.engine_name if resolved and resolved.engine_name else "the engine"
+        )
+        health_path = resolved.health_path if resolved else "/health"
         protocol = "https" if str(port) == "443" else "http"
         url = f"{protocol}://{host}:{port}{health_path}"
         curl_image = "quay.io/fedora/fedora"

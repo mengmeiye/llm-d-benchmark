@@ -298,7 +298,7 @@ def test_an_unstated_fraction_skips_the_estimate_and_names_the_right_flag(planne
 @pytest.mark.parametrize("spec", (*ENGINE_SPECS, GENERIC), ids=lambda s: s.name)
 def test_every_engine_states_a_scope_the_check_understands(spec):
     """A new engine whose scope is a typo would silently get vLLM's reading."""
-    assert spec.memoryFractionScope in MEMORY_FRACTION_SCOPES
+    assert spec.memory_fraction_scope in MEMORY_FRACTION_SCOPES
 
 
 @pytest.mark.parametrize("spec", ENGINE_SPECS, ids=lambda s: s.name)
@@ -308,9 +308,9 @@ def test_an_engine_that_reads_a_fraction_is_covered_by_a_test_above(spec):
     Kept as an assertion rather than a comment: adding an engine with a fraction
     flag and a fourth scope should fail here until its arithmetic is written.
     """
-    if not spec.memoryUtilFlags:
+    if not spec.memory_util_flags:
         return
-    assert spec.memoryFractionScope in {
+    assert spec.memory_fraction_scope in {
         MEMORY_FRACTION_DEVICE,
         MEMORY_FRACTION_WEIGHTS_AND_KV,
         MEMORY_FRACTION_FREE_AFTER_LOAD,
@@ -335,7 +335,7 @@ def test_the_plan_supplies_the_engine_to_validate_with():
     params = cv._extract_params(plan, "decode", ignore_failures=True)
     assert params is not None
     assert params.engine == "sglang"
-    assert get_engine_spec(params.engine).memoryFractionScope == (
+    assert get_engine_spec(params.engine).memory_fraction_scope == (
         MEMORY_FRACTION_WEIGHTS_AND_KV
     )
 

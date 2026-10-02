@@ -351,7 +351,8 @@ class EnsureInfraStep(Step):
     def _check_nok8s_infra(self, context: ExecutionContext) -> StepResult:
         """Preflight for the no-Kubernetes method: container runtime, GPU,
         ports, and HF token. Only a missing/broken runtime is fatal; the rest
-        are loud warnings (vLLM surfaces GPU/token issues clearly at launch)."""
+        are loud warnings (the model server reports accelerator and token
+        issues at launch)."""
         runtime = context.container_runtime or "docker"
         plan_config = self._load_plan_config(context) or {}
         nok8s = plan_config.get("nok8s", {})

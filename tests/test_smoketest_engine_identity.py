@@ -35,7 +35,7 @@ ENGINES = [
     (
         "sglang",
         "docker.io/lmsysorg/sglang",
-        "python3 -m sglang.launch_server --model-path Qwen/Qwen3-32B --port 8200 "
+        "sglang serve Qwen/Qwen3-32B --port 8200 "
         "--context-length 16000 --mem-fraction-static 0.88",
     ),
     (

@@ -1,4 +1,5 @@
 {% if nok8s.enabled %}
+{% set serving = resolvedServingRoles.nok8s %}
 {# ============================================================================
    nok8s container-launch spec.  This is NOT a Kubernetes object — it is an
    authored manifest describing which containers step_05_nok8s_deploy.py must
@@ -45,8 +46,8 @@ containers:
    called vllm-0. #}
   - name: modelserver-{{ i }}{{ nok8s.nameSuffix }}
     kind: engine
-    engine: {{ nok8s.engine.name | default('vllm', true) }}
-    image: "{{ nok8s.engine.image.repository }}:{{ nok8s.engine.image.tag }}"
+    engine: {{ serving.engineName | default('vllm', true) }}
+    image: "{{ serving.image.repository }}:{{ serving.image.tag }}"
 {# The command the container runs, byte-for-byte what the scenario wrote. The
    step writes it to <workspaceHostDir>/launch-<name>.sh and bind-mounts that,
    rather than inlining it in the `docker run` line: the command legitimately
@@ -54,10 +55,10 @@ containers:
    under the ssh transport the whole run command is re-quoted once more. #}
     shell: {{ engine.shell }}
     command: |
-{{ (nok8s.engine.command | default('', true) | trim) | indent(6, true) }}
+{{ (serving.command | default('', true) | trim) | indent(6, true) }}
     hostPort: {{ nok8s.engine.hostPort + i }}
 {# The port the engine binds inside the container: its command's --port. #}
-    containerPort: {{ nok8s.engine.port | default(engine.servicePort, true) }}
+    containerPort: {{ serving.port | default(engine.servicePort, true) }}
     accelerator: {{ nok8s.engine.accelerator | default('nvidia') }}
     gpus: "{{ nok8s.engine.gpus }}"
     deviceArgs: [{% for a in nok8s.engine.deviceArgs | default([]) %}"{{ a }}"{% if not loop.last %}, {% endif %}{% endfor %}]

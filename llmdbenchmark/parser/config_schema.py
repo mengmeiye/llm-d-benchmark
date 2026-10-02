@@ -18,7 +18,7 @@ of truth for defaults.  The schema only defines types and constraints.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -100,7 +100,7 @@ class ProbeConfig(BaseModel):
     model_config = STRICT_CONFIG
 
     path: str | None = None
-    # Optional explicit port (defaults to the role's effective vLLM port at
+    # Optional explicit port (defaults to the role's effective engine port at
     # render time). Set per-probe in the scenario when the probe needs to
     # hit a non-default port (e.g. uds-tokenizer health on 8082).
     port: int | str | None = None
@@ -155,7 +155,7 @@ class PodMonitorConfig(BaseModel):
     enabled: bool
     portName: str
     # Where the engine publishes Prometheus metrics. Unset by default: the path
-    # is engine knowledge, so it comes from `<role>.engine.metricsPath`. Set it
+    # is engine knowledge, so it comes from the resolved serving role. Set it
     # only to scrape somewhere else.
     path: str | None = None
     interval: str
@@ -210,9 +210,8 @@ class EngineConfig(BaseModel):
     line, verbatim, exactly as it would be typed at a shell) and -- only when
     there is no command to read -- ``name``. ``extraArgs`` is the third, for a
     stack that wants a shared command plus a couple of words of its own.
-    Everything else is either an escape hatch for an image whose entrypoint
-    fixes a value, or a fact ``resolve_engines`` read out of the command and
-    recorded here for the templates.
+    Everything else is an escape hatch for an image whose entrypoint fixes a
+    value. Derived runtime data is published under ``resolvedServingRoles``.
     """
 
     model_config = STRICT_CONFIG
@@ -228,15 +227,12 @@ class EngineConfig(BaseModel):
     #: so the numbers read back match what the engine gets. Nothing here knows
     #: what any of the words mean.
     extraArgs: list[str] = Field(default_factory=list)
-    #: Overrides the ``--port`` in the command. Needed only when the image's
-    #: entrypoint fixes the port, or when the command could not be read.
+    #: Fallback when no numeric ``--port`` can be read from the command. Needed
+    #: when the image's entrypoint fixes the port or the command uses a variable.
     port: int | None = None
     #: Runs before the engine in the same container; overrides
     #: ``engine.preprocessScript`` for this role.
     preprocessCommand: str | None = None
-    #: ``custom`` (render ``command``) or ``imageDefault`` (run the image's
-    #: entrypoint). Defaulted from whether a command is present.
-    modelCommand: str | None = None
     #: Args appended to the image entrypoint in ``imageDefault`` mode.
     args: list[str] = Field(default_factory=list)
     image: EngineImageConfig | None = None
@@ -244,15 +240,44 @@ class EngineConfig(BaseModel):
     containerName: str | None = None
 
     # -- written by resolve_engines (not user-set) --------------------------
-    #: Everything read out of the command, as published by
-    #: ``ParsedCommand.to_dict()``. Consumed by steps and smoketests so they
-    #: never re-parse the command themselves.
-    facts: dict[str, Any] | None = None
     #: Where the engine answers health checks and exposes Prometheus metrics.
     #: Probes and the PodMonitor read these instead of naming a vLLM path.
     healthPath: str | None = None
     metricsPath: str | None = None
-    imageKey: str | None = None
+
+
+class ResolvedServingImageConfig(BaseModel):
+    """Image selected for an immutable serving-role snapshot."""
+
+    model_config = STRICT_CONFIG
+
+    repository: str
+    tag: str
+    pullPolicy: str
+
+
+class ResolvedServingRoleConfig(BaseModel):
+    """Serialized :class:`ResolvedServingRole` in a rendered plan."""
+
+    model_config = STRICT_CONFIG
+
+    active: bool
+    inheritedFrom: str | None
+    engineName: str
+    command: str | None
+    launchMode: Literal["command", "image-entrypoint"]
+    modelId: str | None
+    servedModelName: str | None
+    port: int
+    image: ResolvedServingImageConfig
+    containerName: str
+    healthPath: str
+    metricsPath: str
+    preprocessCommand: str
+    entrypointArgs: list[Any]
+    resources: dict[str, Any]
+    parallelism: dict[str, Any]
+    environment: list[Any]
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +475,24 @@ class InferencePerfConfig(BaseModel):
     rayonNumThreads: int
 
 
+class HarnessEnvVarConfig(BaseModel):
+    """Environment variable passed to the benchmark harness container."""
+
+    model_config = STRICT_CONFIG
+
+    name: str
+    value: str
+
+
+class HarnessSmoketestConfig(BaseModel):
+    """Per-scenario readiness polling settings for smoketests."""
+
+    model_config = STRICT_CONFIG
+
+    modelReadyTimeout: int | None = Field(default=None, gt=0)
+    modelReadyPollInterval: int | None = Field(default=None, gt=0)
+
+
 class HarnessConfig(BaseModel):
     """Benchmark harness configuration."""
 
@@ -474,6 +517,8 @@ class HarnessConfig(BaseModel):
     tolerations: list[dict[str, Any]] = Field(default_factory=list)
     output: str
     inferencePerf: InferencePerfConfig
+    extraEnvVars: list[HarnessEnvVarConfig] | None = None
+    smoketest: HarnessSmoketestConfig | None = None
     namespace: str | None = None
     pvcSize: str | None = None
     # Cluster-specific overrides supplied via --cluster-config (deep-merged onto
@@ -512,6 +557,7 @@ class BenchmarkConfig(BaseModel):
     harness: HarnessConfig
     parallelism: ParallelismConfig | None = None
     description: DescriptionConfig | None = None
+    resolvedServingRoles: dict[str, ResolvedServingRoleConfig] | None = None
 
     # Scenario-level workspace directory (equivalent to LLMDBENCH_CONTROL_WORK_DIR).
     # Used as workspace fallback when --workspace is not specified on the CLI.

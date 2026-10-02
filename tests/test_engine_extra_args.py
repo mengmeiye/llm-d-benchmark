@@ -199,7 +199,7 @@ def test_the_model_id_is_still_read_from_the_command():
         }
     )
 
-    assert values["decode"]["engine"]["facts"]["model"] == "facebook/opt-125m"
+    assert values["resolvedServingRoles"]["decode"]["modelId"] == "facebook/opt-125m"
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +221,38 @@ def test_a_roles_own_list_replaces_the_plan_wide_one():
 
     assert values["decode"]["engine"]["command"].endswith("--dtype bfloat16")
     assert values["prefill"]["engine"]["command"].endswith("--dtype float16")
+
+
+def test_standalone_does_not_repeat_common_args_from_inherited_decode():
+    _, values = _resolve(
+        {
+            "model": {},
+            "engine": {"extraArgs": ["--api-key", "secret"]},
+            "decode": {"engine": {"command": COMMAND}},
+            "standalone": {"enabled": True, "engine": {}},
+        }
+    )
+
+    command = values["standalone"]["engine"]["command"]
+    assert command.count("--api-key secret") == 1
+
+
+def test_standalone_specific_args_extend_the_inherited_composed_command():
+    _, values = _resolve(
+        {
+            "model": {},
+            "engine": {"extraArgs": ["--dtype", "float16"]},
+            "decode": {"engine": {"command": COMMAND}},
+            "standalone": {
+                "enabled": True,
+                "engine": {"extraArgs": ["--dtype", "bfloat16"]},
+            },
+        }
+    )
+
+    command = values["standalone"]["engine"]["command"]
+    assert "--dtype float16" in command
+    assert command.endswith("--dtype bfloat16")
 
 
 def test_words_with_no_command_to_extend_are_reported():

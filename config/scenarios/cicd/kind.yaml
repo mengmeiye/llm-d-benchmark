@@ -109,9 +109,8 @@ scenario:
       # llm-d-inference-sim, not a real engine: the image entrypoint is the
       # launcher, so this role passes an argument list instead of a command.
       # `command: ""` is what selects that -- it drops the inherited default
-      # `vllm serve` line, and modelCommand resolves to `imageDefault`, which
-      # emits `args:` with no `command:` (a distroless sim image has no shell
-      # to exec one in). ${dotted.path} reads the resolved plan.
+      # `vllm serve` line and emits `args:` without a `command:` override. The
+      # sim image is distroless and has no shell to exec.
       engine:
         command: ""
         args:

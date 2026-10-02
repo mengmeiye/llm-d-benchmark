@@ -104,10 +104,9 @@ scenario:
 
     # =========================================================================
     # STANDALONE -- Only applies when standalone.enabled: true
-    # A standalone pod has no routing sidecar, so its command binds
-    # `engine.servicePort` (8000) itself. To run this scenario standalone, flip
-    # the two `enabled` flags and give the role decode's command with
-    # `--port 8000`.
+    # A standalone pod has no routing sidecar. When selected with
+    # `-t standalone`, it inherits decode's command, image, pod resources and
+    # parallelism. Its Service targets the port read from that command.
     # =========================================================================
     standalone:
       enabled: false

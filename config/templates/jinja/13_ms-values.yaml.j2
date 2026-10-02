@@ -180,7 +180,7 @@ routing:
 {# The sidecar forwards to wherever decode's engine actually listens, i.e. the
    --port in decode's engine command. routing.proxy.targetPort is kept in sync
    with it by the render pipeline, so this is one value read two ways. #}
-    targetPort: {{ routing.proxy.targetPort | default(decode.engine.port, true) }}
+    targetPort: {{ routing.proxy.targetPort | default(resolvedServingRoles.decode.port, true) }}
     connector: {{ routing.connector }}
     secure: {{ routing.secure | lower }}
 {% if routing.proxy is defined %}

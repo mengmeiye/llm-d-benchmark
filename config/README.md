@@ -417,8 +417,8 @@ Jinja2 templates that produce Kubernetes resource definitions. Each template cor
 | `11_infra.yaml.j2` | Infrastructure chart values |
 | `12_router-values.yaml.j2` | llm-d router (EPP + InferencePool) Helm values |
 | `13_ms-values.yaml.j2` | Modelservice Helm values |
-| `14_standalone-deployment_yaml.j2` | Standalone vLLM Deployment |
-| `15_standalone-service_yaml.j2` | Standalone vLLM Service |
+| `14_standalone-deployment_yaml.j2` | Standalone model-server Deployment |
+| `15_standalone-service_yaml.j2` | Standalone model-server Service |
 | `16_pvc_extra-pvc.yaml.j2` | Extra PVCs (e.g., scratch space) |
 | `17_standalone-podmonitor.yaml.j2` | Standalone PodMonitor for metrics |
 | `18_podmonitor.yaml.j2` | Modelservice PodMonitor for metrics |
@@ -491,52 +491,28 @@ The `enabled` flag is auto-computed during plan rendering by `_resolve_hf_token(
 
 ## Config Variable Substitution
 
-Almost nothing in a scenario needs this. An engine command states its flags and
-their values literally -- that is the whole point of it being verbatim -- so the
-numbers and the model id are written out, and llm-d-benchmark reads back off the
-command the few it needs. `${dotted.path}` exists for the cases that shape
-cannot cover:
-
-- **One value, two places, and one of them is not a command.** An EPP plugin
-  config or an `InferenceObjective` needs a number the command already states.
-  Written twice they can silently disagree.
-- **One command shared by several stacks that serve different models.** Each
-  stack states its own `model.name`; the shared command names the stack.
-- **A value llm-d-benchmark derives, which a scenario therefore cannot write.**
-  `model.idLabel` is a `{first8}-{sha8}-{last8}` hash of the model id.
-- **A stack with no engine command at all.** Fast model actuation runs the
-  launcher process as the engine, so there is no `vllm serve` line for the
-  capacity check and the workload profile to read their numbers off. Those
-  stacks state `model.maxModelLen` / `blockSize` / `gpuMemoryUtilization` in
-  the `model:` block and `fma.launcher.options` references them, which is the
-  first case with the direction reversed: the non-command field is the source.
-
-If a reference does not fall into one of those, write the value out instead.
+Use `${dotted.path}` when one merged configuration value must appear in another
+string. Common uses are a derived name such as `${model.idLabel}`, a shared
+multi-stack command that serves `${model.name}`, or a router setting that must
+match a value parsed from the engine command. Prefer literal values when no
+cross-reference is needed.
 
 ### Syntax
 
-`${section.key}` resolves against the merged config (defaults + scenario) at
-render time. The path must contain at least one dot -- that is what separates a
-config reference from a container or shell variable, which is never touched.
-
-Any scalar in the merged config can be referenced, but the list of ones worth
-referencing is short: `${model.idLabel}` and `${namespace.name}` (derived),
-`${model.name}` (multi-stack only), and a capacity number the command already
-states and a non-command field needs to match.
+`${section.key}` resolves against the merged config at render time. The path
+must contain a dot, which distinguishes it from container and shell variables.
+Any scalar value can be referenced.
 
 ### Where to use
 
 - `extraEnvVars` values
 - `pluginsCustomConfig` -- inline EPP plugin configuration
 - `extraObjects` -- inline Kubernetes manifests
-- `<role>.engine.command` / `engine.args` -- multi-stack scenarios only
+- `<role>.engine.command` and `engine.args`
 
 ### Examples
 
-All three are in the tree.
-
-An EPP plugin needs the engine's page size, and it is not a command
-([precise-prefix-cache-routing.yaml](scenarios/guides/precise-prefix-cache-routing.yaml)):
+Keep a router setting aligned with the engine's page size:
 
 ```yaml
     decode:
@@ -544,7 +520,7 @@ An EPP plugin needs the engine's page size, and it is not a command
         command: |
           vllm serve meta-llama/Llama-3.1-8B-Instruct \
           --port 8200 \
-          --block-size 64            # <- the one statement of the page size
+          --block-size 64
 
     modelservice:
       router:
@@ -554,14 +530,10 @@ An EPP plugin needs the engine's page size, and it is not a command
               - type: precise-prefix-cache-producer
                 parameters:
                   tokenProcessorConfig:
-                    # Must equal the engine's page size: this reconstructs block
-                    # hashes on the engine's boundaries. Read off `--block-size`
-                    # above, so there is one number and it is the engine's own.
                     blockSizeTokens: ${model.blockSize}
 ```
 
-An `InferenceObjective` has to name the router pool, whose name is derived
-([turn-priority-fairness.yaml](scenarios/guides/turn-priority-fairness.yaml)):
+Reference a derived router pool name:
 
 ```yaml
       extraObjects:
@@ -570,20 +542,15 @@ An `InferenceObjective` has to name the router pool, whose name is derived
           spec:
             priority: -1
             poolRef:
-              # `idLabel` is a hash of the model id that llm-d-benchmark
-              # computes, so this is the only way to write it.
               name: ${model.idLabel}-router
 ```
 
-One command, several models
-([multi-model-optimized-baseline.yaml](scenarios/examples/multi-model-optimized-baseline.yaml)):
+Share one command across stacks that serve different models:
 
 ```yaml
 modelservice:
   decode:
     engine:
-      # Every flag is written out. Only the serve target varies, because the
-      # stacks below serve different models and share this one command.
       command: |
         vllm serve ${model.name} \
         --port 8200 \
@@ -601,23 +568,16 @@ scenario:
 
 ### Container and shell variables
 
-There is nothing to configure. A command is passed through as written, so a `$`
-is just a character in it: `$(POD_IP)` is expanded by Kubernetes, `$MAX_NUM_SEQS`
-and `${LWS_WORKER_INDEX:-0}` by the shell that runs the command. The dot rule
-above is what keeps them out of scope.
-
-A scenario reaches for one when the value is not knowable until the pod is
-running -- the pod's own IP in a KV-events topic
-([precise-prefix-cache-routing.yaml](scenarios/guides/precise-prefix-cache-routing.yaml)),
-or a number that has to differ between replicas of one Deployment (see
-[Context-Length-Aware Routing](#context-length-aware-routing)).
+Runtime expressions such as `$(POD_IP)`, `$MAX_NUM_SEQS`, and
+`${LWS_WORKER_INDEX:-0}` are preserved. Kubernetes or the container shell
+expands them later.
 
 ### Behavior
 
 - Substitution runs after all resolvers (model, namespace, version, etc.) so all values are available.
 - If a reference cannot be resolved, it is left as-is and a warning is logged.
 - Non-string values (integers, booleans) are converted to strings when embedded.
-- The original config dict is not mutated - a deep copy is used.
+- The original config is not mutated.
 
 ## Model Artifact Protocol (`modelservice.uriProtocol`)
 
@@ -782,16 +742,14 @@ difference is how a command stops saying what the engine will do.
 |---|---|---|---|
 | `${dotted.path}` | llm-d-benchmark, at render time | yes -- it is gone before the pod exists | `${model.idLabel}`, `${namespace.name}` |
 | `$(VAR)` | the kubelet, expanding `args` from the container's own env | yes | `$(POD_IP)`, `$(ENGINE_PORT)`, `$(MODEL_NAME)`, and anything in `extraEnvVars` |
-| `$VAR` | the shell the command runs under | **no** | same variables, but only where `modelCommand` gives the container a shell |
+| `$VAR` | the shell the command runs under | **no** | same variables, but only when the role supplies `engine.command` |
 
 Only the first row is llm-d-benchmark's own: the substitution regex requires at
 least one dot precisely so the other two pass through untouched.
 
-Prefer `$(VAR)` to `$VAR`. Under `modelCommand: imageDefault` -- the distroless
-path, no shell in the image -- `$(VAR)` still expands and `$VAR` reaches the
-engine as those literal characters. And on the shell path the failure is worse
-than silent: a `$(VAR)` the kubelet cannot resolve is left as-is, and the shell
-then reads it as command substitution.
+Prefer `$(VAR)` to `$VAR`. When no command is supplied and the image entrypoint
+runs directly, `$(VAR)` still expands while `$VAR` reaches the engine literally.
+With a shell command, an unresolved `$(VAR)` becomes shell command substitution.
 
 So a NIXL connector, and a ZMQ event publisher whose topic has to identify the
 publishing pod, both come out of one command line:
@@ -1009,10 +967,9 @@ they apply regardless of the selected standup method.
 
 ## Engine Command
 
-llm-d-benchmark is engine-agnostic. It does not model an engine's command line,
-does not generate one, and has no configuration key for any engine parameter.
-A role states the launch command **verbatim** -- what you would type on a node,
-copied in unchanged:
+llm-d-benchmark does not generate engine command lines or expose configuration
+keys for engine parameters. Put the command you would normally run under the
+role's `engine.command`:
 
 ```yaml
 decode:
@@ -1026,22 +983,17 @@ decode:
       --gpu-memory-utilization 0.95
 ```
 
-That is the whole model configuration too. The id in the command is where the
-model is named, and `model.name`, `model.huggingfaceId`, the PVC path and the
-pod labels are read off it -- see
-[Referring to the model](#referring-to-the-model-and-the-cluster-from-inside-the-command)
-for the one thing a command cannot say and the two cases that want a variable
-instead of the literal id.
+The renderer derives the model identity and the small set of values needed to
+build resources around the process. It does not interpret or rewrite other
+engine options.
 
-Switching engines is a different command and nothing else -- the same
-scenario shape, no new keys:
+Switching engines uses the same scenario shape:
 
 ```yaml
 decode:
   engine:
     command: |
-      python3 -m sglang.launch_server \
-      --model-path meta-llama/Llama-3.1-8B-Instruct \
+      sglang serve meta-llama/Llama-3.1-8B-Instruct \
       --host 0.0.0.0 \
       --port 8200 \
       --tp-size 4 \
@@ -1049,21 +1001,10 @@ decode:
       --mem-fraction-static 0.9
 ```
 
-[examples/engines.yaml](scenarios/examples/engines.yaml) (smoke-sized, one
-0.6B decode pod) and
-[guides/optimized-baseline.yaml](scenarios/guides/optimized-baseline.yaml) (guide
-scale) each carry all three commands, the vLLM one active and the SGLang and
-TensorRT-LLM ones commented out directly beneath it: strip the `# ` prefix from
-one block, comment out the other, and the rendered plan changes in two places --
-the launch line and the image the launcher selects. They are also where the
-exception is written down, because TensorRT-LLM is the one engine that needs
-three keys beyond the command (`model.blockSize`, `monitoring.metricsPath` and
-`LD_LIBRARY_PATH`, each commented in place next to the key it belongs to).
-
-Each commented group is tagged `# @engine <name>`, which is what keeps it from
-rotting. Nothing parses a comment, so an alternative would otherwise be the one
-block in the file that no test ever reads. The tag also means you do not have to
-make the edit by hand -- `--engine <name>` makes it for you:
+[examples/engines.yaml](scenarios/examples/engines.yaml) and
+[guides/optimized-baseline.yaml](scenarios/guides/optimized-baseline.yaml)
+include tagged vLLM, SGLang, and TensorRT-LLM alternatives. Select one without
+editing the scenario:
 
 ```bash
 llmdbenchmark standup --spec examples/engines --engine sglang -p "$NS"
@@ -1072,117 +1013,76 @@ util/scenario-inventory.py --alternative trtllm    # which scenarios offer it
 util/test-scenarios.sh --plan --engine trtllm      # render every one of them switched in
 ```
 
-`--engine <name>` uncomments the tagged groups into a copy under the workspace --
-the repo is not touched -- drops the definitions they replace, and renders that
-copy. Asking for the engine the scenario already launches is a logged no-op;
-asking for one it neither launches nor offers is an error, because only the file
-knows which companion keys move with the command.
-`tests/test_engine_alternatives.py` asserts the same switch in process, which is
-what enforces "all four blocks or none" for TensorRT-LLM: drop one and a capacity
-number arrives empty, which the test fails on.
-
-This is why there is no `sglang.yaml` and no `trtllm.yaml`. A per-engine file is
-the same stack as its vLLM sibling with one string changed, which the tagged
-group already expresses -- and the two files then drift apart with nothing
-comparing them. Adding a fourth engine here costs one commented block, not a
-fourth file.
+The selection is applied to a workspace copy; it never edits the source file.
+Selecting an unavailable alternative is an error. Tagged companion settings
+cover engine-specific requirements that cannot be expressed in the command,
+such as a metrics path or runtime environment variable.
 
 ### What is read back out of the command
 
-The command text is authoritative and is never rewritten. It is *read* once,
-for the handful of facts Kubernetes must know before the process starts --
-because they decide the shape of objects created around the engine, not the
-engine's own behaviour:
+The command is parsed once for facts Kubernetes needs before the process
+starts:
 
 | Read | Why it cannot wait for the engine | Landed on |
 |---|---|---|
-| The launcher (`vllm serve`, `python3 -m sglang.launch_server`, `trtllm-serve`, `llm-d-inference-sim`) | Picks the server image, health path and metrics path | `<role>.engine.name`, `<role>.engine.image` |
-| `--port` | Sizes the container port, the probes and the routing sidecar's upstream | `<role>.engine.port` |
+| The launcher (`vllm serve`, `sglang serve`, `trtllm-serve`, `llm-d-inference-sim`) | Picks the server image, health path and metrics path | `resolvedServingRoles.<role>.engineName`, `.image`, `.healthPath`, `.metricsPath` |
+| `--port` | Sizes the container port, the probes and the routing sidecar's upstream | `resolvedServingRoles.<role>.port` |
 | The model reference (`--model`, `--model-path`, the positional, or `--served-model-name`) | Names what the PVC stages, what the pod labels and the HTTPRoute match, and what the harness sends requests to | `model.name`, `model.huggingfaceId`, `model.path`, `model.idLabel` |
 | The capacity pair: context length and memory fraction | Feed the pre-deploy capacity check, which sizes KV cache before anything is created | `model.maxModelLen`, `model.gpuMemoryUtilization` |
 | The KV page size (vLLM `--block-size`, SGLang `--page-size`) | The router's prefix-cache index must hash on the same block boundaries the engine writes | `model.blockSize` |
 
-That is the whole list -- five facts, and `--port` is spelled identically by
-every supported engine, so it costs nothing per engine. Every other flag is
-opaque and reaches the container untouched: batch widths, expert parallelism, KV
-connector configuration, parallelism widths. There is no list of engine
-parameters to keep up to date, and no parameter to re-learn before writing a
-scenario.
+Other flags remain opaque and reach the container unchanged.
 
-**A device count is not read out of the command.** The kubelet grants
-accelerators before the engine process exists, so the count is stated in
-Kubernetes' vocabulary -- `<role>.resources.limits.<accelerator resource>`, or
-the `accelerator.count` / `<role>.parallelism` shorthands -- and has to agree
-with the width the command gives the engine. A role running `--tensor-parallel-size 2`
-writes the width twice on purpose: once for the engine, once for the chart.
-Inferring it from a product of flag widths would mean tracking every engine's
-spelling of every width, and would disagree with the pod spec the moment one of
-them changed.
+`resolvedServingRoles` is derived plan output, not user configuration. It holds
+the final command, launch mode, model, port, image, endpoints, resources,
+parallelism, and environment for each active role. Templates, standup, and
+smoketest consume this single view. Configure the role sections instead of
+setting `resolvedServingRoles` directly.
 
-**Where a read and a stated value disagree, the command wins** -- and the
-override is reported as a warning. The command is the text handed to the engine,
-so it is the only one of the two that is certainly true; a consumer told the
-other number would be sizing KV cache the engine never allocates, or hashing
-pages it never writes. A `model.*` value stated in the scenario is therefore a
-*fallback* for a command that says nothing, not an override of one that does --
-which is what lets a scenario state its context length once, in the flag the
-engine actually reads, instead of twice. A value that had to be overruled is a
-scenario asking for something it will not get, so it is surfaced rather than
-silently dropped.
+**Device counts are not read from the command.** Configure them through
+`<role>.resources.limits.<accelerator resource>`, `accelerator.count`, or
+`<role>.parallelism`. They must agree with the parallel width passed to the
+engine.
 
-When several roles run, the value is taken from the first of `decode`,
-`standalone`, `nok8s`, `prefill` that supplies it, skipping any role that is
-disabled or scaled to zero.
+**Where a parsed value and a configured fallback disagree, the command wins**
+and a warning is emitted. A `model.*` value is used only when the active command
+does not provide that fact.
 
-Each engine's flag spellings live in one place,
-[`llmdbenchmark/engine/spec.py`](../llmdbenchmark/engine/spec.py). Adding an
-engine means adding one `EngineSpec` there -- not a template branch, not a
-configuration section.
+When several roles are configured, only roles reachable through the selected
+deployment method participate. Modelservice prefers decode and then prefill;
+standalone and nok8s use their corresponding role. Disabled and zero-replica
+roles are skipped.
+
+When standalone has no command of its own, it inherits decode's resolved
+command and command-coupled settings (engine name, image, explicit port,
+preprocess command, endpoint paths, and container name). A value stated under
+`standalone.engine` still takes precedence.
+
+Known launcher and flag spellings are centralized in
+[`llmdbenchmark/engine/spec.py`](../llmdbenchmark/engine/spec.py).
 
 ### Referring to the model and the cluster from inside the command
 
-**Write the model id.** A command that names its model literally is read as the
-statement of which model the plan serves: `model.name`, `model.huggingfaceId`,
-`model.path` and `model.idLabel` are all derived from it, so a scenario needs no
-`model:` block to serve a model, and there is no second place that can disagree
-with the engine. A scenario that *does* state `model.name` keeps it, and a
-command naming a different model is reported rather than patched.
+Write the model id in the command. The renderer derives `model.name`,
+`model.huggingfaceId`, `model.path`, and `model.idLabel`. If the scenario also
+sets a different `model.name`, the mismatch is reported.
 
-One model key does not come from the command. `model.shortName` prefixes this
-stack's Deployments, Services and PVCs; a model id is a fact the command states,
-but a short name is a choice, and its derived form is a
-`{first8}-{sha8}-{last8}` hash. Scenarios write down a readable one
-(`shortName: qwen-qwen3-32b`) and it is left alone.
+`model.shortName`, used in resource names, is not read from the command. Set it
+when a readable name is preferred over the generated hash.
 
-**No `--served-model-name`.** The id in the command is also the id clients ask
-for: every engine here advertises whatever it was told to serve when nothing
-says otherwise (vLLM's `get_served_model_name`, SGLang's `served_model_name`
-defaulting to `model_path`). So the flag is redundant under the default
-`pvc+hf` and under `hf`, where the serve target is already the id. It earns its
-place only under `uriProtocol: pvc`, where the serve target is a mounted
-directory and something has to name the API -- that is the one protocol where the
-id is read off `--served-model-name` instead.
+`--served-model-name` is normally unnecessary because the model id is also the
+client-facing name. Use it with `uriProtocol: pvc`, where the serve target is a
+mounted directory; in that mode it supplies the model identity.
 
-One case wants a variable rather than the literal id: **one command shared by
-several stacks that serve different models.** `${model.name}` resolves against
-each stack's own merged config, which is what
+For one command shared by stacks serving different models, use `${model.name}`
+and set `model.name` in each stack, as
 [examples/multi-model-optimized-baseline.yaml](scenarios/examples/multi-model-optimized-baseline.yaml)
-uses -- one `shared:` command serving stacks that differ only in which model they
-load. The model facts run the other way there: the `model:` blocks are
-authoritative and the command follows them.
-
-Anything else a command might want to reference is covered by
-[Config Variable Substitution](#config-variable-substitution) -- which is mostly
-a list of reasons not to.
+does. See [Config Variable Substitution](#config-variable-substitution).
 
 ### Adding a few words to a shared command
 
-One stack, one command, written out in full -- that is the normal case, and a
-per-role difference means moving the `engine:` block down into the role. The
-exception is a scenario deploying several stacks off one `shared:` command where
-a stack or two differ in a flag. Writing that out means repeating sixteen
-identical lines to change one of them, and the copies drift. `engine.extraArgs`
-is a list of words appended to the end of the command, unexamined:
+Use `engine.extraArgs` to append a small per-stack variation to a shared
+command:
 
 ```yaml
 shared:
@@ -1192,13 +1092,11 @@ shared:
         command: |
           vllm serve ${model.name} \
           --port 8200 \
-          --max-model-len 8192 \
-          --gpu-memory-utilization 0.95 \
-          --block-size 64
+          --max-model-len 8192
 
 scenario:
   - model:
-      name: Qwen/Qwen3-0.6B                 # runs the shared line as written
+      name: Qwen/Qwen3-0.6B
   - model:
       name: meta-llama/Llama-3.1-8B-Instruct
     modelservice:
@@ -1207,45 +1105,25 @@ scenario:
           extraArgs: ["--max-model-len", "4096"]
 ```
 
-The llama stack runs the shared line with `--max-model-len 4096` on the end.
-**Repeating a flag the command already carries overrides it**, because every
-engine's argument parser keeps the last occurrence -- and so does the reader
-described above, so `model.maxModelLen` for that stack reads back as 4096, the
-number the engine will actually use. Nothing here knows what `--max-model-len`
-means; two strings are joined with a space.
-
-Three things to know about it:
+The second stack appends `--max-model-len 4096`. The command parser and the
+supported engines use the last occurrence of a repeated option.
 
 * **It appends, it never replaces.** The overridden flag is still visible in the
-  rendered Deployment, stated twice. That is deliberate: removing the earlier
-  occurrence would mean knowing that `--max-model-len` takes a value while
-  `--enable-prefix-caching` does not -- per flag, per engine, which is the
-  parameter modelling this design exists to avoid.
+  rendered command.
 * **It cannot change the serve target.** The words land at the end, so the
   positional model argument is out of reach; a shared command still writes
   `${model.name}`.
 * **A role's own list replaces a plan-wide one** rather than adding to it, the
-  same way `command` does -- so one place states the words for a role and there is
-  no question of what order two lists concatenate in.
-
-A width is the usual reason to reach for this, and a width is also the case that
-is not finished by the flag alone: `["--tensor-parallel-size", "2"]` tells the
-engine, and `parallelism.tensor` plus the accelerator count tell the chart. See
-[What is read back out of the command](#what-is-read-back-out-of-the-command).
+  same way `command` does.
 
 ### Declaring the engine
 
-Normally nothing declares the engine: the launcher in the command identifies
-it. `engine.name` (plan-wide) or `<role>.engine.name` exists for the two cases
-where the command cannot say:
+The launcher normally identifies the engine. Set `engine.name` or
+`<role>.engine.name` when it cannot:
 
-- **A role with no command**, because the image's own entrypoint starts the
-  server (`command: ""`, see below). There is no launcher to read, so the
-  declaration is what picks the image and the health path.
-- **A wrapper script**, where the engine is launched by something like
-  `/opt/app-root/spyre_entrypoint.sh`. The wrapper matches no launcher
-  signature, so declaring the engine is what makes the flags after it readable
-  in that engine's spelling -- see
+- **Image entrypoint:** `command: ""` provides no launcher to inspect.
+- **Wrapper script:** a launcher such as `/opt/app-root/spyre_entrypoint.sh`
+  does not match an engine signature; see
   [examples/spyre.yaml](scenarios/examples/spyre.yaml).
 
 A declaration is checked against what the command actually launches, and a
@@ -1276,20 +1154,19 @@ Two ports are involved, and only one of them is an engine parameter:
 - **`engine.servicePort`** (8000) is infrastructure -- the port the Service and
   the gateway expose. It is not passed to any engine.
 - **The port in the command's `--port`** is what the engine binds inside the
-  container. It is read from the command; `<role>.engine.port` overrides it for
-  a role whose port cannot be read (a fixed entrypoint), and the two
-  disagreeing is a warning.
+  container. It is read from the command; `<role>.engine.port` supplies a
+  fallback when the command has no numeric value (a fixed entrypoint or
+  `--port $ENGINE_PORT`). If both carry different numbers, the command wins and
+  the disagreement is reported.
 
-Which value to write depends on who else is on the pod, and getting it wrong is
-a stack that comes up green and answers nothing, so it is an **error**, not a
-warning:
+Use these bind ports:
 
 | Role | Bind |
 |---|---|
 | Decode, routing sidecar enabled (the default) | **8200** -- the sidecar owns 8000 and forwards upstream |
-| Decode, `routing.proxy.enabled: false` (including `gateway.className: none`) | **8000** -- nothing bridges, so the engine must answer on the Service port |
+| Decode, `routing.proxy.enabled: false` (including `gateway.className: none`) | Any free port -- the direct Service targets the resolved engine port |
 | Prefill | **8000** -- prefill pods never get a sidecar, and the decode sidecar reaches them there for P/D |
-| Standalone | **8000** |
+| Standalone | Any free port -- its Service targets the resolved engine port |
 
 Probe ports follow the engine's bind port automatically, and can be overridden
 with `<role>.probes.startup.port`, `<role>.probes.liveness.port` and
@@ -1297,15 +1174,10 @@ with `<role>.probes.startup.port`, `<role>.probes.liveness.port` and
 
 ### Preprocess script
 
-One step runs in the same container before the engine, chained onto the front
-of the command: `<role>.engine.preprocessCommand`, else `engine.preprocessScript`,
-else `/bin/true`. It is chained with `;` so the engine starts regardless --
-except under `contextLengthRanges`, where the preprocess also labels the pod and
-an unlabeled pod is invisible to the context-length-aware scorer; there it is
-chained with `&&` so a failure actually stops the container.
-
-Nothing else is prepended or appended. The engine's command line is
-byte-for-byte what you wrote.
+The renderer prepends `<role>.engine.preprocessCommand`, falling back to
+`engine.preprocessScript` and then `/bin/true`. It uses `;` by default. With
+`contextLengthRanges`, it uses `&&` so a failed pod-labeling step prevents the
+server from starting. `engine.extraArgs` is the only configured command suffix.
 
 ---
 
@@ -1678,17 +1550,16 @@ router:
 
 #### Using flow control in experiments
 
-To compare performance with and without flow control, define setup treatments that vary the plugin configuration:
+To compare performance with and without flow control, define setup treatments
+that vary the scenario field directly:
 
 ```yaml
 setup:
-  factors:
-    - LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE
-  levels:
-    LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE: "default,flow-control-config"
   treatments:
-    - "default"
-    - "flow-control-config"
+    - name: default
+      router.epp.pluginsConfigFile: default-plugins.yaml
+    - name: flow-control
+      router.epp.pluginsConfigFile: flow-control-config.yaml
 ```
 
 ---
@@ -1731,7 +1602,7 @@ decode:
       metricRelabelings: []
 ```
 
-When `podmonitor.enabled: true`, the templates `17_standalone-podmonitor.yaml.j2` (standalone) or `18_podmonitor.yaml.j2` (modelservice) render PodMonitor CRDs that tell Prometheus to scrape vLLM pods.
+When `podmonitor.enabled: true`, the templates `17_standalone-podmonitor.yaml.j2` (standalone) or `18_podmonitor.yaml.j2` (modelservice) render PodMonitor CRDs that tell Prometheus to scrape model-server pods.
 
 **Key metrics exposed by vLLM pods** (scraped via PodMonitor):
 - `vllm:kv_cache_usage_perc` -- KV cache utilization (%)
@@ -1994,8 +1865,8 @@ Each image key has `repository`, `tag`, and `pullPolicy` sub-fields. The one exc
 | `04_download_job.yaml.j2` | `images.benchmark` | Model download job |
 | `06_pod_access_to_harness_data.yaml.j2` | `images.benchmark` | Harness data access pod |
 | `12_router-values.yaml.j2` | `images.routerEndpointPicker` | llm-d-router EPP |
-| `13_ms-values.yaml.j2` (decode) | `images.vllm` | Decode pods in modelservice |
-| `13_ms-values.yaml.j2` (prefill) | `images.vllm` | Prefill pods in modelservice |
+| `13_ms-values.yaml.j2` (decode) | `decode.engine.image` | Decode pods in modelservice |
+| `13_ms-values.yaml.j2` (prefill) | `prefill.engine.image` | Prefill pods in modelservice |
 | `13_ms-values.yaml.j2` (sidecar) | `images.routingSidecar` | Routing sidecar in modelservice |
 | `13_ms-values.yaml.j2` (init containers) | `images.<imageKey>` | Per-init-container, via `imageKey:` (defaults to `images.benchmark`) |
 | `14_standalone-deployment_yaml.j2` | `standalone.engine.image` | Standalone model-server container |
@@ -2019,7 +1890,7 @@ This one is filled in by the engine resolver rather than a Jinja `default()`
 chain, and it is per sub-field: a role that pins only `repository` still gets
 its `tag` and `pullPolicy` from `images.<engine>`. Which `images` entry that is
 follows from the engine the role's command launches (`vllm serve` reads
-`images.vllm`, `python3 -m sglang.launch_server` reads `images.sglang`, and so
+`images.vllm`, `sglang serve` reads `images.sglang`, and so
 on), so a scenario that switches engines does not also have to restate the
 image. An `auto` tag is resolved at render time by the `VersionResolver`, on
 both the shared `images.<engine>.tag` and a per-role override.

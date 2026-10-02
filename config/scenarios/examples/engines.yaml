@@ -1,89 +1,20 @@
-# ENGINE SWAP Example Scenario for LLM-D Deployment
-#
-# One small stack -- Qwen3-0.6B, one decode pod, the sanity workload -- written
-# three times over, so you can run the *same* deployment on vLLM, SGLang or
-# TensorRT-LLM and compare. The engine lives in one string, the launch command:
-#
-#   vLLM     vllm serve Qwen/Qwen3-0.6B --port 8200 --tensor-parallel-size 1 ...
-#   SGLang   python3 -m sglang.launch_server --model-path Qwen/Qwen3-0.6B \
-#              --port 8200 --tp-size 1 ...
-#   TRT-LLM  trtllm-serve serve Qwen/Qwen3-0.6B --port 8200 --tp_size 1 ...
-#
-# vLLM is the active command below; the other two are commented out beside it,
-# each group tagged `# @engine <name>`. You do not have to edit this file to use
-# them -- the tag is what makes the switch a CLI flag:
+# ENGINE SWAP example: the same Qwen3-0.6B stack on vLLM, SGLang, or
+# TensorRT-LLM. vLLM is active; `--engine` applies the tagged alternatives to a
+# copy in the plan directory without modifying this file:
 #
 #   llmdbenchmark --spec examples/engines standup                  # vLLM
 #   llmdbenchmark --spec examples/engines --engine sglang standup
 #   llmdbenchmark --spec examples/engines --engine trtllm standup
 #
-# `--engine` uncomments the tagged groups into the run's plan directory, drops
-# the definitions they replace, and renders that -- this file is not modified,
-# and the switched copy is kept with the run's other artifacts. To see what a
-# scenario offers before running it:
-#
-#   util/scenario-inventory.py --alternative trtllm
-#   util/scenario-inventory.py --select examples/engines --apply sglang
-#
-# Nothing outside the tagged groups changes between the three. Replicas, the
-# PVC, probes, resources, the routing sidecar, the EPP and the gateway are
-# engine-neutral, and the container image is not named anywhere here: the
-# launcher in the command picks its own entry under `images:`
-# (`images.vllm` / `images.sglang` / `images.trtllm`), and the health and
-# metrics paths follow it too.
-#
-# WHY TRT-LLM MOVES FOUR THINGS AND SGLANG MOVES ONE
-# SGLang is a pure command swap. TensorRT-LLM needs three keys elsewhere, each
-# documented where it is stated below, which is why they are tagged as one set
-# -- apply all four or none:
-#   1. `model.blockSize: 32` -- TRT-LLM has no CLI flag for its KV page size
-#      (`tokens_per_block` lives in the --extra_llm_api_options file the command
-#      writes), so it cannot be read back off the command.
-#   2. `monitoring.metricsPath: /prometheus/metrics` -- TRT-LLM's Prometheus
-#      exposition is mounted there; /metrics serves iteration-stats JSON.
-#   3. `LD_LIBRARY_PATH` in `decode.extraEnvVars` -- the image does not put its
-#      own libraries on the loader path.
-#
-# llm-d-benchmark does not model engine parameters, so there is no `vllm:`,
-# `sglang:` or `trtllm:` settings block to learn and no list of flags for it to
-# keep in step with upstream. Each command is read once for the handful of facts
-# that decide Kubernetes objects -- which engine it launches, the port it binds,
-# and the capacity numbers the pre-deploy check needs -- and is otherwise handed
-# to the container untouched. That the three engines spell those numbers
-# differently (`--max-model-len` / `--context-length` / `--max_seq_len`) costs
-# nothing: the spelling lives in that engine's EngineSpec, not here.
-#
-# Flag spellings follow the llm-d guides, which publish this same well lit path
-# once per engine under guides/optimized-baseline/modelserver/gpu/{vllm,sglang,
-# trtllm}, so a command that works there works here. The values are this file's
-# own: port 8200 (the sidecar owns 8000), 32768 context, 0.9 of device memory,
-# one device.
-#
-# `-t kustomize` applies those upstream manifests instead of rendering this
-# scenario, so in that mode the engine comes from
-# `kustomize.acceleratorBackend: gpu/sglang` (or gpu/trtllm) rather than from
-# `--engine`.
-#
-# guides/optimized-baseline.yaml carries the same three engines at guide scale
-# (Qwen3-32B, two decode pods, the full EPP plugin set).
-#
-# IMPORTANT NOTE:
-# All parameters not defined here will use the default values from defaults.yaml.
+# The launcher selects `images.<engine>` and the matching endpoint defaults.
+# SGLang changes only the command. TensorRT-LLM also needs its tagged block
+# size, metrics path, and library path because those facts are not command-line
+# options. See guides/optimized-baseline.yaml for a larger example.
 scenario:
-  # ============================================================================
-  # Engine swap example - one single-role GPU stack, three interchangeable engines
-  # ============================================================================
   - name: "engines-example"
 
-    # =========================================================================
-    # COMMON -- Applies to all deployment methods
-    # =========================================================================
     common:
-      # -------------------------------------------------------------------------
-      # Affinity / Node Selection
-      # By default, affinity is disabled and pods schedule on any available node.
-      # Uncomment and pick the label your cluster uses for its GPUs.
-      # -------------------------------------------------------------------------
+      # Optional GPU node selection:
       # affinity:
       #   enabled: true
       #   nodeSelector:
@@ -91,46 +22,22 @@ scenario:
       #     # gpu.nvidia.com/model: H200                        # Kubernetes
       #     # cloud.google.com/gke-accelerator: nvidia-h100-80gb  # GKE
 
-      # -------------------------------------------------------------------------
-      # Model Configuration
-      # Alternative models (uncomment and update shortName):
-      #   Qwen/Qwen3-32B, meta-llama/Llama-3.1-8B-Instruct,
-      #   deepseek-ai/DeepSeek-R1-0528
-      # -------------------------------------------------------------------------
       model:
-        # The Kubernetes name prefix for this stack's Deployments, Services
-        # and PVCs. The model id comes from the command; a name does not, and
-        # the derived fallback is a `{first8}-{sha8}-{last8}` hash.
+        # Kubernetes resource prefix; the model id comes from the command.
         shortName: qwen-qwen3-06b
         size: 50Gi
-        # Context length, page size, memory fraction and the batch widths are
-        # stated once, in `decode.engine.command` below, and read back off it in
-        # whatever spelling the engine uses -- so there is no second place to
-        # keep in step, and no edit here when the engine changes.
-        #
-        # TensorRT-LLM is the exception: its KV page size has no CLI flag, so
-        # that engine needs the number stated here as well.
+        # TRT-LLM's KV page size is configured in its API-options file, not by
+        # a server flag, so the capacity check needs it explicitly.
         # @engine trtllm
         # blockSize: 32
 
-      # Where the harness scrapes the engine's Prometheus endpoint. /metrics is
-      # the default and is right for vLLM and SGLang; TensorRT-LLM mounts its
-      # exposition elsewhere.
+      # TRT-LLM exposes Prometheus metrics at a non-default path.
       # @engine trtllm
       # monitoring:
       #   metricsPath: /prometheus/metrics
 
-      # -------------------------------------------------------------------------
-      # Engine Configuration -- the pod shape shared by every role.
-      # No engine flags here, and nothing engine-specific: this is what
-      # llm-d-benchmark builds around whatever engine runs -- the shell the
-      # launch line is exec'd in, shared memory, the preprocess step, volumes
-      # and mounts. All three engines below take it unchanged.
-      # -------------------------------------------------------------------------
+      # Pod infrastructure shared by every engine.
       engine:
-        # vLLM's and SGLang's inter-process buffers and SGLang's radix cache
-        # live in /dev/shm. The llm-d guides give a TP=2 Qwen3-32B pod 20Gi;
-        # scale with TP.
         shmMemory: 16Gi
 
         preprocessScript: "python3 /setup/preprocess/set_llmdbench_environment.py && . $HOME/llmdbench_env.sh"
@@ -160,46 +67,23 @@ scenario:
             mountPath: /etc/kubeconfig
             readOnly: true
 
-    # =========================================================================
-    # STANDALONE -- Only applies when standalone.enabled: true
-    # A standalone pod has no routing sidecar, so its command binds
-    # `engine.servicePort` (8000) itself. To run this scenario standalone, flip
-    # the two `enabled` flags and give the role the same command as decode
-    # below with `--port 8000`.
-    # =========================================================================
+    # `-t standalone` inherits decode's command and runtime settings.
     standalone:
       enabled: false
       replicas: 1
 
-    # =========================================================================
-    # MODELSERVICE -- Only applies when modelservice.enabled: true
-    # =========================================================================
     modelservice:
       enabled: true
 
-      # `epponly` is the llm-d "Standalone Mode" router topology: no Kubernetes
-      # Gateway, the EPP pod runs an Envoy sidecar that serves HTTP directly.
-      # Flip to istio / agentgateway / gke / data-science-gateway-class for a
-      # gateway-backed topology -- nothing else in this file changes, and
-      # nothing about it depends on the engine.
       gateway:
         className: epponly
 
-      # -------------------------------------------------------------------------
-      # Prefill Configuration -- disabled, and deliberately not part of the swap.
-      # P/D disaggregation is a different launcher on both roles for every
-      # engine -- vLLM takes `--kv-transfer-config`, SGLang takes
-      # `--disaggregation-mode` plus `--disaggregation-transfer-backend nixl`,
-      # TRT-LLM is `trtllm-serve disaggregated` -- so it is two more commands,
-      # not new configuration keys. See guides/pd-disaggregation.yaml.
-      # -------------------------------------------------------------------------
+      # P/D disaggregation needs engine-specific commands on both roles; see
+      # guides/pd-disaggregation.yaml.
       prefill:
         enabled: false
         replicas: 0
 
-      # -------------------------------------------------------------------------
-      # Decode Configuration
-      # -------------------------------------------------------------------------
       decode:
         replicas: 1
 
@@ -211,61 +95,16 @@ scenario:
             memory: 32Gi
             cpu: "4"
 
-        # -----------------------------------------------------------------------
-        # Extra Environment Variables
-        # None for vLLM or SGLang. Nothing is auto-populated: whatever the
-        # engine -- or a library beneath it (UCX_*, NCCL_*, VLLM_NIXL_*, ...) --
-        # needs must be listed here, the same way the command lists its flags.
-        #
-        # TensorRT-LLM needs one. The image entrypoint normally sets the dynamic
-        # linker path, and a container that states its own command bypasses it --
-        # which every role here does, because the launch line is exec'd in a
-        # shell. So it is set explicitly, exactly as the llm-d TRT-LLM guide
-        # does:
-        #   tensorrt/lib  -> libnvonnxparser.so.10 etc. (tensorrt is imported
-        #                    even on the PyTorch backend)
-        #   cuda/lib64    -> libcudart at runtime
-        #   nvidia/lib64  -> libcuda.so.1 + NVML (injected GPU driver)
-        # -----------------------------------------------------------------------
+        # A custom command bypasses the TRT-LLM image entrypoint that normally
+        # supplies its library path.
         # @engine trtllm
         # extraEnvVars:
         #   - name: LD_LIBRARY_PATH
         #     value: "/usr/local/tensorrt/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib64"
 
-        # -----------------------------------------------------------------------
-        # THE LAUNCH LINE, VERBATIM -- the same line you would run on a node, or
-        # the one already in your llm-d guide. Every flag is read by the engine
-        # and none of them by llm-d-benchmark; only these are read back out, and
-        # only to build the pod around the process:
-        #
-        #   --port 8200      container port, probes, and the upstream the
-        #                    routing sidecar forwards to. 8200, not 8000: the
-        #                    sidecar the chart injects on decode pods owns
-        #                    `engine.servicePort` (8000). A prefill or
-        #                    standalone role gets no sidecar and binds 8000, and
-        #                    so does decode in direct mode
-        #                    (`routing.proxy.enabled: false`).
-        #   the parallel width  NOT read, in any engine's spelling
-        #                    (--tensor-parallel-size / --tp-size / --tp_size).
-        #                    A tensor-parallel width is a request for that many
-        #                    devices, and a pod's device count is granted by the
-        #                    kubelet before the process exists -- so it is stated
-        #                    separately, as `decode.parallelism.tensor` (unset
-        #                    here, which means one device, matching the `1`
-        #                    below). Raise one and you must raise the other: a
-        #                    two-way process in a one-device pod fails at
-        #                    startup.
-        #   the capacity numbers  context length, KV page size and memory
-        #                    fraction, for the pre-deploy check's KV arithmetic
-        #                    and the harness workload profile. Each engine's own
-        #                    spelling is read.
-        #
-        # The model is the plain Hugging Face id, exactly as it would be outside
-        # Kubernetes. The weights are staged onto the model PVC as a Hugging Face
-        # hub cache and the pod's HF_HUB_CACHE points at it, so the id resolves
-        # locally rather than over the network -- see `modelservice.uriProtocol`.
-        # `engine.preprocessScript` above has already run, in this same shell.
-        # -----------------------------------------------------------------------
+        # Verbatim launch line. Decode binds 8200 because its routing sidecar
+        # owns Service port 8000. Keep the command's parallel width aligned with
+        # decode.parallelism.tensor, which controls the pod's device request.
         engine:
           command: |
             vllm serve Qwen/Qwen3-0.6B \
@@ -281,17 +120,10 @@ scenario:
             --disable-uvicorn-access-log \
             --no-enable-prefix-caching
 
-        # ---------------------------------------------------------------------
-        # SGLang. A pure command swap -- nothing else in this file moves.
-        # `--context-length`, `--page-size` and `--mem-fraction-static` are read
-        # as the capacity numbers in SGLang's own spelling, and /metrics needs
-        # `--enable-metrics` (SGLang serves nothing without it).
-        # ---------------------------------------------------------------------
-
+        # SGLang is a command-only swap; --enable-metrics exposes /metrics.
           # @engine sglang
           # command: |
-          #   python3 -m sglang.launch_server \
-          #   --model-path Qwen/Qwen3-0.6B \
+          #   sglang serve Qwen/Qwen3-0.6B \
           #   --host 0.0.0.0 \
           #   --port 8200 \
           #   --tp-size 1 \
@@ -304,28 +136,8 @@ scenario:
           #   --enable-metrics \
           #   --uvicorn-access-log-exclude-prefixes /metrics /health
 
-        # ---------------------------------------------------------------------
-        # TensorRT-LLM. One of the four `# @engine trtllm` groups in this file;
-        # the other three are above (model.blockSize, common.monitoring,
-        # decode.extraEnvVars) and `--engine trtllm` applies all four together.
-        #
-        # This is a shell snippet, not just a launcher, so the API-options file
-        # is written here instead of being mounted from a ConfigMap. Both of its
-        # settings default to false and both are required before TRT-LLM exports
-        # anything a router or a PodMonitor can read:
-        #   return_perf_metrics     mounts /prometheus/metrics
-        #   enable_iter_perf_stats  starts the iteration-stats loop that fills
-        #                           trtllm_num_requests_waiting / _running,
-        #                           trtllm_kv_cache_utilization and _hit_rate
-        # With only the first, the endpoint serves but those gauges stay absent.
-        #
-        # `trtllm-serve serve <model>` and `trtllm-serve <model>` are the same
-        # invocation (trtllm-serve is a click group that falls through to
-        # `serve`); both are read the same way, and the first is what the llm-d
-        # guide writes. `--kv_cache_free_gpu_memory_fraction` is that guide's
-        # spelling of `--free_gpu_memory_fraction`, and reads the same.
-        # ---------------------------------------------------------------------
-
+        # TRT-LLM writes API options for KV page size and Prometheus metrics.
+        # Its other three tagged companion blocks are above.
           # @engine trtllm
           # command: |
           #   mkdir -p /tmp/trtllm ;
@@ -341,12 +153,8 @@ scenario:
           #   --free_gpu_memory_fraction 0.9 \
           #   --extra_llm_api_options /tmp/trtllm/llm_api_options.yaml
 
-    # =========================================================================
-    # WORKLOAD / HARNESS -- Benchmark execution configuration
-    # =========================================================================
     harness:
       name: inference-perf
       experimentProfile: sanity_random.yaml
 
-    # Used as workspace when --workspace is not specified on the CLI.
     workDir: "~/data/engines"

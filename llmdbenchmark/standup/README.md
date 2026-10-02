@@ -13,7 +13,7 @@ Steps are registered in `steps/__init__.py` via `get_standup_steps()` and execut
 | 03 | `WorkloadMonitoringStep` | global | Validate cluster resources and configure workload monitoring (PodMonitors). Installs WVA controller once per `wva.namespace` across all rendered stacks. |
 | 04 | `ModelNamespaceStep` | global | Prepare the model namespace. Creates one shared model PVC (idempotent across stacks) and one download Job per stack on a PVC-backed `modelservice.uriProtocol` (`pvc+hf`, `pvc`) or standalone. Jobs are launched in parallel (phase 1) and waited on in turn (phase 2), so total wall time ~ slowest model. Every stack's weights live in a distinct `model.path` subdirectory on the shared PVC. |
 | 05 | `FMADeployStep` | global | Deploy FMA controllers |
-| 05 | `StandaloneDeployStep` | global | Deploy vLLM as standalone Kubernetes Deployments and Services |
+| 05 | `StandaloneDeployStep` | global | Deploy model servers as standalone Kubernetes Deployments and Services |
 | 06 | `DeploySetupStep` | global | Set up Helm repos and deploy gateway infrastructure for modelservice mode |
 | 07 | `DeployRouterStep` | global | Deploy the llm-d router (EPP + provider resources) |
 | 08 | `DeployModelserviceStep` | global | Deploy the model via the llm-d modelservice Helm chart |
@@ -54,7 +54,7 @@ On clusters where users cannot provision PersistentVolumeClaims, pass
 Steps 05-08 handle two mutually exclusive deployment methods:
 
 - **FMA** (step 05) -- Deploys Fast Model Actuation controllers. For more information on FMA: https://github.com/llm-d-incubation/llm-d-fast-model-actuation
-- **Standalone** (step 05) -- Deploys vLLM directly as Kubernetes Deployments and Services. OpenShift routes use the naming pattern `sa-{model_id_label}-route` to stay within the 63-character DNS label limit. Step 05 is skipped when modelservice is the active method.
+- **Standalone** (step 05) -- Deploys model servers directly as Kubernetes Deployments and Services. OpenShift routes use the naming pattern `sa-{model_id_label}-route` to stay within the 63-character DNS label limit. Step 05 is skipped when modelservice is the active method.
 - **Modelservice** (steps 06-08) -- Deploys via the llm-d modelservice Helm chart with gateway infrastructure and GAIE. Steps 06-08 are skipped when standalone is the active method.
 
 The `should_skip()` method on each step checks `context.deployed_methods` to determine which path to take.
@@ -73,7 +73,7 @@ Use `--skip-smoketest` to skip the automatic post-standup smoketests. They can a
 
 When passed, `--monitoring` enables monitoring infrastructure during standup:
 
-- Creates PodMonitor resources for Prometheus to scrape vLLM pods
+- Creates PodMonitor resources for Prometheus to scrape model-server pods
 - Sets EPP (inference scheduler) log verbosity to level 4 for detailed scheduling diagnostics
 
 This is separate from the run-phase `--monitoring` flag, which controls metrics scraping and log capture during benchmark execution.
