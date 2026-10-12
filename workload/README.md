@@ -183,6 +183,14 @@ classes. Each traffic class may override the global request with its own
 traffic and low-priority long-prompt cache pressure when evaluating priority
 based KV eviction.
 
+For direct-to-vLLM experiments, `sendPriorityInBody: true` also puts each
+traffic class's numeric priority in the OpenAI request body. Leave it unset (or
+set it to `false`) for the usual llm-d router-managed profiles, where the
+objective header determines priority. Profiles can generate repeatable shared
+prefixes with `sharedPromptTemplate`, `sharedPromptRepeat`, and `prefixGroups`.
+The template may use `{group}`; requests assigned to the same prefix group then
+reuse the same long prompt prefix while varying their final request text.
+
 ### Harness Script Contract
 
 Every harness script follows the same contract. The harness pod sets these environment variables before invoking the script:

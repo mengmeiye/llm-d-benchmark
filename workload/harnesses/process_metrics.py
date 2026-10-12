@@ -8,12 +8,12 @@ Metrics processing script for llm-d-benchmark
 Parses and aggregates Prometheus metrics and vLLM logs
 """
 
+import glob
+import json
 import os
 import re
-import json
-import glob
-from collections import defaultdict
 import statistics
+from collections import defaultdict
 
 metrics_dir = os.environ.get("METRICS_DIR", "metrics")
 raw_dir = os.path.join(metrics_dir, "raw")
@@ -110,6 +110,10 @@ METRIC_UNITS = {
     "vllm:nixl_xfer_time_seconds_count": "count",
     "vllm:nixl_bytes_transferred_sum": "bytes",
     "vllm:nixl_bytes_transferred_count": "count",
+    # SimpleCPUOffloadConnector three-tier emulator metrics
+    "vllm:simple_cpu_offload_bytes_total": "bytes",
+    "vllm:simple_cpu_offload_blocks_total": "blocks",
+    "vllm:simple_cpu_offload_operations_total": "count",
     # Preemption metrics
     "vllm:num_preemptions_total": "count",
     # Queue metrics
@@ -156,6 +160,16 @@ _BYTE_CONVERSIONS = {
     "container_network_transmit_bytes_total": (1024**2, "_bytes_total", "_mb_total"),
 }
 
+# These counters use labels to distinguish the two emulated host-memory tiers
+# and copy direction. Collapsing those labels would make the experiment unable
+# to tell whether the intended placement policy ran.
+_PRESERVED_METRIC_LABELS = {
+    "vllm:simple_cpu_offload_bytes_total": ("engine", "tier", "direction"),
+    "vllm:simple_cpu_offload_blocks_total": ("engine", "tier", "direction"),
+    "vllm:simple_cpu_offload_operations_total": ("engine", "tier", "direction"),
+}
+_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"')
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -176,6 +190,45 @@ def _save_json(filepath, data):
         json.dump(data, f, indent=2)
 
 
+def _metric_base_name(metric_name):
+    """Return a Prometheus metric name without its label selector."""
+    return metric_name.split("{", 1)[0]
+
+
+def _metric_series_name(selector):
+    """Keep the labels needed to distinguish KV-offload counter series."""
+    base_name = _metric_base_name(selector)
+    wanted = _PRESERVED_METRIC_LABELS.get(base_name)
+    if not wanted or "{" not in selector:
+        return base_name
+    labels = dict(_LABEL_RE.findall(selector.split("{", 1)[1]))
+    selected = [(name, labels[name]) for name in wanted if name in labels]
+    if not selected:
+        return base_name
+    rendered = ",".join(f'{name}="{value}"' for name, value in selected)
+    return f"{base_name}{{{rendered}}}"
+
+
+def _metric_is_selected(metric_name, selected_names):
+    """Match a labeled series when its base metric was selected."""
+    return selected_names is None or _metric_base_name(metric_name) in selected_names
+
+
+def _counter_increase(values):
+    """Return total counter increase and reset count for ordered samples."""
+    increase = 0.0
+    resets = 0
+    for previous, current in zip(values, values[1:]):
+        if current >= previous:
+            increase += current - previous
+        else:
+            # A process restart resets a Prometheus counter. The current value
+            # is the increase observed after that reset.
+            increase += current
+            resets += 1
+    return increase, resets
+
+
 def percentile(sorted_values, p):
     """Calculate the p-th percentile from a sorted list using linear interpolation."""
     n = len(sorted_values)
@@ -189,10 +242,10 @@ def percentile(sorted_values, p):
     return sorted_values[f] + (k - f) * (sorted_values[c] - sorted_values[f])
 
 
-def _compute_stats(values, unit=""):
+def _compute_stats(values, unit="", counter_increase=None):
     """Compute statistics dict from a list of numeric values."""
     sorted_vals = sorted(values)
-    return {
+    result = {
         "mean": statistics.mean(values),
         "stddev": statistics.stdev(values) if len(values) > 1 else 0,
         "min": min(values),
@@ -206,6 +259,9 @@ def _compute_stats(values, unit=""):
         "count": len(values),
         "unit": unit,
     }
+    if counter_increase is not None:
+        result["increase"], result["resets"] = counter_increase
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +297,9 @@ def parse_prometheus_metrics(file_path):
                 line,
             )
             if match:
-                base_name = match.group(1).split("{")[0]
+                selector = match.group(1)
+                base_name = _metric_base_name(selector)
+                metric_name = _metric_series_name(selector)
                 value = float(match.group(2))
 
                 # Apply byte-unit conversions
@@ -249,8 +307,9 @@ def parse_prometheus_metrics(file_path):
                     divisor, old_suffix, new_suffix = _BYTE_CONVERSIONS[base_name]
                     value = value / divisor
                     base_name = base_name.replace(old_suffix, new_suffix)
+                    metric_name = base_name
 
-                metrics[base_name].append(value)
+                metrics[metric_name].append(value)
 
     return timestamp, pod_name, namespace, dict(metrics)
 
@@ -265,7 +324,7 @@ def aggregate_metrics():
     pod_metrics = defaultdict(lambda: defaultdict(list))
     pod_metadata = {}
 
-    all_files = glob.glob(os.path.join(raw_dir, "*_metrics.log"))
+    all_files = sorted(glob.glob(os.path.join(raw_dir, "*_metrics.log")))
 
     if TIME_SERIES_METRICS is not None:
         _save_json(
@@ -304,10 +363,8 @@ def aggregate_metrics():
             pod_metadata[pod_name]["files"].append(os.path.basename(file_path))
 
             for metric_name, values in metrics.items():
-                if (
-                    TIME_SERIES_METRIC_SET is None
-                    or metric_name in TIME_SERIES_METRIC_SET
-                    or metric_name in RATIO_INPUT_METRICS
+                if _metric_is_selected(metric_name, TIME_SERIES_METRIC_SET) or (
+                    _metric_base_name(metric_name) in RATIO_INPUT_METRICS
                 ):
                     pod_metrics[pod_name][metric_name].extend(values)
 
@@ -335,24 +392,40 @@ def aggregate_metrics():
         results[pod_name] = {
             "metadata": pod_metadata.get(pod_name, {}),
             "metrics": {
-                name: _compute_stats(values, METRIC_UNITS.get(name, ""))
+                name: _compute_stats(
+                    values,
+                    METRIC_UNITS.get(_metric_base_name(name), ""),
+                    _counter_increase(values)
+                    if _metric_base_name(name) in _PRESERVED_METRIC_LABELS
+                    else None,
+                )
                 for name, values in metrics.items()
-                if values
-                and (TIME_SERIES_METRIC_SET is None or name in TIME_SERIES_METRIC_SET)
+                if values and _metric_is_selected(name, TIME_SERIES_METRIC_SET)
             },
         }
 
     # Cluster-wide aggregated statistics
     aggregated_values = defaultdict(list)
+    aggregated_counter_increases = defaultdict(lambda: [0.0, 0])
     for metrics in pod_metrics.values():
         for name, values in metrics.items():
-            if name in AGGREGATE_METRICS and values:
+            if _metric_is_selected(name, AGGREGATE_METRICS) and values:
                 aggregated_values[name].extend(values)
+                if _metric_base_name(name) in _PRESERVED_METRIC_LABELS:
+                    increase, resets = _counter_increase(values)
+                    aggregated_counter_increases[name][0] += increase
+                    aggregated_counter_increases[name][1] += resets
 
     if aggregated_values:
         results["_aggregated"] = {
             "metrics": {
-                name: _compute_stats(values, METRIC_UNITS.get(name, ""))
+                name: _compute_stats(
+                    values,
+                    METRIC_UNITS.get(_metric_base_name(name), ""),
+                    tuple(aggregated_counter_increases[name])
+                    if name in aggregated_counter_increases
+                    else None,
+                )
                 for name, values in aggregated_values.items()
             }
         }

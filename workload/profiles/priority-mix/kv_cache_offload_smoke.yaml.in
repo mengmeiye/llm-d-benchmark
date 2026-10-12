@@ -1,0 +1,40 @@
+endpoint_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+model: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL
+
+api:
+  type: completions
+  path: /v1/completions
+
+sendPriorityInBody: true
+
+load:
+  duration_seconds: 20
+  rate_per_second: 1
+  max_in_flight: 2
+  total_requests: 8
+  request_timeout_seconds: 300
+  fail_on_error: true
+
+request:
+  max_tokens: 8
+  stream: true
+  includeUsage: true
+
+trafficClasses:
+  - name: fast-tier
+    weight: 0.5
+    priority: 0
+    request:
+      prefixGroups: 1
+      sharedPromptTemplate: "Fast-tier smoke-test shared context about KV-cache placement and transfer correctness. "
+      sharedPromptRepeat: 16
+      promptTemplate: "\nFast request {request_index}: answer with one word."
+
+  - name: slow-tier
+    weight: 0.5
+    priority: 5
+    request:
+      prefixGroups: 1
+      sharedPromptTemplate: "Slow-tier smoke-test shared context about KV-cache placement and transfer correctness. "
+      sharedPromptRepeat: 16
+      promptTemplate: "\nSlow request {request_index}: answer with one word."

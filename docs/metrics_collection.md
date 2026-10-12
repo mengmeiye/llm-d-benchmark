@@ -55,6 +55,12 @@ The rendered list is passed to the harness pod and saved with the processed
 metrics, so later analysis uses the same selection. Metrics without built-in
 display metadata receive a generated title, filename, and report key.
 
+The three `vllm:simple_cpu_offload_*_total` counters keep their `engine`,
+`tier`, and `direction` labels in `metrics_summary.json` and the benchmark
+report. Their summary includes `increase`, the counter growth across the run,
+and `resets`, the number of observed counter resets. Other metrics retain the
+existing aggregation format.
+
 | Environment Variable | Default | Description |
 |---|---|---|
 | `LLMDBENCH_VLLM_COMMON_METRICS_SCRAPE_ENABLED` | `false` | Enable/disable metrics collection. Set automatically when `--monitoring` is passed. |

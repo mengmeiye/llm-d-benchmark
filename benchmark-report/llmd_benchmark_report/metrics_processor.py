@@ -7,7 +7,6 @@ import os
 import re
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Time-series embedding allow-list.
 # Keys must be existing TimeSeriesResourceMetrics fields, and units must satisfy
@@ -353,6 +352,12 @@ def _make_stats_dict(
     }
     if graph_path:
         stats["graph_path"] = graph_path
+    # Counter snapshots are not transfer volumes. Preserve the run-level
+    # delta and reset count computed by process_metrics.py for counters that
+    # opt into restart-safe increase tracking.
+    for field in ("increase", "resets"):
+        if field in metric_data:
+            stats[field] = metric_data[field]
     return stats
 
 
@@ -388,6 +393,16 @@ def _metric_metadata(
             units = metric_data.get("unit", "")
             break
     return safe_name, units, f"{safe_name}.png"
+
+
+def _matching_metric_names(metrics: dict[str, Any], configured_name: str) -> list[str]:
+    """Return a bare metric and any preserved-label series selected by it."""
+    label_prefix = f"{configured_name}{{"
+    return sorted(
+        name
+        for name in metrics
+        if name == configured_name or name.startswith(label_prefix)
+    )
 
 
 def _build_embedded_time_series(
@@ -508,23 +523,24 @@ def _build_per_metric_entries(
         role = _detect_role(pod_name)
         comp_id = _component_id(role)
 
-        for prom_name in metric_names:
-            if prom_name not in metrics:
-                continue
-            report_key, units, graph_file = _metric_metadata(prom_name, metrics_summary)
+        for configured_name in metric_names:
+            for prom_name in _matching_metric_names(metrics, configured_name):
+                report_key, units, graph_file = _metric_metadata(
+                    prom_name, metrics_summary
+                )
 
-            component_entry = {
-                "component_id": comp_id,
-                "pod": pod_name,
-                "role": role,
-                "statistics": _make_stats_dict(
-                    metrics[prom_name], units, _graph_path(graph_file)
-                ),
-            }
+                component_entry = {
+                    "component_id": comp_id,
+                    "pod": pod_name,
+                    "role": role,
+                    "statistics": _make_stats_dict(
+                        metrics[prom_name], units, _graph_path(graph_file)
+                    ),
+                }
 
-            if report_key not in entries:
-                entries[report_key] = {"components": []}
-            entries[report_key]["components"].append(component_entry)
+                if report_key not in entries:
+                    entries[report_key] = {"components": []}
+                entries[report_key]["components"].append(component_entry)
 
     return entries
 
@@ -536,12 +552,11 @@ def _build_aggregated_entries(
 ) -> None:
     """Add cluster-wide aggregated stats to existing observability entries."""
     aggregated = metrics_summary.get("_aggregated", {}).get("metrics", {})
-    for prom_name in metric_names:
-        if prom_name not in aggregated:
-            continue
-        report_key, units, _ = _metric_metadata(prom_name, metrics_summary)
-        entry = obs.setdefault(report_key, {})
-        entry["aggregated"] = _make_stats_dict(aggregated[prom_name], units)
+    for configured_name in metric_names:
+        for prom_name in _matching_metric_names(aggregated, configured_name):
+            report_key, units, _ = _metric_metadata(prom_name, metrics_summary)
+            entry = obs.setdefault(report_key, {})
+            entry["aggregated"] = _make_stats_dict(aggregated[prom_name], units)
 
 
 def _build_epp_entries(

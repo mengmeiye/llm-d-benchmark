@@ -89,3 +89,8 @@ def test_default_commands_use_the_macro() -> None:
     env var and the defaults can never drift apart."""
     assert "vllm serve {{ model_serve_ref() }}" in _MACROS
     assert "vllm serve {{ model_serve_ref('standalone') }}" in _MACROS
+
+
+def test_kv_cache_cap_uses_canonical_vllm_flag() -> None:
+    assert "--kv-cache-memory-bytes {{ kv_cache_memory }}" in _MACROS
+    assert "--kv-cache-memory {{ kv_cache_memory }}" not in _MACROS

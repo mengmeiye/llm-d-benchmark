@@ -889,6 +889,7 @@ The analysis pipeline generates per-request distribution plots, cross-treatment 
 
 - [Analysis Pipeline](docs/analysis.md)
 - [Metrics Collection](docs/metrics_collection.md)
+- [Three-tier KV-cache emulator evaluation](docs/kv-cache-offload-emulator.md)
 - [Benchmark Report](docs/benchmark_report.md)
 - [Design of Experiments (DoE)](docs/doe.md)
 - [Lifecycle](docs/lifecycle.md)

@@ -1,0 +1,48 @@
+# Separate tensor-parallel scaling study for the three-tier emulator.
+#
+# Configured tier bandwidth is per vLLM rank. Keeping the same value at TP=2
+# permits up to twice the aggregate emulated bandwidth and also changes model
+# execution. Report per-rank and aggregate rates; do not present this as a pure
+# placement-policy comparison.
+#
+# IMPORTANT: Replace the illustrative timing constants with calibrated values
+# before a recorded experiment.
+
+experiment:
+  name: kv-cache-offload-emulator-tp-sweep
+  description: >
+    Separate TP=1 versus TP=2 scaling study for the proposed two-pool design.
+  harness: priority-mix
+  profile: kv_cache_offload.yaml
+
+reset_caches: true
+reset_caches_required: true
+treatment_max_attempts: 1
+treatment_stop_on_error: true
+
+setup:
+  constants:
+    vllmCommon.kvTransfer.enabled: true
+    vllmCommon.kvTransfer.connector: SimpleCPUOffloadConnector
+    vllmCommon.kvTransfer.role: kv_both
+    vllmCommon.kvTransfer.extraConfig.fast_cpu_bytes: 8589934592
+    vllmCommon.kvTransfer.extraConfig.slow_cpu_bytes: 34359738368
+    vllmCommon.kvTransfer.extraConfig.priority_threshold: 1
+    vllmCommon.kvTransfer.extraConfig.fast_cpu_bandwidth_gbps: 32
+    vllmCommon.kvTransfer.extraConfig.fast_cpu_latency_us: 8
+    vllmCommon.kvTransfer.extraConfig.slow_cpu_bandwidth_gbps: 12
+    vllmCommon.kvTransfer.extraConfig.slow_cpu_latency_us: 18
+    vllmCommon.flags.kvCacheMemory: 1073741824
+
+  treatments:
+    - name: tensor-parallel-1
+      decode.parallelism.tensor: 1
+    - name: tensor-parallel-2
+      decode.parallelism.tensor: 2
+
+treatments:
+  - name: repetition-1
+  - name: repetition-2
+  - name: repetition-3
+  - name: repetition-4
+  - name: repetition-5

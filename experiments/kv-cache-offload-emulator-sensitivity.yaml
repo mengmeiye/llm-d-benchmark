@@ -1,0 +1,86 @@
+# Optional one-factor-at-a-time sensitivity study for the three-tier emulator.
+# Run the controlled A-D comparison first. This file intentionally keeps every
+# setting at treatment D's center point except the factor named by a treatment.
+#
+# IMPORTANT: 32/8 GB/s/us versus 12/18 GB/s/us is the repository's illustrative
+# profile, not a hardware measurement. Replace the four timing constants with
+# calibrated values. Remove any bandwidth treatment above the node's measured
+# pinned H2D/D2H ceiling.
+
+experiment:
+  name: kv-cache-offload-emulator-sensitivity
+  description: >
+    Optional one-factor-at-a-time sweeps around the proposed 8/32 GiB,
+    priority-split treatment.
+  harness: priority-mix
+  profile: kv_cache_offload.yaml
+
+reset_caches: true
+reset_caches_required: true
+treatment_max_attempts: 1
+treatment_stop_on_error: true
+
+setup:
+  constants:
+    vllmCommon.kvTransfer.enabled: true
+    vllmCommon.kvTransfer.connector: SimpleCPUOffloadConnector
+    vllmCommon.kvTransfer.role: kv_both
+    vllmCommon.kvTransfer.extraConfig.fast_cpu_bytes: 8589934592
+    vllmCommon.kvTransfer.extraConfig.slow_cpu_bytes: 34359738368
+    vllmCommon.kvTransfer.extraConfig.priority_threshold: 1
+    vllmCommon.kvTransfer.extraConfig.fast_cpu_bandwidth_gbps: 32
+    vllmCommon.kvTransfer.extraConfig.fast_cpu_latency_us: 8
+    vllmCommon.kvTransfer.extraConfig.slow_cpu_bandwidth_gbps: 12
+    vllmCommon.kvTransfer.extraConfig.slow_cpu_latency_us: 18
+    vllmCommon.flags.kvCacheMemory: 1073741824
+    decode.parallelism.tensor: 1
+
+  treatments:
+    # Center point: 8 GiB fast + 32 GiB slow, 1 GiB GPU KV cache.
+    - name: center-fast8-slow32-gpu1
+
+    # Capacity sweep. Total host capacity stays fixed at 40 GiB.
+    - name: capacity-fast4-slow36
+      vllmCommon.kvTransfer.extraConfig.fast_cpu_bytes: 4294967296
+      vllmCommon.kvTransfer.extraConfig.slow_cpu_bytes: 38654705664
+    - name: capacity-fast16-slow24
+      vllmCommon.kvTransfer.extraConfig.fast_cpu_bytes: 17179869184
+      vllmCommon.kvTransfer.extraConfig.slow_cpu_bytes: 25769803776
+
+    # GPU KV-cache pressure sweep.
+    - name: gpu-cache-2g
+      vllmCommon.flags.kvCacheMemory: 2147483648
+    - name: gpu-cache-4g
+      vllmCommon.flags.kvCacheMemory: 4294967296
+
+    # Policy boundary diagnostics for priorities 0 and 5. These do not preserve
+    # effective usable capacity: threshold 0 leaves fast unused; threshold 6
+    # leaves slow unused. Do not use them as headline capacity comparisons.
+    - name: threshold-0-all-slow
+      vllmCommon.kvTransfer.extraConfig.priority_threshold: 0
+    - name: threshold-6-all-fast
+      vllmCommon.kvTransfer.extraConfig.priority_threshold: 6
+
+    # Fast-tier bandwidth sweep. The center point supplies 32 GB/s.
+    - name: fast-bandwidth-16
+      vllmCommon.kvTransfer.extraConfig.fast_cpu_bandwidth_gbps: 16
+    - name: fast-bandwidth-24
+      vllmCommon.kvTransfer.extraConfig.fast_cpu_bandwidth_gbps: 24
+    - name: fast-bandwidth-50
+      vllmCommon.kvTransfer.extraConfig.fast_cpu_bandwidth_gbps: 50
+
+    # Fast-tier fixed-latency sweep. The center point supplies 8 microseconds.
+    - name: fast-latency-4
+      vllmCommon.kvTransfer.extraConfig.fast_cpu_latency_us: 4
+    - name: fast-latency-16
+      vllmCommon.kvTransfer.extraConfig.fast_cpu_latency_us: 16
+    - name: fast-latency-32
+      vllmCommon.kvTransfer.extraConfig.fast_cpu_latency_us: 32
+
+# Five confirmed cold-cache repetitions for every setup treatment.
+treatments:
+  - name: repetition-1
+  - name: repetition-2
+  - name: repetition-3
+  - name: repetition-4
+  - name: repetition-5

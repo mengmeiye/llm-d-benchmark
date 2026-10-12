@@ -1,0 +1,48 @@
+endpoint_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+model: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL
+
+api:
+  type: completions
+  path: /v1/completions
+
+# The connector uses vLLM's top-level request priority. This opt-in avoids
+# changing the router-managed behavior of existing priority-mix profiles.
+sendPriorityInBody: true
+
+load:
+  duration_seconds: 90
+  rate_per_second: 2
+  max_in_flight: 8
+  total_requests: 192
+  request_timeout_seconds: 300
+  fail_on_error: true
+
+request:
+  max_tokens: 32
+  stream: true
+  includeUsage: true
+
+# Each class cycles through reusable prefix groups. The large shared part is
+# identical within a group; the short suffix keeps individual requests unique.
+# With the scenario's deliberately small GPU KV cache, later visits should
+# exercise host-tier loads instead of only GPU-resident prefix hits.
+trafficClasses:
+  - name: fast-tier
+    weight: 0.5
+    priority: 0
+    request:
+      prefixGroups: 16
+      sharedPromptTemplate: "Fast class group {group}. Stable repository analysis context: scheduler connector cache block tensor worker event priority transfer memory latency bandwidth metadata. "
+      sharedPromptRepeat: 192
+      promptTemplate: "\nRequest {request_index}: summarize the relevant facts in one sentence."
+      max_tokens: 32
+
+  - name: slow-tier
+    weight: 0.5
+    priority: 5
+    request:
+      prefixGroups: 16
+      sharedPromptTemplate: "Slow class group {group}. Stable software review context: deployment benchmark routing metrics container request response cache capacity and reproducibility. "
+      sharedPromptRepeat: 192
+      promptTemplate: "\nRequest {request_index}: summarize the relevant facts in one sentence."
+      max_tokens: 32

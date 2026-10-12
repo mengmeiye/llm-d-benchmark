@@ -7,10 +7,11 @@ import runpy
 from datetime import datetime, timezone
 from pathlib import Path
 
-from llmdbenchmark.analysis import visualize_metrics
 from llmdbenchmark.analysis.benchmark_report.metrics_processor import (
     add_metrics_to_benchmark_report,
 )
+
+from llmdbenchmark.analysis import visualize_metrics
 
 
 def test_process_metrics_uses_configured_metric_list(
@@ -42,6 +43,92 @@ def test_process_metrics_uses_configured_metric_list(
     assert json.loads(
         (processed_dir / "time_series_metrics.json").read_text(encoding="utf-8")
     ) == ["vllm:custom_metric"]
+
+
+def test_process_metrics_preserves_offload_tier_labels_and_counter_increase(
+    tmp_path: Path, monkeypatch
+) -> None:
+    metrics_dir = tmp_path / "metrics"
+    raw_dir = metrics_dir / "raw"
+    processed_dir = metrics_dir / "processed"
+    raw_dir.mkdir(parents=True)
+    processed_dir.mkdir()
+    metric = "vllm:simple_cpu_offload_bytes_total"
+    fast_0_selector = (
+        f'{metric}{{model_name="test",engine="0",tier="fast_cpu",direction="load"}}'
+    )
+    fast_1_selector = (
+        f'{metric}{{model_name="test",engine="1",tier="fast_cpu",direction="load"}}'
+    )
+    slow_selector = (
+        f'{metric}{{model_name="test",engine="0",tier="slow_cpu",direction="store"}}'
+    )
+    _write_scrape(
+        raw_dir,
+        "pod-1",
+        "2026-07-14T00:00:00Z",
+        [
+            f"{fast_0_selector} 100",
+            f"{fast_1_selector} 200",
+            f"{slow_selector} 50",
+        ],
+    )
+    _write_scrape(
+        raw_dir,
+        "pod-1",
+        "2026-07-14T00:00:30Z",
+        [
+            f"{fast_0_selector} 160",
+            f"{fast_1_selector} 260",
+            f"{slow_selector} 10",
+        ],
+    )
+    monkeypatch.setenv("METRICS_DIR", str(metrics_dir))
+    monkeypatch.setenv("LLMDBENCH_TIME_SERIES_METRICS", json.dumps([metric]))
+
+    module = runpy.run_path(
+        "workload/harnesses/process_metrics.py", run_name="process_metrics_test"
+    )
+    summary = module["aggregate_metrics"]()
+
+    fast = f'{metric}{{engine="0",tier="fast_cpu",direction="load"}}'
+    fast_engine_1 = f'{metric}{{engine="1",tier="fast_cpu",direction="load"}}'
+    slow = f'{metric}{{engine="0",tier="slow_cpu",direction="store"}}'
+    assert set(summary["pod-1"]["metrics"]) == {fast, fast_engine_1, slow}
+    assert summary["pod-1"]["metrics"][fast]["increase"] == 60
+    assert summary["pod-1"]["metrics"][fast]["resets"] == 0
+    assert summary["pod-1"]["metrics"][fast_engine_1]["increase"] == 60
+    assert summary["pod-1"]["metrics"][slow]["increase"] == 10
+    assert summary["pod-1"]["metrics"][slow]["resets"] == 1
+    assert summary["_aggregated"]["metrics"][fast]["increase"] == 60
+
+    report = add_metrics_to_benchmark_report({}, str(metrics_dir))
+    observability = report["results"]["observability"]
+    assert (
+        "vllm_simple_cpu_offload_bytes_total_engine_0_tier_fast_cpu_direction_load"
+        in (observability)
+    )
+    assert (
+        "vllm_simple_cpu_offload_bytes_total_engine_1_tier_fast_cpu_direction_load"
+        in (observability)
+    )
+    assert (
+        "vllm_simple_cpu_offload_bytes_total_engine_0_tier_slow_cpu_direction_store"
+        in (observability)
+    )
+    fast_report = observability[
+        "vllm_simple_cpu_offload_bytes_total_engine_0_tier_fast_cpu_direction_load"
+    ]
+    assert fast_report["components"][0]["statistics"]["increase"] == 60
+    assert fast_report["components"][0]["statistics"]["resets"] == 0
+    assert fast_report["aggregated"]["increase"] == 60
+
+    _, _, plotted = visualize_metrics.parse_prometheus_metrics_with_timestamp(
+        next(raw_dir.glob("*_metrics.log"))
+    )
+    assert fast in plotted
+    assert fast_engine_1 in plotted
+    assert slow in plotted
 
 
 def test_visualization_loads_persisted_metric_list(tmp_path: Path) -> None:

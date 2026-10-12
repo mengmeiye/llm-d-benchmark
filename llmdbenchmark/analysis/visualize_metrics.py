@@ -6,19 +6,19 @@ This script creates time series graphs for metrics collected during benchmarking
 """
 
 import argparse
+import glob
 import json
 import os
-import sys
-import glob
 import re
+import sys
 from datetime import datetime
 
 try:
     import matplotlib
 
     matplotlib.use("Agg")  # Use non-interactive backend
-    import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
 
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
@@ -61,6 +61,18 @@ METRIC_DISPLAY = {
     "vllm:nixl_xfer_time_seconds_count": ("NIXL KV Transfer Count", "Count"),
     "vllm:nixl_bytes_transferred_sum": ("NIXL Bytes Transferred", "Bytes"),
     "vllm:nixl_bytes_transferred_count": ("NIXL Transfers Count", "Count"),
+    "vllm:simple_cpu_offload_bytes_total": (
+        "Simple CPU Offload Bytes",
+        "Bytes",
+    ),
+    "vllm:simple_cpu_offload_blocks_total": (
+        "Simple CPU Offload Blocks",
+        "Blocks",
+    ),
+    "vllm:simple_cpu_offload_operations_total": (
+        "Simple CPU Offload Operations",
+        "Count",
+    ),
     "vllm:num_preemptions_total": ("Request Preemptions", "Count"),
     # EPP (inference scheduler) pool-level metrics
     "inference_pool_average_kv_cache_utilization": (
@@ -92,6 +104,30 @@ RATIO_METRICS = [
         "vllm_external_prefix_cache_hit_rate",
     ),
 ]
+
+_PRESERVED_METRIC_LABELS = {
+    "vllm:simple_cpu_offload_bytes_total": ("engine", "tier", "direction"),
+    "vllm:simple_cpu_offload_blocks_total": ("engine", "tier", "direction"),
+    "vllm:simple_cpu_offload_operations_total": ("engine", "tier", "direction"),
+}
+_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"')
+
+
+def _metric_base_name(metric_name):
+    return metric_name.split("{", 1)[0]
+
+
+def _metric_series_name(selector):
+    base_name = _metric_base_name(selector)
+    wanted = _PRESERVED_METRIC_LABELS.get(base_name)
+    if not wanted or "{" not in selector:
+        return base_name
+    labels = dict(_LABEL_RE.findall(selector.split("{", 1)[1]))
+    selected = [(name, labels[name]) for name in wanted if name in labels]
+    if not selected:
+        return base_name
+    rendered = ",".join(f'{name}="{value}"' for name, value in selected)
+    return f"{base_name}{{{rendered}}}"
 
 
 def _load_time_series_metrics(metrics_dir):
@@ -151,9 +187,9 @@ def parse_prometheus_metrics_with_timestamp(file_path):
                 r"([a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[^}]*\})?) ([\d.eE+-]+)", line
             )
             if match and timestamp_dt:
-                base_name = match.group(1).split("{")[0]
+                metric_name = _metric_series_name(match.group(1))
                 value = float(match.group(2))
-                metrics.setdefault(base_name, []).append((timestamp_dt, value))
+                metrics.setdefault(metric_name, []).append((timestamp_dt, value))
 
     return timestamp_str, pod_name, metrics
 
@@ -447,14 +483,23 @@ def generate_all_visualizations(metrics_dir, output_dir=None, context=None):
 
     # Standard time series plots
     ratio_output_names = {ratio[4] for ratio in RATIO_METRICS}
-    for metric_name in configured_metrics:
-        if metric_name in ratio_output_names:
+    for configured_name in configured_metrics:
+        if configured_name in ratio_output_names:
             continue
-        has_metric = any(metric_name in m for m in pod_data.values())
-        if has_metric:
+        series_names = sorted(
+            {
+                metric_name
+                for metrics in pod_data.values()
+                for metric_name in metrics
+                if _metric_base_name(metric_name) == configured_name
+            }
+        )
+        for metric_name in series_names:
             title, ylabel = METRIC_DISPLAY.get(
-                metric_name, (_metric_title(metric_name), metric_name)
+                configured_name, (_metric_title(metric_name), configured_name)
             )
+            if metric_name != configured_name:
+                title = _metric_title(metric_name)
             safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", metric_name)
             plot_metric_time_series(
                 pod_data,
@@ -462,7 +507,7 @@ def generate_all_visualizations(metrics_dir, output_dir=None, context=None):
                 os.path.join(output_dir, f"{safe_name}.png"),
                 title,
                 ylabel,
-                show_aggregate=(metric_name in AGGREGATE_METRICS),
+                show_aggregate=(configured_name in AGGREGATE_METRICS),
             )
             plot_count += 1
 

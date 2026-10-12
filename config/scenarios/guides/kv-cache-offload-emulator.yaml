@@ -1,0 +1,171 @@
+# Three-tier KV-cache emulator: GPU HBM plus fast and slow pinned-host pools.
+#
+# The default image name is deliberately local. A real run must override
+# images.vllm.repository and images.vllm.tag with an image built from the
+# modified vLLM checkout in this workspace.
+
+scenario:
+  - name: "kv-cache-offload-emulator"
+
+    common:
+      accelerator:
+        profile: auto
+        resource: auto
+
+      model:
+        name: Qwen/Qwen3-8B
+        shortName: qwen-qwen3-8b
+        path: models/Qwen/Qwen3-8B
+        huggingfaceId: Qwen/Qwen3-8B
+        size: 250Gi
+        maxModelLen: 8192
+        blockSize: 64
+        gpuMemoryUtilization: 0.85
+        cacheBase: /model-cache
+
+      storage:
+        modelPvc:
+          size: 250Gi
+        workloadPvc:
+          size: 20Gi
+
+      images:
+        vllm:
+          repository: localhost/kv-cache-offload-vllm
+          tag: dev
+          pullPolicy: Always
+
+      monitoring:
+        timeSeriesMetrics:
+          - vllm:kv_cache_usage_perc
+          - vllm:num_requests_running
+          - vllm:num_requests_waiting
+          - vllm:prefix_cache_hits_total
+          - vllm:prefix_cache_queries_total
+          - vllm:external_prefix_cache_hits_total
+          - vllm:external_prefix_cache_queries_total
+          - vllm:simple_cpu_offload_bytes_total
+          - vllm:simple_cpu_offload_blocks_total
+          - vllm:simple_cpu_offload_operations_total
+          - container_memory_usage_bytes
+          - DCGM_FI_DEV_GPU_UTIL
+
+      vllmCommon:
+        flags:
+          enablePrefixCaching: true
+          # Enables /reset_prefix_cache for reproducible cold-cache runs.
+          serverDevMode: "1"
+          # A small cache makes host-tier reuse observable with a short test.
+          # Increase this for a production-sized experiment.
+          kvCacheMemory: 1073741824
+
+        kvTransfer:
+          enabled: true
+          connector: SimpleCPUOffloadConnector
+          role: kv_both
+          extraConfig:
+            # Total bytes per vLLM instance. The connector divides totals by
+            # world size unless *_bytes_per_rank is set explicitly.
+            fast_cpu_bytes: 8589934592
+            slow_cpu_bytes: 34359738368
+            priority_threshold: 1
+            # Zero disables the additional completion delay. Replace these
+            # with calibrated values for CXL/PCIe emulation treatments.
+            fast_cpu_bandwidth_gbps: 0
+            fast_cpu_latency_us: 0
+            slow_cpu_bandwidth_gbps: 0
+            slow_cpu_latency_us: 0
+
+        volumes:
+          - name: dshm
+            type: emptyDir
+            emptyDir:
+              medium: Memory
+              sizeLimit: 16Gi
+
+        volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+
+    modelservice:
+      enabled: true
+
+      gateway:
+        className: epponly
+
+      router:
+        epp:
+          replicas: 1
+          flags:
+            v: 2
+          pluginsConfigFile: "kv-cache-offload-emulator-plugins.yaml"
+          pluginsCustomConfig:
+            kv-cache-offload-emulator-plugins.yaml: |
+              apiVersion: llm-d.ai/v1alpha1
+              kind: EndpointPickerConfig
+              plugins:
+              - type: queue-scorer
+              - type: kv-cache-utilization-scorer
+              - type: no-hit-lru-scorer
+              schedulingProfiles:
+              - name: default
+                plugins:
+                - pluginRef: queue-scorer
+                - pluginRef: kv-cache-utilization-scorer
+                - pluginRef: no-hit-lru-scorer
+        inferencePool:
+          failureMode: "FailOpen"
+        modelServers:
+          protocol: http
+
+      httpRoute:
+        requestTimeout: "300s"
+        backendRequestTimeout: "0s"
+
+      prefill:
+        enabled: false
+        replicas: 0
+
+      decode:
+        replicas: 1
+
+        parallelism:
+          tensor: 1
+          data: 1
+          dataLocal: 1
+          workers: 1
+
+        resources:
+          requests:
+            cpu: "8"
+            memory: 96Gi
+          limits:
+            cpu: "16"
+            memory: 128Gi
+
+        vllm:
+          imagePullPolicy: Always
+          additionalFlags:
+            - "--scheduling-policy priority"
+            - "--prefix-caching-hash-algo sha256_cbor"
+
+        extraContainerConfig:
+          ports:
+            - containerPort: 8200
+              name: metrics
+              protocol: TCP
+          securityContext:
+            capabilities:
+              add:
+                - "IPC_LOCK"
+          imagePullPolicy: Always
+
+    harness:
+      name: priority-mix
+      experimentProfile: kv_cache_offload.yaml
+      resources:
+        cpu: 4
+        memory: 8Gi
+        memoryLimit: 8Gi
+
+    workDir: "~/data/kv-cache-offload-emulator"

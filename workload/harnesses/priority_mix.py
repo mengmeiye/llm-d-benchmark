@@ -9,20 +9,19 @@ mixed traffic classes.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import json
 import logging
 import math
 import os
-from pathlib import Path
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
 import yaml
-
 
 OBJECTIVE_HEADER = "x-llm-d-inference-objective"
 FAIRNESS_HEADER = "x-llm-d-inference-fairness-id"
@@ -46,6 +45,10 @@ class RequestResult:
     tpot_ms: float | None = None
     output_tokens: int = 0
     error: str | None = None
+    request_index: int = 0
+    class_request_index: int = 0
+    priority: int | None = None
+    prefix_group: int | None = None
 
 
 def setup_logger(results_dir: Path) -> logging.Logger:
@@ -101,17 +104,21 @@ def traffic_classes(profile: dict[str, Any]) -> list[TrafficClass]:
         ):
             if key in item:
                 request_overrides[key] = item[key]
+        priority = item.get("priority")
         parsed.append(
             TrafficClass(
                 name=name,
                 weight=float(item.get("weight", 1)),
                 headers=headers,
-                priority=item.get("priority"),
+                priority=int(priority) if priority is not None else None,
                 request=request_overrides,
             )
         )
     if any(item.weight <= 0 for item in parsed):
         raise ValueError("traffic class weights must be positive")
+    names = [item.name for item in parsed]
+    if len(set(names)) != len(names):
+        raise ValueError("traffic class names must be unique")
     return parsed
 
 
@@ -151,19 +158,35 @@ def build_payload(
     max_tokens = int(request.get("max_tokens", 32))
 
     if str(api.get("type", "chat")).lower() in {"completion", "completions"}:
-        return {
+        payload = {
             "model": model,
             "prompt": prompt,
             "max_tokens": max_tokens,
             "stream": bool(request.get("stream", False)),
         }
+    else:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "stream": bool(request.get("stream", False)),
+        }
 
-    return {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "stream": bool(request.get("stream", False)),
-    }
+    if payload["stream"] and request.get("includeUsage", False):
+        payload["stream_options"] = {"include_usage": True}
+
+    # Most llm-d priority experiments use InferenceObjective headers and let
+    # the router choose a backend priority. Engine-local policies sometimes
+    # need the workload value in the OpenAI request body instead. Keep that
+    # behavior opt-in so existing router-priority profiles do not change.
+    if (
+        profile.get("sendPriorityInBody", False)
+        and traffic_class is not None
+        and traffic_class.priority is not None
+    ):
+        payload["priority"] = int(traffic_class.priority)
+
+    return payload
 
 
 def render_prompt(
@@ -171,17 +194,39 @@ def render_prompt(
     traffic_class: TrafficClass | None,
     request_index: int,
 ) -> str:
+    prefix_groups = max(1, int(request.get("prefixGroups", 1)))
+    format_values = {
+        "traffic_class": traffic_class.name if traffic_class else "default",
+        "request_index": request_index,
+        "variation": request_index,
+        "group": request_index % prefix_groups,
+    }
+    shared_template = request.get("sharedPromptTemplate") or request.get(
+        "shared_prompt_template"
+    )
+    shared_prompt = ""
+    if shared_template:
+        shared_prompt = str(shared_template).format(**format_values) * int(
+            request.get("sharedPromptRepeat", 1)
+        )
+
     template = request.get("promptTemplate") or request.get("prompt_template")
     prompt = str(
         template or request.get("prompt", "Say hello from the priority mix benchmark.")
     )
     if template:
-        prompt = prompt.format(
-            traffic_class=traffic_class.name if traffic_class else "default",
-            request_index=request_index,
-            variation=request_index,
-        )
-    return prompt * int(request.get("promptRepeat", 1))
+        prompt = prompt.format(**format_values)
+    return shared_prompt + prompt * int(request.get("promptRepeat", 1))
+
+
+def prefix_group(
+    profile: dict[str, Any], traffic_class: TrafficClass, class_request_index: int
+) -> int:
+    """Return the reusable-prefix group selected within one traffic class."""
+    request = dict(profile.get("request") or {})
+    request.update(traffic_class.request)
+    prefix_groups = max(1, int(request.get("prefixGroups", 1)))
+    return class_request_index % prefix_groups
 
 
 def request_url(profile: dict[str, Any]) -> str:
@@ -205,6 +250,10 @@ def send_request(
     payload: dict[str, Any],
     traffic_class: TrafficClass,
     timeout_seconds: float,
+    *,
+    request_index: int = 0,
+    class_request_index: int = 0,
+    prefix_group_id: int | None = None,
 ) -> RequestResult:
     headers = {"Content-Type": "application/json", **traffic_class.headers}
     start = time.perf_counter()
@@ -217,22 +266,59 @@ def send_request(
             stream=bool(payload.get("stream")),
         ) as response:
             if payload.get("stream"):
-                return read_streaming_response(response, traffic_class.name, start)
+                return read_streaming_response(
+                    response,
+                    traffic_class,
+                    start,
+                    request_index=request_index,
+                    class_request_index=class_request_index,
+                    prefix_group_id=prefix_group_id,
+                )
             latency_ms = (time.perf_counter() - start) * 1000
-            return RequestResult(traffic_class.name, response.status_code, latency_ms)
+            output_tokens = 0
+            try:
+                output_tokens = int(
+                    (response.json().get("usage") or {}).get("completion_tokens", 0)
+                )
+            except (requests.JSONDecodeError, TypeError, ValueError):
+                pass
+            return RequestResult(
+                traffic_class=traffic_class.name,
+                status_code=response.status_code,
+                latency_ms=latency_ms,
+                output_tokens=output_tokens,
+                request_index=request_index,
+                class_request_index=class_request_index,
+                priority=traffic_class.priority,
+                prefix_group=prefix_group_id,
+            )
     except requests.RequestException as exc:
         latency_ms = (time.perf_counter() - start) * 1000
-        return RequestResult(traffic_class.name, 0, latency_ms, error=str(exc))
+        return RequestResult(
+            traffic_class=traffic_class.name,
+            status_code=0,
+            latency_ms=latency_ms,
+            error=str(exc),
+            request_index=request_index,
+            class_request_index=class_request_index,
+            priority=traffic_class.priority,
+            prefix_group=prefix_group_id,
+        )
 
 
 def read_streaming_response(
     response: requests.Response,
-    traffic_class: str,
+    traffic_class: TrafficClass,
     start: float,
+    *,
+    request_index: int = 0,
+    class_request_index: int = 0,
+    prefix_group_id: int | None = None,
 ) -> RequestResult:
     first_token_time: float | None = None
     last_token_time: float | None = None
     output_tokens = 0
+    reported_output_tokens: int | None = None
     error: str | None = None
     try:
         for raw_line in response.iter_lines(decode_unicode=True):
@@ -244,7 +330,14 @@ def read_streaming_response(
             data = line.removeprefix("data:").strip()
             if data == "[DONE]":
                 break
-            if streaming_chunk_has_content(data):
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            usage = chunk.get("usage") or {}
+            if usage.get("completion_tokens") is not None:
+                reported_output_tokens = int(usage["completion_tokens"])
+            if streaming_chunk_has_content(chunk):
                 now = time.perf_counter()
                 first_token_time = first_token_time or now
                 last_token_time = now
@@ -257,21 +350,32 @@ def read_streaming_response(
     if first_token_time and last_token_time and output_tokens > 1:
         tpot_ms = ((last_token_time - first_token_time) * 1000) / (output_tokens - 1)
     return RequestResult(
-        traffic_class=traffic_class,
+        traffic_class=traffic_class.name,
         status_code=response.status_code,
         latency_ms=latency_ms,
         ttft_ms=ttft_ms,
         tpot_ms=tpot_ms,
-        output_tokens=output_tokens,
+        output_tokens=(
+            reported_output_tokens
+            if reported_output_tokens is not None
+            else output_tokens
+        ),
         error=error,
+        request_index=request_index,
+        class_request_index=class_request_index,
+        priority=traffic_class.priority,
+        prefix_group=prefix_group_id,
     )
 
 
-def streaming_chunk_has_content(data: str) -> bool:
-    try:
-        chunk = json.loads(data)
-    except json.JSONDecodeError:
-        return False
+def streaming_chunk_has_content(data: str | dict[str, Any]) -> bool:
+    if isinstance(data, str):
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            return False
+    else:
+        chunk = data
     for choice in chunk.get("choices", []):
         delta = choice.get("delta") or {}
         if delta.get("content"):
@@ -294,8 +398,13 @@ def percentile(values: list[float], percentile_value: float) -> float:
 
 
 def summarize(
-    results: list[RequestResult], classes: list[TrafficClass]
+    results: list[RequestResult],
+    classes: list[TrafficClass],
+    elapsed_seconds: float = 0,
 ) -> dict[str, Any]:
+    def successful(result: RequestResult) -> bool:
+        return result.error is None and 200 <= result.status_code < 300
+
     by_class: dict[str, list[RequestResult]] = {item.name: [] for item in classes}
     for result in results:
         by_class.setdefault(result.traffic_class, []).append(result)
@@ -303,18 +412,19 @@ def summarize(
     class_summaries: dict[str, Any] = {}
     for item in classes:
         class_results = by_class.get(item.name, [])
-        latencies = [
-            result.latency_ms for result in class_results if result.error is None
-        ]
+        successful_results = [result for result in class_results if successful(result)]
+        latencies = [result.latency_ms for result in successful_results]
         ttfts = [
-            result.ttft_ms for result in class_results if result.ttft_ms is not None
+            result.ttft_ms
+            for result in successful_results
+            if result.ttft_ms is not None
         ]
         tpots = [
-            result.tpot_ms for result in class_results if result.tpot_ms is not None
+            result.tpot_ms
+            for result in successful_results
+            if result.tpot_ms is not None
         ]
-        successes = sum(
-            1 for result in class_results if 200 <= result.status_code < 300
-        )
+        successes = sum(1 for result in class_results if successful(result))
         errors = [
             result
             for result in class_results
@@ -345,14 +455,34 @@ def summarize(
                 "p95": percentile(tpots, 0.95),
                 "p99": percentile(tpots, 0.99),
             },
-            "output_tokens": sum(result.output_tokens for result in class_results),
+            "output_tokens": sum(result.output_tokens for result in successful_results),
+            "request_throughput_per_second": (
+                successes / elapsed_seconds if elapsed_seconds > 0 else 0.0
+            ),
+            "output_token_throughput_per_second": (
+                sum(result.output_tokens for result in successful_results)
+                / elapsed_seconds
+                if elapsed_seconds > 0
+                else 0.0
+            ),
         }
 
+    successes = sum(1 for result in results if successful(result))
+    output_tokens = sum(
+        result.output_tokens for result in results if successful(result)
+    )
     return {
         "total_requests": len(results),
-        "successes": sum(1 for result in results if 200 <= result.status_code < 300),
+        "successes": successes,
         "errors": sum(
             1 for result in results if result.error or result.status_code >= 400
+        ),
+        "elapsed_seconds": elapsed_seconds,
+        "request_throughput_per_second": (
+            successes / elapsed_seconds if elapsed_seconds > 0 else 0.0
+        ),
+        "output_token_throughput_per_second": (
+            output_tokens / elapsed_seconds if elapsed_seconds > 0 else 0.0
         ),
         "traffic_classes": class_summaries,
     }
@@ -378,7 +508,9 @@ def run(profile: dict[str, Any], logger: logging.Logger) -> dict[str, Any]:
     logger.info("traffic classes: %s", ", ".join(item.name for item in classes))
 
     results: list[RequestResult] = []
+    class_request_counts: dict[str, int] = {item.name: 0 for item in classes}
     interval = 1 / rate_per_second if rate_per_second > 0 else 0
+    run_started = time.perf_counter()
     next_send = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_in_flight) as executor:
         futures = []
@@ -387,18 +519,31 @@ def run(profile: dict[str, Any], logger: logging.Logger) -> dict[str, Any]:
             if delay > 0:
                 time.sleep(delay)
             traffic_class = schedule[index]
-            payload = build_payload(profile, traffic_class, index)
+            class_request_index = class_request_counts[traffic_class.name]
+            class_request_counts[traffic_class.name] += 1
+            payload = build_payload(profile, traffic_class, class_request_index)
             futures.append(
                 executor.submit(
-                    send_request, url, payload, traffic_class, timeout_seconds
+                    send_request,
+                    url,
+                    payload,
+                    traffic_class,
+                    timeout_seconds,
+                    request_index=index,
+                    class_request_index=class_request_index,
+                    prefix_group_id=prefix_group(
+                        profile, traffic_class, class_request_index
+                    ),
                 )
             )
             next_send += interval
         for future in as_completed(futures):
             results.append(future.result())
 
+    elapsed_seconds = time.perf_counter() - run_started
+    results.sort(key=lambda result: result.request_index)
     return {
-        "summary": summarize(results, classes),
+        "summary": summarize(results, classes, elapsed_seconds),
         "requests": [result.__dict__ for result in results],
     }
 

@@ -1,0 +1,14 @@
+# Repeat the same KV-offload workload from a confirmed cold-cache state.
+# Use with the priority-mix harness and kv_cache_offload.yaml.
+
+reset_caches: true
+reset_caches_required: true
+treatment_max_attempts: 1
+treatment_stop_on_error: true
+
+treatments:
+  - name: repetition-1
+  - name: repetition-2
+  - name: repetition-3
+  - name: repetition-4
+  - name: repetition-5

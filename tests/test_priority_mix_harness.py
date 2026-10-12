@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 import socket
 import sys
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
-
 
 _HARNESS_PATH = (
     Path(__file__).resolve().parent.parent
@@ -71,6 +70,129 @@ def test_traffic_class_request_overrides_prompt_template() -> None:
         "critical prefix critical 7. critical prefix critical 7. "
     )
     assert payload["max_tokens"] == 8
+
+
+def test_build_payload_can_send_vllm_priority_in_body() -> None:
+    profile = {
+        "model": "test-model",
+        "sendPriorityInBody": True,
+        "api": {"type": "completions"},
+        "trafficClasses": [
+            {
+                "name": "fast-tier",
+                "weight": 1,
+                "priority": 0,
+            }
+        ],
+    }
+
+    traffic_class = priority_mix.traffic_classes(profile)[0]
+    payload = priority_mix.build_payload(profile, traffic_class)
+
+    assert payload["priority"] == 0
+
+
+def test_build_payload_requests_streaming_usage() -> None:
+    profile = {
+        "model": "test-model",
+        "request": {"stream": True, "includeUsage": True},
+        "trafficClasses": [{"name": "fast-tier", "weight": 1}],
+    }
+
+    traffic_class = priority_mix.traffic_classes(profile)[0]
+    payload = priority_mix.build_payload(profile, traffic_class)
+
+    assert payload["stream_options"] == {"include_usage": True}
+
+
+def test_build_payload_does_not_send_priority_by_default() -> None:
+    profile = {
+        "model": "test-model",
+        "trafficClasses": [
+            {
+                "name": "router-managed",
+                "weight": 1,
+                "priority": 100,
+            }
+        ],
+    }
+
+    traffic_class = priority_mix.traffic_classes(profile)[0]
+    payload = priority_mix.build_payload(profile, traffic_class)
+
+    assert "priority" not in payload
+
+
+def test_render_prompt_builds_reusable_prefix_groups() -> None:
+    request = {
+        "prefixGroups": 2,
+        "sharedPromptTemplate": "group-{group} common ",
+        "sharedPromptRepeat": 2,
+        "promptTemplate": "request-{request_index}",
+    }
+
+    first = priority_mix.render_prompt(request, None, 0)
+    reused = priority_mix.render_prompt(request, None, 2)
+    other = priority_mix.render_prompt(request, None, 1)
+
+    assert first == "group-0 common group-0 common request-0"
+    assert reused == "group-0 common group-0 common request-2"
+    assert other.startswith("group-1 common group-1 common ")
+
+
+def test_run_uses_class_local_prefix_groups_and_records_request_identity(
+    monkeypatch,
+) -> None:
+    def fake_send_request(
+        _url,
+        _payload,
+        traffic_class,
+        _timeout_seconds,
+        **metadata,
+    ):
+        return priority_mix.RequestResult(
+            traffic_class=traffic_class.name,
+            status_code=200,
+            latency_ms=1,
+            output_tokens=2,
+            request_index=metadata["request_index"],
+            class_request_index=metadata["class_request_index"],
+            priority=traffic_class.priority,
+            prefix_group=metadata["prefix_group_id"],
+        )
+
+    monkeypatch.setattr(priority_mix, "send_request", fake_send_request)
+    profile = {
+        "endpoint_url": "http://unused.invalid",
+        "model": "test-model",
+        "load": {"rate_per_second": 0, "max_in_flight": 2, "total_requests": 8},
+        "trafficClasses": [
+            {
+                "name": "fast-tier",
+                "weight": 1,
+                "priority": 0,
+                "request": {"prefixGroups": 2},
+            },
+            {
+                "name": "slow-tier",
+                "weight": 1,
+                "priority": 5,
+                "request": {"prefixGroups": 2},
+            },
+        ],
+    }
+
+    output = priority_mix.run(profile, priority_mix.logging.getLogger("test"))
+
+    assert [row["request_index"] for row in output["requests"]] == list(range(8))
+    for class_name, priority in (("fast-tier", 0), ("slow-tier", 5)):
+        rows = [row for row in output["requests"] if row["traffic_class"] == class_name]
+        assert [row["class_request_index"] for row in rows] == [0, 1, 2, 3]
+        assert [row["prefix_group"] for row in rows] == [0, 1, 0, 1]
+        assert {row["priority"] for row in rows} == {priority}
+
+    assert output["summary"]["request_throughput_per_second"] > 0
+    assert output["summary"]["output_token_throughput_per_second"] > 0
 
 
 def test_priority_mix_sends_each_objective_header() -> None:
