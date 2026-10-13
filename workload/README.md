@@ -127,6 +127,7 @@ workload/
       random_symmetrical.yaml.in
       sanity_random.yaml.in
       shared_prefix_multi_turn_chat.yaml.in
+      speculative_prefill_multi_turn.yaml.in
       shared_prefix_synthetic.yaml.in
       shared_prefix_synthetic_heavy.yaml.in
       shared_prefix_synthetic_short.yaml.in
@@ -277,6 +278,13 @@ generates reports and llm-d-benchmark collects results. Sweep-generated stages
 do not emit the event because their final stage is not known from the rendered
 profile before load generation starts.
 
+For shared-prefix chat multi-turn workloads, the inference-perf wrapper loads
+`inference_perf_chat_multiturn.py` before invoking inference-perf. The adapter
+keeps multi-turn history as chat messages, which is required for profiles such
+as `speculative_prefill_multi_turn.yaml.in` that use `api.type: chat`. It also
+removes Qwen-style `<think>...</think>` content from assistant history so hidden
+reasoning is not fed into the next request.
+
 ### How Harness Scripts Are Mounted
 
 The scripts in `workload/harnesses/` are packaged into a Kubernetes ConfigMap named `llmdbench-harness-scripts` by step 05. The harness pod template (`20_harness_pod.yaml.j2`) mounts this ConfigMap at `/workspace/harnesses/` with executable permissions (`defaultMode: 0755`).
@@ -338,7 +346,7 @@ Unknown tokens (not in the substitution map) are left unchanged.
 
 ### Available Profiles by Harness
 
-#### inference-perf (35 profiles)
+#### inference-perf (36 profiles)
 
 | Profile | Load Pattern | Data Type | Description |
 |---------|-------------|-----------|-------------|
@@ -348,6 +356,7 @@ Unknown tokens (not in the substitution map) are left unchanged.
 | `code_completion_synthetic.yaml.in` | Variable | Synthetic code | Code completion workload |
 | `random_concurrent.yaml.in` | Concurrent | Random synthetic | Concurrent random requests |
 | `shared_prefix_multi_turn_chat.yaml.in` | Variable | Shared prefix | Multi-turn with common prefixes |
+| `speculative_prefill_multi_turn.yaml.in` | Constant 0.05 req/s, 120s | Shared prefix | Single-session multi-turn speculative prefill with 20s inter-turn delay |
 | `shared_prefix_synthetic.yaml.in` | Variable | Shared prefix | Shared prefix synthetic data |
 | `shared_prefix_synthetic_short.yaml.in` | Variable | Shared prefix | Short shared prefix workload |
 | `summarization_synthetic.yaml.in` | Variable | Synthetic | Long-context summarization |
