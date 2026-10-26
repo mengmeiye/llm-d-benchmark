@@ -37,10 +37,18 @@ import pytest
 if "planner" not in sys.modules:
     planner_stub = types.ModuleType("planner")
     capacity_stub = types.ModuleType("planner.capacity_planner")
+
     # Module-level __getattr__ catches any name lookup (PEP 562), so we
     # don't have to enumerate the planner exports capacity_validator.py
-    # uses -- future additions stay covered without test churn.
-    capacity_stub.__getattr__ = lambda name: lambda *a, **kw: None  # type: ignore[attr-defined]
+    # uses -- future additions stay covered without test churn. Dunder
+    # lookups (``__file__``) must still fail: inspect/coverage call
+    # ``__file__.endswith`` and crash on a function.
+    def _stub_attr(name: str):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return lambda *a, **kw: None
+
+    capacity_stub.__getattr__ = _stub_attr  # type: ignore[attr-defined]
     sys.modules["planner"] = planner_stub
     sys.modules["planner.capacity_planner"] = capacity_stub
 
@@ -281,3 +289,40 @@ class TestTimeoutReturnsError:
         # And the helper logged the error (so it's visible even if caller
         # ignores the return value).
         logger.log_error.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Verbose: "Model not ready yet" names the last probe failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cls,module",
+    [
+        (BaseSmoketest, "llmdbenchmark.smoketests.base"),
+        (SmoketestStep, "llmdbenchmark.standup.steps.step_10_smoketest"),
+    ],
+)
+@pytest.mark.parametrize("verbose", [True, False])
+def test_not_ready_message_reason_only_when_verbose(cls, module, verbose, monkeypatch):
+    reason = "Curl to svc:80 failed: curl: (7) Failed to connect"
+    polls = iter([reason, None])
+    monkeypatch.setattr(f"{module}.test_model_serving", lambda *a, **kw: next(polls))
+    monkeypatch.setattr(f"{module}.time.sleep", lambda _: None)
+
+    cmd = MagicMock()
+    cmd.dry_run = False
+    cmd.verbose = verbose
+    ctx = MagicMock()
+    inst = cls.__new__(cls)
+    assert (
+        inst._wait_for_model_ready(cmd, ctx, "ns", "svc", 80, "m", timeout=60) is None
+    )
+
+    lines = [
+        c.args[0]
+        for c in ctx.logger.log_info.call_args_list
+        if c.args[0].startswith("Model not ready yet")
+    ]
+    assert len(lines) == 1
+    assert (f"Last probe: {reason}" in lines[0]) is verbose
