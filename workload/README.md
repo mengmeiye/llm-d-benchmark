@@ -121,6 +121,7 @@ workload/
       random_prefill_heavy.yaml.in
       random_symmetrical.yaml.in
       sanity_random.yaml.in
+      shared_kv_pool_reuse.yaml.in
       shared_prefix_multi_turn_chat.yaml.in
       shared_prefix_synthetic.yaml.in
       shared_prefix_synthetic_heavy.yaml.in
@@ -323,7 +324,7 @@ Unknown tokens (not in the substitution map) are left unchanged.
 
 ### Available Profiles by Harness
 
-#### inference-perf (36 profiles)
+#### inference-perf (37 profiles)
 
 | Profile | Load Pattern | Data Type | Description |
 |---------|-------------|-----------|-------------|
@@ -363,6 +364,7 @@ Unknown tokens (not in the substitution map) are left unchanged.
 | `random_symmetrical.yaml.in` | Poisson 1.04 req/s, 1200s | Random 2K/2K tokens |  |
 | `shared_prefix_synthetic_heavy.yaml.in` | Constant 0.5→2 req/s | Shared prefix (32 groups, 4K prefix) |  |
 | `weka_traces.yaml.in` | Trace session replay, 64 concurrent sessions | Weka agent traces (cc-traces-weka) |  |
+| `shared_kv_pool_reuse.yaml.in` | Constant 4 req/s, 600s | Shared prefix (48 groups, 8K prefix) | Shared KV pool reuse; long steady window for failover and scale-out events |
 
 #### guidellm (6 profiles)
 

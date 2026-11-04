@@ -1,0 +1,35 @@
+# Shared-prefix load for the shared-kv-pool guide. Groups of requests share a
+# long system prompt; with a node-shared KV pool, a prefix computed on one
+# replica is loaded (not recomputed) on the others. A steady rate over a long
+# window leaves time to delete or add a replica mid-run.
+load:
+  type: constant
+  stages:
+  - rate: 4
+    duration: 600
+api:
+  type: completion
+  streaming: true
+server:
+  type: vllm
+  model_name: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL
+  base_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_TOKENIZER
+data:
+  type: shared_prefix
+  shared_prefix:
+    num_groups: 48                # More prefixes than one replica's GPU cache holds
+    num_prompts_per_group: 64
+    system_prompt_len: 8192       # Long shared prefix: prefill dominates TTFT
+    question_len: 128
+    output_len: 128
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: true
+storage:
+  local_storage:
+    path: /workspace

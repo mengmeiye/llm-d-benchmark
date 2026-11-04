@@ -1,0 +1,103 @@
+# ============================================================================
+# SHARED KV-CACHE POOL WELL LIT PATH
+# Based on https://github.com/llm-d/llm-d/tree/main/guides/shared-kv-pool/README.md
+#
+# vLLM replicas on a GPU node share one KV pool in node memory (tmpfs): each
+# replica keeps a private CPU tier and a filesystem tier on the node pool,
+# which a node-local kv-pool-manager DaemonSet publishes, evicts, and
+# destroys. The router indexes the pool tier under the node, so a prefix one
+# replica computed routes to its siblings, survives that replica's failure,
+# and counts for replicas added to the node.
+#
+# Deploys via the upstream guide's own manifests (pool manager, modelserver
+# kustomize, router helm chart). The guide is the source of truth for the
+# stack; the kustomize.* keys below are the only way to modify it.
+#
+# Both images must carry the shared-pool support: managed fs pools in vLLM
+# (set the image in `kustomize.patches` below) and shared tiers in the router
+# (set `kustomize.extraHelmSets`, e.g. in a copy of this file or with
+# `--set kustomize.extraHelmSets.router.epp.image.tag=<tag>`).
+# ============================================================================
+
+scenario:
+  - name: "shared-kv-pool"
+
+    common:
+      # -------------------------------------------------------------------------
+      # Model Configuration (harness-side metadata; the deployed model is
+      # defined by the guide's manifests)
+      # -------------------------------------------------------------------------
+      model:
+        name: Qwen/Qwen3-8B
+        shortName: qwen-qwen3-8b
+        path: models/Qwen/Qwen3-8B
+        huggingfaceId: Qwen/Qwen3-8B
+        size: 100Gi
+        maxModelLen: 32768
+        blockSize: 64
+        gpuMemoryUtilization: 0.9
+
+      monitoring:
+        timeSeriesMetrics:
+          - vllm:kv_cache_usage_perc
+          - vllm:num_requests_running
+          - vllm:num_requests_waiting
+          - vllm:prefix_cache_hits_total
+          - vllm:prefix_cache_queries_total
+          - vllm:external_prefix_cache_hits_total
+          - vllm:external_prefix_cache_queries_total
+          - vllm:kv_offload_total_bytes_total
+          - vllm:kv_offload_total_time_total
+          - vllm:kv_offload_tiering_read_bytes_total
+          - vllm:kv_offload_tiering_write_bytes_total
+          - vllm:kv_offload_tiering_chunk_hits_total
+          - vllm:kv_offload_tiering_chunk_queries_total
+          - vllm:prompt_tokens_total
+          - vllm:generation_tokens_total
+          - vllm:request_success_total
+          - container_memory_usage_bytes
+          - DCGM_FI_DEV_GPU_UTIL
+          - inference_pool_ready_pods
+
+    kustomize:
+      enabled: true
+      guideName: "shared-kv-pool"
+      repoPath: ""
+      repoRef: "main"
+      gaieVersion: ""
+      acceleratorBackend: "gpu/vllm"
+      monitoring: false
+      overlayPath: ""
+      extraHelmValues: []
+      # Router image with shared tiers. Keys are passed to helm as --set.
+      extraHelmSets: {}
+      #   router.epp.image.registry: <registry>
+      #   router.epp.image.repository: <repository>
+      #   router.epp.image.tag: <tag>
+      guideVariableOverrides:
+        INFRA_PROVIDER: ocp
+      # The guide's model server overlay uses the release vLLM image. Replace
+      # it with a build that has managed fs pools, e.g.
+      #   - patch: |
+      #       apiVersion: apps/v1
+      #       kind: Deployment
+      #       metadata: { name: decode }
+      #       spec:
+      #         template:
+      #           spec:
+      #             containers:
+      #               - name: modelserver
+      #                 image: <registry>/<vllm-image>:<tag>
+      patches: []
+
+    # The guide's manifests are the only deploy path for this scenario.
+    modelservice:
+      enabled: false
+      gateway:
+        className: epponly
+
+    harness:
+      name: inference-perf
+      experimentProfile: shared_kv_pool_reuse.yaml
+
+    workDir: "~/data/shared_kv_pool"
